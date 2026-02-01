@@ -3,7 +3,7 @@ package protocol
 import "container/heap"
 
 type queueItem struct {
-	frame    Frame
+	request  *busRequest
 	priority byte
 	seq      uint64
 	index    int
@@ -52,20 +52,20 @@ func (q *priorityQueue) Pop() any {
 	return item
 }
 
-func (q *priorityQueue) push(frame Frame) {
+func (q *priorityQueue) push(request *busRequest) {
 	item := &queueItem{
-		frame:    frame,
-		priority: frame.Source,
+		request:  request,
+		priority: request.frame.Source,
 		seq:      q.seq,
 	}
 	q.seq++
 	heap.Push(q, item)
 }
 
-func (q *priorityQueue) pop() (Frame, bool) {
+func (q *priorityQueue) pop() (*busRequest, bool) {
 	if q.Len() == 0 {
-		return Frame{}, false
+		return nil, false
 	}
 	item := heap.Pop(q).(*queueItem)
-	return item.frame, true
+	return item.request, true
 }

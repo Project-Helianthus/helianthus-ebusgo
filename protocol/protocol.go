@@ -6,6 +6,8 @@ const (
 	AddressBroadcast = byte(0xFE)
 	SymbolEscape     = byte(0xA9)
 	SymbolSyn        = byte(0xAA)
+	SymbolAck        = byte(0x00)
+	SymbolNack       = byte(0xFF)
 )
 
 type FrameType uint8
