@@ -41,8 +41,8 @@ jobs:
             exit 0
           fi
           for pkg in $mains; do
-            echo "tinygo build -target esp32-coreboard-v2 $pkg"
-            tinygo build -target esp32-coreboard-v2 "$pkg"
+            echo "tinygo build -target esp32 $pkg"
+            tinygo build -target esp32 "$pkg"
           done
 
   lint:
