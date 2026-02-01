@@ -18,15 +18,17 @@ type readEvent struct {
 }
 
 type scriptedTransport struct {
-	mu     sync.Mutex
-	reads  []readEvent
-	writes [][]byte
+	mu        sync.Mutex
+	reads     []readEvent
+	writes    [][]byte
+	readCount int
 }
 
 func (s *scriptedTransport) ReadByte() (byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.readCount++
 	if len(s.reads) == 0 {
 		return 0, ebuserrors.ErrTimeout
 	}
@@ -52,6 +54,123 @@ func (s *scriptedTransport) writeCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.writes)
+}
+
+func (s *scriptedTransport) readsConsumed() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readCount
+}
+
+func TestBus_BroadcastDoesNotReadAck(t *testing.T) {
+	t.Parallel()
+
+	tr := &scriptedTransport{
+		reads: []readEvent{
+			{err: ebuserrors.ErrTimeout},
+		},
+	}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %+v; want nil", resp)
+	}
+	if tr.readsConsumed() != 0 {
+		t.Fatalf("reads = %d; want 0", tr.readsConsumed())
+	}
+	if tr.writeCount() != 1 {
+		t.Fatalf("writes = %d; want 1", tr.writeCount())
+	}
+}
+
+func TestBus_MasterMasterAckOnly(t *testing.T) {
+	t.Parallel()
+
+	tr := &scriptedTransport{
+		reads: []readEvent{
+			{value: protocol.SymbolAck},
+		},
+	}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %+v; want nil", resp)
+	}
+	if tr.readsConsumed() != 1 {
+		t.Fatalf("reads = %d; want 1", tr.readsConsumed())
+	}
+	if tr.writeCount() != 1 {
+		t.Fatalf("writes = %d; want 1", tr.writeCount())
+	}
+}
+
+func TestBus_ResponseCRCMismatch(t *testing.T) {
+	t.Parallel()
+
+	tr := &scriptedTransport{
+		reads: []readEvent{
+			{value: protocol.SymbolAck},
+			{value: 0x01},
+			{value: 0x10},
+			{value: 0x00},
+		},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	_, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if !errors.Is(err, ebuserrors.ErrCRCMismatch) {
+		t.Fatalf("Send error = %v; want ErrCRCMismatch", err)
+	}
+	if tr.writeCount() != 1 {
+		t.Fatalf("writes = %d; want 1", tr.writeCount())
+	}
 }
 
 func TestBus_RetryOnTimeout(t *testing.T) {
