@@ -132,6 +132,43 @@ func TestBus_MasterMasterAckOnly(t *testing.T) {
 	}
 }
 
+func TestBus_ReadAckSkipsSyn(t *testing.T) {
+	t.Parallel()
+
+	tr := &scriptedTransport{
+		reads: []readEvent{
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolAck},
+		},
+	}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %+v; want nil", resp)
+	}
+	if tr.readsConsumed() != 3 {
+		t.Fatalf("reads = %d; want 3", tr.readsConsumed())
+	}
+	if tr.writeCount() != 1 {
+		t.Fatalf("writes = %d; want 1", tr.writeCount())
+	}
+}
+
 func TestBus_ResponseCRCMismatch(t *testing.T) {
 	t.Parallel()
 
