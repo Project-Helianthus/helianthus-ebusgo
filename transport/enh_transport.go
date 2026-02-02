@@ -41,6 +41,77 @@ func NewENHTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *EN
 	}
 }
 
+// Init performs an ENH initialization handshake by sending ENHReqInit(features)
+// and waiting for ENHResResetted(features).
+//
+// Any RESETTED frames observed later will reset the local parser and echo state.
+func (t *ENHTransport) Init(features byte) error {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+
+	t.writeMu.Lock()
+	seq := EncodeENH(ENHReqInit, features)
+	written := 0
+	for written < len(seq) {
+		if err := t.setWriteDeadline(); err != nil {
+			t.writeMu.Unlock()
+			return t.mapWriteError(err)
+		}
+		n, err := t.conn.Write(seq[written:])
+		written += n
+		if err != nil {
+			t.writeMu.Unlock()
+			return t.mapWriteError(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	t.writeMu.Unlock()
+	if written != len(seq) {
+		return ebuserrors.ErrInvalidPayload
+	}
+
+	for {
+		if err := t.setReadDeadline(); err != nil {
+			return t.mapReadError(err)
+		}
+
+		n, err := t.conn.Read(t.buffer)
+		if err != nil {
+			return t.mapReadError(err)
+		}
+		if n == 0 {
+			continue
+		}
+
+		msgs, err := t.parser.Parse(t.buffer[:n])
+		if err != nil {
+			return err
+		}
+		for _, msg := range msgs {
+			switch msg.Kind {
+			case ENHMessageData:
+				t.pending = append(t.pending, msg.Byte)
+			case ENHMessageFrame:
+				switch msg.Command {
+				case ENHResReceived:
+					if !t.shouldSuppressEcho(msg.Data) {
+						t.pending = append(t.pending, msg.Data)
+					}
+				case ENHResResetted:
+					t.resetStateLocked()
+					return nil
+				case ENHResErrorEBUS:
+					return fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				case ENHResErrorHost:
+					return fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				}
+			}
+		}
+	}
+}
+
 func (t *ENHTransport) ReadByte() (byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -73,10 +144,13 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			case ENHMessageData:
 				t.pending = append(t.pending, msg.Byte)
 			case ENHMessageFrame:
-				if msg.Command == ENHResReceived {
+				switch msg.Command {
+				case ENHResReceived:
 					if !t.shouldSuppressEcho(msg.Data) {
 						t.pending = append(t.pending, msg.Data)
 					}
+				case ENHResResetted:
+					t.resetStateLocked()
 				}
 			}
 		}
@@ -200,6 +274,8 @@ func (t *ENHTransport) StartArbitration(master byte) error {
 					if !t.shouldSuppressEcho(msg.Data) {
 						t.pending = append(t.pending, msg.Data)
 					}
+				case ENHResResetted:
+					t.resetStateLocked()
 				case ENHResStarted:
 					if msg.Data == master {
 						arbitrationDone = true
@@ -219,6 +295,14 @@ func (t *ENHTransport) StartArbitration(master byte) error {
 
 func (t *ENHTransport) Close() error {
 	return t.conn.Close()
+}
+
+func (t *ENHTransport) resetStateLocked() {
+	t.parser.Reset()
+	t.pending = nil
+	t.echoMu.Lock()
+	t.echoPending = nil
+	t.echoMu.Unlock()
 }
 
 func (t *ENHTransport) setReadDeadline() error {

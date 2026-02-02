@@ -46,6 +46,84 @@ func TestENHTransport_ReadByteDecodesFrames(t *testing.T) {
 	}
 }
 
+func TestENHTransport_InitHandshake(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInit, 0x00)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected init bytes")
+			return
+		}
+
+		resp := transport.EncodeENH(transport.ENHResResetted, 0x00)
+		_, err := server.Write(resp[:])
+		serverErr <- err
+	}()
+
+	if err := enh.Init(0x00); err != nil {
+		t.Fatalf("Init error = %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		reset := transport.EncodeENH(transport.ENHResResetted, 0x00)
+		payload := []byte{reset[0], reset[1], 0x11, 0x22}
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	if _, err := enh.Write([]byte{0x11}); err != nil {
+		t.Fatalf("Write error = %v", err)
+	}
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if got != 0x11 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x11", got)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestENHTransport_WriteEncodesFrames(t *testing.T) {
 	t.Parallel()
 
