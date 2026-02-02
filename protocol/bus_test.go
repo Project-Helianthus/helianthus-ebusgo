@@ -83,6 +83,60 @@ func (s *scriptedTransport) writesFlattened() []byte {
 	return out
 }
 
+type collisionOnceTransport struct {
+	mu sync.Mutex
+
+	collideOnFirstEcho bool
+	awaitingEcho       bool
+	lastWrite          byte
+
+	inbound      []readEvent
+	writes       [][]byte
+	echoReads    int
+	inboundReads int
+}
+
+func (t *collisionOnceTransport) ReadByte() (byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.awaitingEcho {
+		t.awaitingEcho = false
+		t.echoReads++
+		if t.collideOnFirstEcho {
+			t.collideOnFirstEcho = false
+			return t.lastWrite ^ 0xFF, nil
+		}
+		return t.lastWrite, nil
+	}
+
+	t.inboundReads++
+	if len(t.inbound) == 0 {
+		return 0, ebuserrors.ErrTimeout
+	}
+	ev := t.inbound[0]
+	t.inbound = t.inbound[1:]
+	return ev.value, ev.err
+}
+
+func (t *collisionOnceTransport) Write(payload []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	copyPayload := append([]byte(nil), payload...)
+	t.writes = append(t.writes, copyPayload)
+	if len(payload) == 0 {
+		return 0, nil
+	}
+	t.lastWrite = payload[0]
+	t.awaitingEcho = true
+	return len(payload), nil
+}
+
+func (t *collisionOnceTransport) Close() error {
+	return nil
+}
+
 func TestBus_BroadcastDoesNotReadAck(t *testing.T) {
 	t.Parallel()
 
@@ -559,6 +613,60 @@ func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
 	}
 	if len(masters) != 2 {
 		t.Fatalf("arbitration calls = %d; want 2", len(masters))
+	}
+}
+
+func TestBus_RetryOnCollisionDuringWriteWaitsForSyn(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x07,
+		Secondary: 0x04,
+	}
+
+	data := byte(0x10)
+	respCRC := protocol.CRC([]byte{0x01, data})
+	tr := &collisionOnceTransport{
+		collideOnFirstEcho: true,
+		inbound: []readEvent{
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolAck},
+			{value: 0x01},
+			{value: data},
+			{value: respCRC},
+		},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 1,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 1,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, frame)
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp == nil || len(resp.Data) != 1 || resp.Data[0] != data {
+		t.Fatalf("response = %+v; want data [0x10]", resp)
+	}
+
+	tr.mu.Lock()
+	inReads := tr.inboundReads
+	tr.mu.Unlock()
+	if inReads != 6 {
+		t.Fatalf("inbound reads = %d; want 6", inReads)
 	}
 }
 

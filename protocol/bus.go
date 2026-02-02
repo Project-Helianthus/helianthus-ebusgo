@@ -197,6 +197,11 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 		}
 		if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts); retry {
 			timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
+			if errors.Is(err, ebuserrors.ErrBusCollision) {
+				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+					return nil, b.wrapRetryError(waitErr)
+				}
+			}
 			continue
 		}
 		return nil, b.wrapRetryError(err)
@@ -472,7 +477,7 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte) error {
 		return err
 	}
 	if echo == SymbolSyn && raw != SymbolSyn {
-		return fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrTimeout)
+		return fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
 	}
 	if echo != raw {
 		return fmt.Errorf("echo mismatch (sent 0x%02x, got 0x%02x): %w", raw, echo, ebuserrors.ErrBusCollision)
