@@ -25,10 +25,10 @@ type ENHTransport struct {
 	writeMu sync.Mutex
 	echoMu  sync.Mutex
 
-	parser  ENHParser
-	pending []byte
-	buffer  []byte
-	echoes  []byte
+	parser      ENHParser
+	pending     []byte
+	buffer      []byte
+	echoPending []byte
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -56,15 +56,15 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			return 0, t.mapReadError(err)
 		}
 
-		n, err := t.conn.Read(t.buffer)
+		bytesRead, err := t.conn.Read(t.buffer)
 		if err != nil {
 			return 0, t.mapReadError(err)
 		}
-		if n == 0 {
+		if bytesRead == 0 {
 			continue
 		}
 
-		msgs, err := t.parser.Parse(t.buffer[:n])
+		msgs, err := t.parser.Parse(t.buffer[:bytesRead])
 		if err != nil {
 			return 0, err
 		}
@@ -94,32 +94,38 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	}
 
 	framed := make([]byte, 0, len(payload)*2)
-	for _, b := range payload {
-		seq := EncodeENH(ENHReqSend, b)
+	for _, payloadByte := range payload {
+		seq := EncodeENH(ENHReqSend, payloadByte)
 		framed = append(framed, seq[0], seq[1])
 	}
 
-	written := 0
-	for written < len(framed) {
+	bytesWritten := 0
+	queuedFrames := 0
+	for bytesWritten < len(framed) {
 		if err := t.setWriteDeadline(); err != nil {
-			return t.finishWrite(payload, written, t.mapWriteError(err))
+			return queuedFrames, t.mapWriteError(err)
 		}
 
-		n, err := t.conn.Write(framed[written:])
-		written += n
-		if err != nil {
-			return t.finishWrite(payload, written, t.mapWriteError(err))
+		chunkWritten, err := t.conn.Write(framed[bytesWritten:])
+		bytesWritten += chunkWritten
+		framesWritten := bytesWritten / 2
+		if framesWritten > queuedFrames {
+			t.enqueueEcho(payload[queuedFrames:framesWritten])
+			queuedFrames = framesWritten
 		}
-		if n == 0 {
+		if err != nil {
+			return queuedFrames, t.mapWriteError(err)
+		}
+		if chunkWritten == 0 {
 			break
 		}
 	}
 
-	if written%2 != 0 {
-		return t.finishWrite(payload, written, ebuserrors.ErrInvalidPayload)
+	if bytesWritten%2 != 0 {
+		return queuedFrames, ebuserrors.ErrInvalidPayload
 	}
 
-	return t.finishWrite(payload, written, nil)
+	return queuedFrames, nil
 }
 
 func (t *ENHTransport) Close() error {
@@ -160,27 +166,26 @@ func (t *ENHTransport) mapWriteError(err error) error {
 	return fmt.Errorf("enh transport write failed: %v: %w", err, ebuserrors.ErrTransportClosed)
 }
 
-func (t *ENHTransport) finishWrite(payload []byte, written int, err error) (int, error) {
-	writtenPayload := written / 2
-	if writtenPayload > 0 {
-		t.echoMu.Lock()
-		t.echoes = append(t.echoes, payload[:writtenPayload]...)
-		t.echoMu.Unlock()
-	}
-	return writtenPayload, err
-}
-
 func (t *ENHTransport) shouldSuppressEcho(value byte) bool {
 	t.echoMu.Lock()
 	defer t.echoMu.Unlock()
-	if len(t.echoes) == 0 {
+	if len(t.echoPending) == 0 {
 		return false
 	}
-	if t.echoes[0] != value {
+	if t.echoPending[0] != value {
 		return false
 	}
-	t.echoes = t.echoes[1:]
+	t.echoPending = t.echoPending[1:]
 	return true
+}
+
+func (t *ENHTransport) enqueueEcho(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	t.echoMu.Lock()
+	t.echoPending = append(t.echoPending, payload...)
+	t.echoMu.Unlock()
 }
 
 func isTimeout(err error) bool {

@@ -31,13 +31,13 @@ func TestENHTransport_ReadByteDecodesFrames(t *testing.T) {
 	}()
 
 	want := []byte{0x11, 0x22, 0x44}
-	for i, expected := range want {
+	for index, expected := range want {
 		got, err := enh.ReadByte()
 		if err != nil {
-			t.Fatalf("ReadByte[%d] error = %v", i, err)
+			t.Fatalf("ReadByte[%d] error = %v", index, err)
 		}
 		if got != expected {
-			t.Fatalf("ReadByte[%d] = 0x%02x; want 0x%02x", i, got, expected)
+			t.Fatalf("ReadByte[%d] = 0x%02x; want 0x%02x", index, got, expected)
 		}
 	}
 
@@ -68,12 +68,12 @@ func TestENHTransport_WriteEncodesFrames(t *testing.T) {
 		readCh <- buf
 	}()
 
-	n, err := enh.Write([]byte{0x10, 0x20})
+	bytesWritten, err := enh.Write([]byte{0x10, 0x20})
 	if err != nil {
 		t.Fatalf("Write error = %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("Write = %d; want 2", n)
+	if bytesWritten != 2 {
+		t.Fatalf("Write = %d; want 2", bytesWritten)
 	}
 
 	var got []byte
@@ -130,45 +130,46 @@ func TestENHTransport_SuppressesEchoedBytes(t *testing.T) {
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
-	drainErr := make(chan error, 1)
-	// Goroutine exits after draining the written frames.
+	serverErr := make(chan error, 1)
+	outbound := []byte{0x11, 0x22, 0x33}
+	// Goroutine exits after draining frames and writing responses.
 	go func() {
-		buf := make([]byte, 4)
-		_, err := io.ReadFull(server, buf)
-		drainErr <- err
+		buf := make([]byte, len(outbound)*2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		seqEcho1 := transport.EncodeENH(transport.ENHResReceived, 0x11)
+		seqNonEcho := transport.EncodeENH(transport.ENHResReceived, 0x88)
+		seqEcho3 := transport.EncodeENH(transport.ENHResReceived, 0x33)
+		response := []byte{
+			seqEcho1[0], seqEcho1[1],
+			0x55,
+			0x22,
+			seqNonEcho[0], seqNonEcho[1],
+			seqEcho3[0], seqEcho3[1],
+			0x44,
+		}
+		_, err := server.Write(response)
+		serverErr <- err
 	}()
 
-	if _, err := enh.Write([]byte{0x10, 0x20}); err != nil {
+	if _, err := enh.Write(outbound); err != nil {
 		t.Fatalf("Write error = %v", err)
 	}
-	if err := <-drainErr; err != nil {
-		t.Fatalf("drain error = %v", err)
-	}
 
-	seqEcho1 := transport.EncodeENH(transport.ENHResReceived, 0x10)
-	seqEcho2 := transport.EncodeENH(transport.ENHResReceived, 0x20)
-	seqData := transport.EncodeENH(transport.ENHResReceived, 0x33)
-
-	payload := []byte{seqEcho1[0], seqEcho1[1], 0x11, seqEcho2[0], seqEcho2[1], seqData[0], seqData[1]}
-	writeErr := make(chan error, 1)
-	// Goroutine exits after the payload write completes.
-	go func() {
-		_, err := server.Write(payload)
-		writeErr <- err
-	}()
-
-	want := []byte{0x11, 0x33}
-	for i, expected := range want {
+	want := []byte{0x55, 0x88, 0x44}
+	for index, expected := range want {
 		got, err := enh.ReadByte()
 		if err != nil {
-			t.Fatalf("ReadByte[%d] error = %v", i, err)
+			t.Fatalf("ReadByte[%d] error = %v", index, err)
 		}
 		if got != expected {
-			t.Fatalf("ReadByte[%d] = 0x%02x; want 0x%02x", i, got, expected)
+			t.Fatalf("ReadByte[%d] = 0x%02x; want 0x%02x", index, got, expected)
 		}
 	}
 
-	if err := <-writeErr; err != nil {
-		t.Fatalf("writer error = %v", err)
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
 	}
 }
