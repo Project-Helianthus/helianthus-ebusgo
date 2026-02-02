@@ -719,4 +719,48 @@ func TestBus_RetryOnCollisionDoesNotConsumeTimeoutRetries(t *testing.T) {
 	}
 }
 
+func TestBus_CollisionRetryRespectsTimeoutRetriesWithoutDeadline(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x07,
+		Secondary: 0x04,
+	}
+
+	data := byte(0x10)
+	respCRC := protocol.CRC([]byte{0x01, data})
+	tr := &collisionOnceTransport{
+		collideOnFirstEcho: true,
+		inbound: []readEvent{
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolAck},
+			{value: 0x01},
+			{value: data},
+			{value: respCRC},
+		},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	runCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(runCtx)
+
+	_, err := bus.Send(context.Background(), frame)
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("Send error = %v; want ErrBusCollision", err)
+	}
+}
+
 var _ transport.RawTransport = (*scriptedTransport)(nil)
