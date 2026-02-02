@@ -339,3 +339,115 @@ func TestENHTransport_SuppressesEchoBeforeWriteReturns(t *testing.T) {
 		t.Fatalf("server error = %v", err)
 	}
 }
+
+func TestENHTransport_StartArbitrationStartedQueuesReceivedBytes(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	master := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	// Goroutine exits after validating the request and sending responses.
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, master)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+
+		started := transport.EncodeENH(transport.ENHResStarted, master)
+		payload := []byte{0x11, started[0], started[1], 0x22}
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	if err := enh.StartArbitration(master); err != nil {
+		t.Fatalf("StartArbitration error = %v", err)
+	}
+
+	got1, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if got1 != 0x11 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x11", got1)
+	}
+
+	got2, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if got2 != 0x22 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x22", got2)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_StartArbitrationFailedQueuesReceivedBytes(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	master := byte(0x10)
+	winner := byte(0x30)
+
+	serverErr := make(chan error, 1)
+	// Goroutine exits after validating the request and sending responses.
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, master)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+
+		failed := transport.EncodeENH(transport.ENHResFailed, winner)
+		payload := []byte{0x33, failed[0], failed[1], 0x44}
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	err := enh.StartArbitration(master)
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
+	}
+
+	got1, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if got1 != 0x33 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x33", got1)
+	}
+
+	got2, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if got2 != 0x44 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x44", got2)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}

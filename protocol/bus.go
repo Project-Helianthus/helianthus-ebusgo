@@ -46,6 +46,10 @@ type busResult struct {
 	err   error
 }
 
+type arbitrationTransport interface {
+	StartArbitration(master byte) error
+}
+
 // Bus orchestrates prioritized frame sending and transaction matching.
 type Bus struct {
 	transport transport.RawTransport
@@ -170,6 +174,14 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			return nil, err
 		}
 
+		if err := b.startArbitration(request.frame.Source); err != nil {
+			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts); retry {
+				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
+				continue
+			}
+			return nil, b.wrapRetryError(err)
+		}
+
 		if err := b.writeFrame(request.frame); err != nil {
 			return nil, fmt.Errorf("bus send write: %w", err)
 		}
@@ -225,8 +237,19 @@ func (b *Bus) retryPolicy(frameType FrameType) RetryPolicy {
 	}
 }
 
+func (b *Bus) startArbitration(master byte) error {
+	tr, ok := b.transport.(arbitrationTransport)
+	if !ok {
+		return nil
+	}
+	if err := tr.StartArbitration(master); err != nil {
+		return fmt.Errorf("bus arbitration failed: %w", err)
+	}
+	return nil
+}
+
 func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int) (bool, int, int) {
-	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
+	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrBusCollision) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		if timeoutAttempts < policy.TimeoutRetries {
 			return true, timeoutAttempts + 1, nackAttempts
 		}
@@ -240,6 +263,9 @@ func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts in
 }
 
 func (b *Bus) wrapRetryError(err error) error {
+	if errors.Is(err, ebuserrors.ErrBusCollision) {
+		return fmt.Errorf("bus send collision: %w", err)
+	}
 	if errors.Is(err, ebuserrors.ErrTimeout) {
 		return fmt.Errorf("bus send timeout: %w", err)
 	}
