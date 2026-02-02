@@ -17,6 +17,17 @@ type readEvent struct {
 	err   error
 }
 
+func ackEvents(count int) []readEvent {
+	if count <= 0 {
+		return nil
+	}
+	events := make([]readEvent, count)
+	for i := range events {
+		events[i] = readEvent{value: protocol.SymbolAck}
+	}
+	return events
+}
+
 type scriptedTransport struct {
 	mu        sync.Mutex
 	reads     []readEvent
@@ -100,10 +111,16 @@ func TestBus_BroadcastDoesNotReadAck(t *testing.T) {
 func TestBus_MasterMasterAckOnly(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
 	tr := &scriptedTransport{
-		reads: []readEvent{
-			{value: protocol.SymbolAck},
-		},
+		reads: ackEvents(6 + len(frame.Data)),
 	}
 	config := protocol.DefaultBusConfig()
 	bus := protocol.NewBus(tr, config, 8)
@@ -111,21 +128,15 @@ func TestBus_MasterMasterAckOnly(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x30,
-		Target:    0x10,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	resp, err := bus.Send(ctx, frame)
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
 	if resp != nil {
 		t.Fatalf("response = %+v; want nil", resp)
 	}
-	if tr.readsConsumed() != 1 {
-		t.Fatalf("reads = %d; want 1", tr.readsConsumed())
+	if tr.readsConsumed() != 6+len(frame.Data) {
+		t.Fatalf("reads = %d; want %d", tr.readsConsumed(), 6+len(frame.Data))
 	}
 	if tr.writeCount() != 1 {
 		t.Fatalf("writes = %d; want 1", tr.writeCount())
@@ -135,12 +146,24 @@ func TestBus_MasterMasterAckOnly(t *testing.T) {
 func TestBus_ReadAckSkipsSyn(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+	ackCount := 6 + len(frame.Data)
+
+	reads := []readEvent{
+		{value: protocol.SymbolSyn},
+		{value: protocol.SymbolSyn},
+		{value: protocol.SymbolAck},
+	}
+	reads = append(reads, ackEvents(ackCount-1)...)
+
 	tr := &scriptedTransport{
-		reads: []readEvent{
-			{value: protocol.SymbolSyn},
-			{value: protocol.SymbolSyn},
-			{value: protocol.SymbolAck},
-		},
+		reads: reads,
 	}
 	config := protocol.DefaultBusConfig()
 	bus := protocol.NewBus(tr, config, 8)
@@ -148,21 +171,15 @@ func TestBus_ReadAckSkipsSyn(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x30,
-		Target:    0x10,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	resp, err := bus.Send(ctx, frame)
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
 	if resp != nil {
 		t.Fatalf("response = %+v; want nil", resp)
 	}
-	if tr.readsConsumed() != 3 {
-		t.Fatalf("reads = %d; want 3", tr.readsConsumed())
+	if tr.readsConsumed() != ackCount+2 {
+		t.Fatalf("reads = %d; want %d", tr.readsConsumed(), ackCount+2)
 	}
 	if tr.writeCount() != 1 {
 		t.Fatalf("writes = %d; want 1", tr.writeCount())
@@ -172,13 +189,25 @@ func TestBus_ReadAckSkipsSyn(t *testing.T) {
 func TestBus_ReadAckSkipsNoiseBytes(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+	ackCount := 6 + len(frame.Data)
+
+	reads := []readEvent{
+		{value: 0x10},
+		{value: 0x55},
+		{value: protocol.SymbolSyn},
+		{value: protocol.SymbolAck},
+	}
+	reads = append(reads, ackEvents(ackCount-1)...)
+
 	tr := &scriptedTransport{
-		reads: []readEvent{
-			{value: 0x10},
-			{value: 0x55},
-			{value: protocol.SymbolSyn},
-			{value: protocol.SymbolAck},
-		},
+		reads: reads,
 	}
 	config := protocol.DefaultBusConfig()
 	bus := protocol.NewBus(tr, config, 8)
@@ -186,21 +215,15 @@ func TestBus_ReadAckSkipsNoiseBytes(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x30,
-		Target:    0x10,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	resp, err := bus.Send(ctx, frame)
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
 	if resp != nil {
 		t.Fatalf("response = %+v; want nil", resp)
 	}
-	if tr.readsConsumed() != 4 {
-		t.Fatalf("reads = %d; want 4", tr.readsConsumed())
+	if tr.readsConsumed() != ackCount+3 {
+		t.Fatalf("reads = %d; want %d", tr.readsConsumed(), ackCount+3)
 	}
 	if tr.writeCount() != 1 {
 		t.Fatalf("writes = %d; want 1", tr.writeCount())
@@ -210,13 +233,20 @@ func TestBus_ReadAckSkipsNoiseBytes(t *testing.T) {
 func TestBus_ResponseCRCMismatch(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
 	tr := &scriptedTransport{
-		reads: []readEvent{
-			{value: protocol.SymbolAck},
+		reads: append(ackEvents(6+len(frame.Data)), []readEvent{
 			{value: 0x01},
 			{value: 0x10},
 			{value: 0x00},
-		},
+		}...),
 	}
 	config := protocol.BusConfig{
 		MasterSlave: protocol.RetryPolicy{
@@ -233,13 +263,7 @@ func TestBus_ResponseCRCMismatch(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	_, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x10,
-		Target:    0x08,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	_, err := bus.Send(ctx, frame)
 	if !errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		t.Fatalf("Send error = %v; want ErrCRCMismatch", err)
 	}
@@ -251,21 +275,32 @@ func TestBus_ResponseCRCMismatch(t *testing.T) {
 func TestBus_RetryOnCRCMismatch(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+	ackCount := 6 + len(frame.Data)
+
 	data := byte(0x10)
 	goodCRC := protocol.CRC([]byte{0x01, data})
 	badCRC := goodCRC ^ 0xFF
 
 	tr := &scriptedTransport{
-		reads: []readEvent{
-			{value: protocol.SymbolAck},
-			{value: 0x01},
-			{value: data},
-			{value: badCRC},
-			{value: protocol.SymbolAck},
-			{value: 0x01},
-			{value: data},
-			{value: goodCRC},
-		},
+		reads: append(
+			append(ackEvents(ackCount), []readEvent{
+				{value: 0x01},
+				{value: data},
+				{value: badCRC},
+			}...),
+			append(ackEvents(ackCount), []readEvent{
+				{value: 0x01},
+				{value: data},
+				{value: goodCRC},
+			}...)...,
+		),
 	}
 	config := protocol.BusConfig{
 		MasterSlave: protocol.RetryPolicy{
@@ -282,13 +317,7 @@ func TestBus_RetryOnCRCMismatch(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x10,
-		Target:    0x08,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	resp, err := bus.Send(ctx, frame)
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
@@ -303,14 +332,23 @@ func TestBus_RetryOnCRCMismatch(t *testing.T) {
 func TestBus_RetryOnTimeout(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+	ackCount := 6 + len(frame.Data)
+
 	tr := &scriptedTransport{
-		reads: []readEvent{
+		reads: append([]readEvent{
 			{err: ebuserrors.ErrTimeout},
-			{value: protocol.SymbolAck},
+		}, append(ackEvents(ackCount), []readEvent{
 			{value: 0x01},
 			{value: 0x10},
 			{value: protocol.CRC([]byte{0x01, 0x10})},
-		},
+		}...)...),
 	}
 	config := protocol.BusConfig{
 		MasterSlave: protocol.RetryPolicy{
@@ -327,13 +365,7 @@ func TestBus_RetryOnTimeout(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x10,
-		Target:    0x08,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	resp, err := bus.Send(ctx, frame)
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
@@ -348,14 +380,23 @@ func TestBus_RetryOnTimeout(t *testing.T) {
 func TestBus_RetryOnNACK(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+	ackCount := 6 + len(frame.Data)
+
 	tr := &scriptedTransport{
-		reads: []readEvent{
+		reads: append([]readEvent{
 			{value: protocol.SymbolNack},
-			{value: protocol.SymbolAck},
+		}, append(ackEvents(ackCount), []readEvent{
 			{value: 0x01},
 			{value: 0x20},
 			{value: protocol.CRC([]byte{0x01, 0x20})},
-		},
+		}...)...),
 	}
 	config := protocol.BusConfig{
 		MasterSlave: protocol.RetryPolicy{
@@ -372,13 +413,7 @@ func TestBus_RetryOnNACK(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x10,
-		Target:    0x08,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	resp, err := bus.Send(ctx, frame)
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
@@ -393,6 +428,14 @@ func TestBus_RetryOnNACK(t *testing.T) {
 func TestBus_NACKExhaustedWrapsSentinel(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
 	tr := &scriptedTransport{
 		reads: []readEvent{
 			{value: protocol.SymbolNack},
@@ -413,15 +456,55 @@ func TestBus_NACKExhaustedWrapsSentinel(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	_, err := bus.Send(ctx, protocol.Frame{
+	_, err := bus.Send(ctx, frame)
+	if !errors.Is(err, ebuserrors.ErrNACK) {
+		t.Fatalf("Send error = %v; want ErrNACK", err)
+	}
+}
+
+func TestBus_NACKDuringAckSequenceStops(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
 		Source:    0x10,
 		Target:    0x08,
 		Primary:   0x01,
 		Secondary: 0x02,
 		Data:      []byte{0x03},
-	})
+	}
+
+	tr := &scriptedTransport{
+		reads: []readEvent{
+			{value: protocol.SymbolAck},
+			{value: protocol.SymbolAck},
+			{value: protocol.SymbolAck},
+			{value: protocol.SymbolNack},
+		},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	_, err := bus.Send(ctx, frame)
 	if !errors.Is(err, ebuserrors.ErrNACK) {
 		t.Fatalf("Send error = %v; want ErrNACK", err)
+	}
+	if tr.readsConsumed() != 4 {
+		t.Fatalf("reads = %d; want 4", tr.readsConsumed())
+	}
+	if tr.writeCount() != 1 {
+		t.Fatalf("writes = %d; want 1", tr.writeCount())
 	}
 }
 
@@ -517,11 +600,17 @@ func TestBus_ArbitrationCalledBeforeWrite(t *testing.T) {
 func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
 	t.Parallel()
 
+	frame := protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
 	tr := &arbitratingScriptedTransport{
 		arbitrationResults: []error{ebuserrors.ErrBusCollision, nil},
-		reads: []readEvent{
-			{value: protocol.SymbolAck},
-		},
+		reads:             ackEvents(6 + len(frame.Data)),
 	}
 	config := protocol.BusConfig{
 		MasterSlave: protocol.RetryPolicy{
@@ -538,13 +627,7 @@ func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, protocol.Frame{
-		Source:    0x30,
-		Target:    0x10,
-		Primary:   0x01,
-		Secondary: 0x02,
-		Data:      []byte{0x03},
-	})
+	resp, err := bus.Send(ctx, frame)
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
