@@ -283,14 +283,6 @@ func (t *ENHTransport) enqueueEcho(payload []byte) {
 	t.echoMu.Unlock()
 }
 
-func (t *ENHTransport) removeLastEcho() {
-	t.echoMu.Lock()
-	if len(t.echoPending) > 0 {
-		t.echoPending = t.echoPending[:len(t.echoPending)-1]
-	}
-	t.echoMu.Unlock()
-}
-
 func (t *ENHTransport) removeLastEchoN(n int) {
 	if n <= 0 {
 		return
