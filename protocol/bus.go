@@ -278,14 +278,12 @@ func (b *Bus) readAck(runCtx, reqCtx context.Context) error {
 			return err
 		}
 		switch value {
-		case SymbolSyn:
-			continue
 		case SymbolAck:
 			return nil
 		case SymbolNack:
 			return fmt.Errorf("nack received: %w", ebuserrors.ErrNACK)
 		default:
-			return fmt.Errorf("unexpected ack symbol 0x%02x: %w", value, ebuserrors.ErrInvalidPayload)
+			continue
 		}
 	}
 }
