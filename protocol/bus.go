@@ -190,8 +190,10 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			return nil, nil
 		}
 
+		commandBytes := 6 + len(request.frame.Data)
+
 		if frameType == FrameTypeMasterMaster {
-			err := b.readAck(runCtx, request.ctx)
+			err := b.readAckN(runCtx, request.ctx, commandBytes)
 			if err == nil {
 				return nil, nil
 			}
@@ -206,7 +208,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
 		}
 
-		if err := b.readAck(runCtx, request.ctx); err != nil {
+		if err := b.readAckN(runCtx, request.ctx, commandBytes); err != nil {
 			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts); retry {
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 				continue
@@ -312,6 +314,18 @@ func (b *Bus) readAck(runCtx, reqCtx context.Context) error {
 			continue
 		}
 	}
+}
+
+func (b *Bus) readAckN(runCtx, reqCtx context.Context, count int) error {
+	if count <= 0 {
+		return nil
+	}
+	for i := 0; i < count; i++ {
+		if err := b.readAck(runCtx, reqCtx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *Bus) readResponse(runCtx, reqCtx context.Context, request Frame) (*Frame, error) {
