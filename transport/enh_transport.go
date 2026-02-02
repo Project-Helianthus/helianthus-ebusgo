@@ -23,10 +23,12 @@ type ENHTransport struct {
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
+	echoMu  sync.Mutex
 
 	parser  ENHParser
 	pending []byte
 	buffer  []byte
+	echoes  []byte
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -69,10 +71,14 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 		for _, msg := range msgs {
 			switch msg.Kind {
 			case ENHMessageData:
-				t.pending = append(t.pending, msg.Byte)
+				if !t.shouldSuppressEcho(msg.Byte) {
+					t.pending = append(t.pending, msg.Byte)
+				}
 			case ENHMessageFrame:
 				if msg.Command == ENHResReceived {
-					t.pending = append(t.pending, msg.Data)
+					if !t.shouldSuppressEcho(msg.Data) {
+						t.pending = append(t.pending, msg.Data)
+					}
 				}
 			}
 		}
@@ -96,13 +102,13 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	written := 0
 	for written < len(framed) {
 		if err := t.setWriteDeadline(); err != nil {
-			return written / 2, t.mapWriteError(err)
+			return t.finishWrite(payload, written, t.mapWriteError(err))
 		}
 
 		n, err := t.conn.Write(framed[written:])
 		written += n
 		if err != nil {
-			return written / 2, t.mapWriteError(err)
+			return t.finishWrite(payload, written, t.mapWriteError(err))
 		}
 		if n == 0 {
 			break
@@ -110,10 +116,10 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	}
 
 	if written%2 != 0 {
-		return written / 2, ebuserrors.ErrInvalidPayload
+		return t.finishWrite(payload, written, ebuserrors.ErrInvalidPayload)
 	}
 
-	return written / 2, nil
+	return t.finishWrite(payload, written, nil)
 }
 
 func (t *ENHTransport) Close() error {
@@ -152,6 +158,29 @@ func (t *ENHTransport) mapWriteError(err error) error {
 		return fmt.Errorf("enh transport write closed: %w", ebuserrors.ErrTransportClosed)
 	}
 	return fmt.Errorf("enh transport write failed: %v: %w", err, ebuserrors.ErrTransportClosed)
+}
+
+func (t *ENHTransport) finishWrite(payload []byte, written int, err error) (int, error) {
+	writtenPayload := written / 2
+	if writtenPayload > 0 {
+		t.echoMu.Lock()
+		t.echoes = append(t.echoes, payload[:writtenPayload]...)
+		t.echoMu.Unlock()
+	}
+	return writtenPayload, err
+}
+
+func (t *ENHTransport) shouldSuppressEcho(value byte) bool {
+	t.echoMu.Lock()
+	defer t.echoMu.Unlock()
+	if len(t.echoes) == 0 {
+		return false
+	}
+	if t.echoes[0] != value {
+		return false
+	}
+	t.echoes = t.echoes[1:]
+	return true
 }
 
 func isTimeout(err error) bool {
