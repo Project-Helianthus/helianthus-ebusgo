@@ -91,46 +91,51 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 		return 0, nil
 	}
 
-	framesWritten := 0
+	encoded := make([]byte, 0, len(payload)*2)
 	for _, payloadByte := range payload {
+		seq := EncodeENH(ENHReqSend, payloadByte)
+		encoded = append(encoded, seq[0], seq[1])
+	}
+
+	written := 0
+	enqueued := false
+	for written < len(encoded) {
 		if err := t.setWriteDeadline(); err != nil {
+			framesWritten := written / 2
+			if enqueued {
+				t.removeLastEchoN(len(payload) - framesWritten)
+			}
 			return framesWritten, t.mapWriteError(err)
 		}
 
-		enqueued := false
-		t.enqueueEcho([]byte{payloadByte})
-		enqueued = true
-		seq := EncodeENH(ENHReqSend, payloadByte)
-		written := 0
-		for written < len(seq) {
-			chunkWritten, err := t.conn.Write(seq[written:])
-			written += chunkWritten
-			if err != nil {
-				if written < len(seq) {
-					if enqueued {
-						t.removeLastEcho()
-					}
-				} else {
-					framesWritten++
-				}
-				return framesWritten, t.mapWriteError(err)
-			}
-			if chunkWritten == 0 {
-				break
-			}
+		if !enqueued {
+			t.enqueueEcho(payload)
+			enqueued = true
 		}
 
-		if written < len(seq) {
+		n, err := t.conn.Write(encoded[written:])
+		written += n
+		if err != nil {
+			framesWritten := written / 2
 			if enqueued {
-				t.removeLastEcho()
+				t.removeLastEchoN(len(payload) - framesWritten)
 			}
-			return framesWritten, ebuserrors.ErrInvalidPayload
+			return framesWritten, t.mapWriteError(err)
 		}
-
-		framesWritten++
+		if n == 0 {
+			break
+		}
 	}
 
-	return framesWritten, nil
+	if written != len(encoded) {
+		framesWritten := written / 2
+		if enqueued {
+			t.removeLastEchoN(len(payload) - framesWritten)
+		}
+		return framesWritten, ebuserrors.ErrInvalidPayload
+	}
+
+	return len(payload), nil
 }
 
 // StartArbitration requests bus ownership for the given master address.
@@ -278,10 +283,16 @@ func (t *ENHTransport) enqueueEcho(payload []byte) {
 	t.echoMu.Unlock()
 }
 
-func (t *ENHTransport) removeLastEcho() {
+func (t *ENHTransport) removeLastEchoN(n int) {
+	if n <= 0 {
+		return
+	}
+
 	t.echoMu.Lock()
-	if len(t.echoPending) > 0 {
-		t.echoPending = t.echoPending[:len(t.echoPending)-1]
+	if len(t.echoPending) > n {
+		t.echoPending = t.echoPending[:len(t.echoPending)-n]
+	} else {
+		t.echoPending = nil
 	}
 	t.echoMu.Unlock()
 }
