@@ -91,18 +91,15 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 		return 0, nil
 	}
 
-	isEBUSFrame := len(payload) >= 6 && payload[4] == byte(len(payload)-6)
 	framesWritten := 0
-	for index, payloadByte := range payload {
+	for _, payloadByte := range payload {
 		if err := t.setWriteDeadline(); err != nil {
 			return framesWritten, t.mapWriteError(err)
 		}
 
 		enqueued := false
-		if !(isEBUSFrame && index < 2) {
-			t.enqueueEcho([]byte{payloadByte})
-			enqueued = true
-		}
+		t.enqueueEcho([]byte{payloadByte})
+		enqueued = true
 		seq := EncodeENH(ENHReqSend, payloadByte)
 		written := 0
 		for written < len(seq) {
@@ -180,11 +177,17 @@ func (t *ENHTransport) shouldSuppressEcho(value byte) bool {
 	if len(t.echoPending) == 0 {
 		return false
 	}
-	if t.echoPending[0] != value {
-		return false
+	if t.echoPending[0] == value {
+		t.echoPending = t.echoPending[1:]
+		return true
 	}
-	t.echoPending = t.echoPending[1:]
-	return true
+	for skip := 1; skip <= 2 && skip < len(t.echoPending); skip++ {
+		if t.echoPending[skip] == value {
+			t.echoPending = t.echoPending[skip+1:]
+			return true
+		}
+	}
+	return false
 }
 
 func (t *ENHTransport) enqueueEcho(payload []byte) {
