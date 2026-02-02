@@ -168,6 +168,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 
 	timeoutAttempts := 0
 	nackAttempts := 0
+	allowUnboundedCollision := isBoundedContext(request.ctx)
 
 	for {
 		if err := b.contextError(runCtx, request.ctx); err != nil {
@@ -184,7 +185,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				}
 				continue
 			}
-			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts); retry {
+			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 				continue
 			}
@@ -195,7 +196,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 		if err == nil {
 			return response, nil
 		}
-		if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts); retry {
+		if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 			timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
 				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
@@ -230,10 +231,16 @@ func (b *Bus) startArbitration(master byte) error {
 	return nil
 }
 
-func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int) (bool, int, int) {
-	// Collisions are transient bus-ownership events; keep retrying (bounded by ctx).
+func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int, allowUnboundedCollision bool) (bool, int, int) {
+	// Collisions are transient bus-ownership events; retry until ctx deadline/cancel.
 	if errors.Is(err, ebuserrors.ErrBusCollision) {
-		return true, timeoutAttempts, nackAttempts
+		if allowUnboundedCollision {
+			return true, timeoutAttempts, nackAttempts
+		}
+		if timeoutAttempts < policy.TimeoutRetries {
+			return true, timeoutAttempts + 1, nackAttempts
+		}
+		return false, timeoutAttempts, nackAttempts
 	}
 	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		if timeoutAttempts < policy.TimeoutRetries {
@@ -246,6 +253,16 @@ func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts in
 		}
 	}
 	return false, timeoutAttempts, nackAttempts
+}
+
+func isBoundedContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return true
+	}
+	return ctx.Done() != nil
 }
 
 func (b *Bus) wrapRetryError(err error) error {
