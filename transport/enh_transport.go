@@ -23,12 +23,10 @@ type ENHTransport struct {
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
-	echoMu  sync.Mutex
 
 	parser      ENHParser
 	pending     []byte
 	buffer      []byte
-	echoPending []byte
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -96,9 +94,7 @@ func (t *ENHTransport) Init(features byte) error {
 			case ENHMessageFrame:
 				switch msg.Command {
 				case ENHResReceived:
-					if !t.shouldSuppressEcho(msg.Data) {
-						t.pending = append(t.pending, msg.Data)
-					}
+					t.pending = append(t.pending, msg.Data)
 				case ENHResResetted:
 					t.resetStateLocked()
 					return nil
@@ -146,9 +142,7 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			case ENHMessageFrame:
 				switch msg.Command {
 				case ENHResReceived:
-					if !t.shouldSuppressEcho(msg.Data) {
-						t.pending = append(t.pending, msg.Data)
-					}
+					t.pending = append(t.pending, msg.Data)
 				case ENHResResetted:
 					t.resetStateLocked()
 				}
@@ -172,29 +166,15 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	}
 
 	written := 0
-	enqueued := false
 	for written < len(encoded) {
 		if err := t.setWriteDeadline(); err != nil {
-			framesWritten := written / 2
-			if enqueued {
-				t.removeLastEchoN(len(payload) - framesWritten)
-			}
-			return framesWritten, t.mapWriteError(err)
-		}
-
-		if !enqueued {
-			t.enqueueEcho(payload)
-			enqueued = true
+			return written / 2, t.mapWriteError(err)
 		}
 
 		n, err := t.conn.Write(encoded[written:])
 		written += n
 		if err != nil {
-			framesWritten := written / 2
-			if enqueued {
-				t.removeLastEchoN(len(payload) - framesWritten)
-			}
-			return framesWritten, t.mapWriteError(err)
+			return written / 2, t.mapWriteError(err)
 		}
 		if n == 0 {
 			break
@@ -202,11 +182,7 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	}
 
 	if written != len(encoded) {
-		framesWritten := written / 2
-		if enqueued {
-			t.removeLastEchoN(len(payload) - framesWritten)
-		}
-		return framesWritten, ebuserrors.ErrInvalidPayload
+		return written / 2, ebuserrors.ErrInvalidPayload
 	}
 
 	return len(payload), nil
@@ -271,9 +247,8 @@ func (t *ENHTransport) StartArbitration(master byte) error {
 			case ENHMessageFrame:
 				switch msg.Command {
 				case ENHResReceived:
-					if !t.shouldSuppressEcho(msg.Data) {
-						t.pending = append(t.pending, msg.Data)
-					}
+					// While waiting for STARTED/FAILED, ignore received bus bytes. The protocol
+					// state machine will resync after arbitration completes.
 				case ENHResResetted:
 					t.resetStateLocked()
 				case ENHResStarted:
@@ -300,9 +275,6 @@ func (t *ENHTransport) Close() error {
 func (t *ENHTransport) resetStateLocked() {
 	t.parser.Reset()
 	t.pending = nil
-	t.echoMu.Lock()
-	t.echoPending = nil
-	t.echoMu.Unlock()
 }
 
 func (t *ENHTransport) setReadDeadline() error {
@@ -337,48 +309,6 @@ func (t *ENHTransport) mapWriteError(err error) error {
 		return fmt.Errorf("enh transport write closed: %w", ebuserrors.ErrTransportClosed)
 	}
 	return fmt.Errorf("enh transport write failed: %v: %w", err, ebuserrors.ErrTransportClosed)
-}
-
-func (t *ENHTransport) shouldSuppressEcho(value byte) bool {
-	t.echoMu.Lock()
-	defer t.echoMu.Unlock()
-	if len(t.echoPending) == 0 {
-		return false
-	}
-	if t.echoPending[0] == value {
-		t.echoPending = t.echoPending[1:]
-		return true
-	}
-	for skip := 1; skip <= 2 && skip < len(t.echoPending); skip++ {
-		if t.echoPending[skip] == value {
-			t.echoPending = t.echoPending[skip+1:]
-			return true
-		}
-	}
-	return false
-}
-
-func (t *ENHTransport) enqueueEcho(payload []byte) {
-	if len(payload) == 0 {
-		return
-	}
-	t.echoMu.Lock()
-	t.echoPending = append(t.echoPending, payload...)
-	t.echoMu.Unlock()
-}
-
-func (t *ENHTransport) removeLastEchoN(n int) {
-	if n <= 0 {
-		return
-	}
-
-	t.echoMu.Lock()
-	if len(t.echoPending) > n {
-		t.echoPending = t.echoPending[:len(t.echoPending)-n]
-	} else {
-		t.echoPending = nil
-	}
-	t.echoMu.Unlock()
 }
 
 func isTimeout(err error) bool {

@@ -199,60 +199,7 @@ func TestENHTransport_ReadClosed(t *testing.T) {
 	}
 }
 
-func TestENHTransport_SuppressesEchoedBytes(t *testing.T) {
-	t.Parallel()
-
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
-
-	serverErr := make(chan error, 1)
-	outbound := []byte{0x11, 0x22, 0x33}
-	// Goroutine exits after draining frames and writing responses.
-	go func() {
-		buf := make([]byte, len(outbound)*2)
-		if _, err := io.ReadFull(server, buf); err != nil {
-			serverErr <- err
-			return
-		}
-		seqEcho1 := transport.EncodeENH(transport.ENHResReceived, 0x11)
-		seqNonEcho := transport.EncodeENH(transport.ENHResReceived, 0x88)
-		seqEcho3 := transport.EncodeENH(transport.ENHResReceived, 0x33)
-		response := []byte{
-			seqEcho1[0], seqEcho1[1],
-			0x55,
-			0x22,
-			seqNonEcho[0], seqNonEcho[1],
-			seqEcho3[0], seqEcho3[1],
-			0x44,
-		}
-		_, err := server.Write(response)
-		serverErr <- err
-	}()
-
-	if _, err := enh.Write(outbound); err != nil {
-		t.Fatalf("Write error = %v", err)
-	}
-
-	want := []byte{0x55, 0x88, 0x44}
-	for index, expected := range want {
-		got, err := enh.ReadByte()
-		if err != nil {
-			t.Fatalf("ReadByte[%d] error = %v", index, err)
-		}
-		if got != expected {
-			t.Fatalf("ReadByte[%d] = 0x%02x; want 0x%02x", index, got, expected)
-		}
-	}
-
-	if err := <-serverErr; err != nil {
-		t.Fatalf("server error = %v", err)
-	}
-}
-
-func TestENHTransport_SuppressesEchoedBytesFullSequence(t *testing.T) {
+func TestENHTransport_ForwardsEchoedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -285,140 +232,21 @@ func TestENHTransport_SuppressesEchoedBytesFullSequence(t *testing.T) {
 		t.Fatalf("Write error = %v", err)
 	}
 
-	got, err := enh.ReadByte()
-	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
-	}
-	if got != 0x99 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x99", got)
-	}
-
-	if err := <-serverErr; err != nil {
-		t.Fatalf("server error = %v", err)
-	}
-}
-
-func TestENHTransport_SuppressesEchoedBytesMissingAddress(t *testing.T) {
-	t.Parallel()
-
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
-
-	payload := []byte{0x10, 0x20, 0x30, 0x40, 0x01, 0x55, 0x66}
-	serverErr := make(chan error, 1)
-	// Goroutine exits after draining frames and writing responses.
-	go func() {
-		buf := make([]byte, len(payload)*2)
-		if _, err := io.ReadFull(server, buf); err != nil {
-			serverErr <- err
-			return
-		}
-		response := make([]byte, 0, (len(payload)-2)*2+2)
-		for _, value := range payload[2:] {
-			seqEcho := transport.EncodeENH(transport.ENHResReceived, value)
-			response = append(response, seqEcho[0], seqEcho[1])
-		}
-		seqNonEcho := transport.EncodeENH(transport.ENHResReceived, 0x99)
-		response = append(response, seqNonEcho[0], seqNonEcho[1])
-		_, err := server.Write(response)
-		serverErr <- err
-	}()
-
-	if _, err := enh.Write(payload); err != nil {
-		t.Fatalf("Write error = %v", err)
-	}
-
-	got, err := enh.ReadByte()
-	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
-	}
-	if got != 0x99 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x99", got)
-	}
-
-	if err := <-serverErr; err != nil {
-		t.Fatalf("server error = %v", err)
-	}
-}
-
-func TestENHTransport_SuppressesEchoBeforeWriteReturns(t *testing.T) {
-	t.Parallel()
-
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
-	payload := byte(0x22)
-
-	readCh := make(chan byte, 1)
-	readErr := make(chan error, 1)
-	// Goroutine exits after ReadByte returns.
-	go func() {
-		value, err := enh.ReadByte()
+	for index, expected := range append(payload, 0x99) {
+		got, err := enh.ReadByte()
 		if err != nil {
-			readErr <- err
-			return
+			t.Fatalf("ReadByte[%d] error = %v", index, err)
 		}
-		readCh <- value
-	}()
-
-	serverErr := make(chan error, 1)
-	// Goroutine exits after echoing before the frame is fully read.
-	go func() {
-		buf := make([]byte, 1)
-		if _, err := io.ReadFull(server, buf); err != nil {
-			serverErr <- err
-			return
+		if got != expected {
+			t.Fatalf("ReadByte[%d] = 0x%02x; want 0x%02x", index, got, expected)
 		}
-
-		seqEcho := transport.EncodeENH(transport.ENHResReceived, payload)
-		if _, err := server.Write(seqEcho[:]); err != nil {
-			serverErr <- err
-			return
-		}
-		if _, err := server.Write([]byte{0x55}); err != nil {
-			serverErr <- err
-			return
-		}
-
-		if _, err := io.ReadFull(server, buf); err != nil {
-			serverErr <- err
-			return
-		}
-		serverErr <- nil
-	}()
-
-	bytesWritten, err := enh.Write([]byte{payload})
-	if err != nil {
-		t.Fatalf("Write error = %v", err)
-	}
-	if bytesWritten != 1 {
-		t.Fatalf("Write = %d; want 1", bytesWritten)
-	}
-
-	var got byte
-	select {
-	case got = <-readCh:
-	case err := <-readErr:
-		t.Fatalf("ReadByte error = %v", err)
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("timeout waiting for ReadByte")
-	}
-
-	if got != 0x55 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x55", got)
 	}
 
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
 	}
 }
-
-func TestENHTransport_StartArbitrationStartedQueuesReceivedBytes(t *testing.T) {
+func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -452,20 +280,9 @@ func TestENHTransport_StartArbitrationStartedQueuesReceivedBytes(t *testing.T) {
 		t.Fatalf("StartArbitration error = %v", err)
 	}
 
-	got1, err := enh.ReadByte()
-	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
-	}
-	if got1 != 0x11 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x11", got1)
-	}
-
-	got2, err := enh.ReadByte()
-	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
-	}
-	if got2 != 0x22 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x22", got2)
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("ReadByte error = %v; want ErrTimeout", err)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -473,7 +290,7 @@ func TestENHTransport_StartArbitrationStartedQueuesReceivedBytes(t *testing.T) {
 	}
 }
 
-func TestENHTransport_StartArbitrationFailedQueuesReceivedBytes(t *testing.T) {
+func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -509,20 +326,9 @@ func TestENHTransport_StartArbitrationFailedQueuesReceivedBytes(t *testing.T) {
 		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
 	}
 
-	got1, err := enh.ReadByte()
-	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
-	}
-	if got1 != 0x33 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x33", got1)
-	}
-
-	got2, err := enh.ReadByte()
-	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
-	}
-	if got2 != 0x44 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x44", got2)
+	_, err = enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("ReadByte error = %v; want ErrTimeout", err)
 	}
 
 	if err := <-serverErr; err != nil {

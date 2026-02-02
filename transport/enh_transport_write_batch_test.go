@@ -130,7 +130,7 @@ func TestENHTransport_WriteBatchesToSingleConnWrite(t *testing.T) {
 	}
 }
 
-func TestENHTransport_WriteRemovesUnsentEchoBytesOnPartialWrite(t *testing.T) {
+func TestENHTransport_WriteReturnsPartialCountOnPartialWrite(t *testing.T) {
 	t.Parallel()
 
 	seqEcho1 := transport.EncodeENH(transport.ENHResReceived, 0x11)
@@ -154,7 +154,15 @@ func TestENHTransport_WriteRemovesUnsentEchoBytesOnPartialWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadByte error = %v", err)
 	}
-	if got != 0x22 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x22", got)
+	if got != 0x11 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x11", got)
+	}
+
+	got2, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte[2] error = %v", err)
+	}
+	if got2 != 0x22 {
+		t.Fatalf("ReadByte[2] = 0x%02x; want 0x22", got2)
 	}
 }
