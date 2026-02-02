@@ -91,13 +91,18 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 		return 0, nil
 	}
 
+	isEBUSFrame := len(payload) >= 6 && payload[4] == byte(len(payload)-6)
 	framesWritten := 0
-	for _, payloadByte := range payload {
+	for index, payloadByte := range payload {
 		if err := t.setWriteDeadline(); err != nil {
 			return framesWritten, t.mapWriteError(err)
 		}
 
-		t.enqueueEcho([]byte{payloadByte})
+		enqueued := false
+		if !(isEBUSFrame && index < 2) {
+			t.enqueueEcho([]byte{payloadByte})
+			enqueued = true
+		}
 		seq := EncodeENH(ENHReqSend, payloadByte)
 		written := 0
 		for written < len(seq) {
@@ -105,7 +110,9 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 			written += chunkWritten
 			if err != nil {
 				if written < len(seq) {
-					t.removeLastEcho()
+					if enqueued {
+						t.removeLastEcho()
+					}
 				} else {
 					framesWritten++
 				}
@@ -117,7 +124,9 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 		}
 
 		if written < len(seq) {
-			t.removeLastEcho()
+			if enqueued {
+				t.removeLastEcho()
+			}
 			return framesWritten, ebuserrors.ErrInvalidPayload
 		}
 
