@@ -502,6 +502,7 @@ func (b *Bus) waitForSyn(runCtx, reqCtx context.Context, count int) error {
 		value, err := decoder.readSymbol(b, runCtx, reqCtx)
 		if err != nil {
 			if errors.Is(err, ebuserrors.ErrTimeout) {
+				decoder.escape = false
 				continue
 			}
 			return err
