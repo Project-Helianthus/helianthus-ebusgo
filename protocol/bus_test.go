@@ -670,4 +670,51 @@ func TestBus_RetryOnCollisionDuringWriteWaitsForSyn(t *testing.T) {
 	}
 }
 
+func TestBus_RetryOnCollisionDoesNotConsumeTimeoutRetries(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x07,
+		Secondary: 0x04,
+	}
+
+	data := byte(0x10)
+	respCRC := protocol.CRC([]byte{0x01, data})
+	tr := &collisionOnceTransport{
+		collideOnFirstEcho: true,
+		inbound: []readEvent{
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolAck},
+			{value: 0x01},
+			{value: data},
+			{value: respCRC},
+		},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, frame)
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp == nil || len(resp.Data) != 1 || resp.Data[0] != data {
+		t.Fatalf("response = %+v; want data [0x10]", resp)
+	}
+}
+
 var _ transport.RawTransport = (*scriptedTransport)(nil)

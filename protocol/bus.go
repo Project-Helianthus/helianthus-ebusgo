@@ -231,7 +231,11 @@ func (b *Bus) startArbitration(master byte) error {
 }
 
 func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int) (bool, int, int) {
-	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrBusCollision) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
+	// Collisions are transient bus-ownership events; keep retrying (bounded by ctx).
+	if errors.Is(err, ebuserrors.ErrBusCollision) {
+		return true, timeoutAttempts, nackAttempts
+	}
+	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		if timeoutAttempts < policy.TimeoutRetries {
 			return true, timeoutAttempts + 1, nackAttempts
 		}
