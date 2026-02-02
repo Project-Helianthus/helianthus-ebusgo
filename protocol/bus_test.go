@@ -169,6 +169,44 @@ func TestBus_ReadAckSkipsSyn(t *testing.T) {
 	}
 }
 
+func TestBus_ReadAckSkipsNoiseBytes(t *testing.T) {
+	t.Parallel()
+
+	tr := &scriptedTransport{
+		reads: []readEvent{
+			{value: 0x10},
+			{value: 0x55},
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolAck},
+		},
+	}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %+v; want nil", resp)
+	}
+	if tr.readsConsumed() != 4 {
+		t.Fatalf("reads = %d; want 4", tr.readsConsumed())
+	}
+	if tr.writeCount() != 1 {
+		t.Fatalf("writes = %d; want 1", tr.writeCount())
+	}
+}
+
 func TestBus_ResponseCRCMismatch(t *testing.T) {
 	t.Parallel()
 
