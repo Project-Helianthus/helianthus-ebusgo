@@ -79,8 +79,8 @@ func TestENHParser_DataByte(t *testing.T) {
 	if !ok {
 		t.Fatal("expected message")
 	}
-	if msg.Kind != transport.ENHMessageData || msg.Byte != 0x7F {
-		t.Fatalf("message = %+v; want data 0x7F", msg)
+	if msg.Kind != transport.ENHMessageFrame || msg.Command != transport.ENHResReceived || msg.Data != 0x7F {
+		t.Fatalf("message = %+v; want cmd=%v data=0x7F", msg, transport.ENHResReceived)
 	}
 }
 
@@ -155,13 +155,13 @@ func TestENHParser_ParseMultiple(t *testing.T) {
 	if len(msgs) != 3 {
 		t.Fatalf("Parse messages = %d; want 3", len(msgs))
 	}
-	if msgs[0].Kind != transport.ENHMessageData || msgs[0].Byte != 0x10 {
-		t.Fatalf("msg0 = %+v; want data 0x10", msgs[0])
+	if msgs[0].Kind != transport.ENHMessageFrame || msgs[0].Command != transport.ENHResReceived || msgs[0].Data != 0x10 {
+		t.Fatalf("msg0 = %+v; want cmd=%v data=0x10", msgs[0], transport.ENHResReceived)
 	}
 	if msgs[1].Kind != transport.ENHMessageFrame || msgs[1].Command != transport.ENHReqSend || msgs[1].Data != 0x55 {
 		t.Fatalf("msg1 = %+v; want cmd=%v data=0x55", msgs[1], transport.ENHReqSend)
 	}
-	if msgs[2].Kind != transport.ENHMessageData || msgs[2].Byte != 0x20 {
-		t.Fatalf("msg2 = %+v; want data 0x20", msgs[2])
+	if msgs[2].Kind != transport.ENHMessageFrame || msgs[2].Command != transport.ENHResReceived || msgs[2].Data != 0x20 {
+		t.Fatalf("msg2 = %+v; want cmd=%v data=0x20", msgs[2], transport.ENHResReceived)
 	}
 }

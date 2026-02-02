@@ -71,9 +71,7 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 		for _, msg := range msgs {
 			switch msg.Kind {
 			case ENHMessageData:
-				if !t.shouldSuppressEcho(msg.Byte) {
-					t.pending = append(t.pending, msg.Byte)
-				}
+				t.pending = append(t.pending, msg.Byte)
 			case ENHMessageFrame:
 				if msg.Command == ENHResReceived {
 					if !t.shouldSuppressEcho(msg.Data) {
