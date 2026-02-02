@@ -248,6 +248,58 @@ func TestBus_ResponseCRCMismatch(t *testing.T) {
 	}
 }
 
+func TestBus_RetryOnCRCMismatch(t *testing.T) {
+	t.Parallel()
+
+	data := byte(0x10)
+	goodCRC := protocol.CRC([]byte{0x01, data})
+	badCRC := goodCRC ^ 0xFF
+
+	tr := &scriptedTransport{
+		reads: []readEvent{
+			{value: protocol.SymbolAck},
+			{value: 0x01},
+			{value: data},
+			{value: badCRC},
+			{value: protocol.SymbolAck},
+			{value: 0x01},
+			{value: data},
+			{value: goodCRC},
+		},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 1,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 1,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp == nil || len(resp.Data) != 1 || resp.Data[0] != data {
+		t.Fatalf("response = %+v; want data [0x10]", resp)
+	}
+	if tr.writeCount() != 2 {
+		t.Fatalf("writes = %d; want 2", tr.writeCount())
+	}
+}
+
 func TestBus_RetryOnTimeout(t *testing.T) {
 	t.Parallel()
 
