@@ -425,4 +425,144 @@ func TestBus_NACKExhaustedWrapsSentinel(t *testing.T) {
 	}
 }
 
+type arbitratingScriptedTransport struct {
+	mu sync.Mutex
+
+	reads []readEvent
+
+	writes [][]byte
+	calls  []string
+
+	arbitrationMasters []byte
+	arbitrationResults []error
+}
+
+func (s *arbitratingScriptedTransport) StartArbitration(master byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.calls = append(s.calls, "arbitrate")
+	s.arbitrationMasters = append(s.arbitrationMasters, master)
+	if len(s.arbitrationResults) == 0 {
+		return nil
+	}
+	err := s.arbitrationResults[0]
+	s.arbitrationResults = s.arbitrationResults[1:]
+	return err
+}
+
+func (s *arbitratingScriptedTransport) ReadByte() (byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.reads) == 0 {
+		return 0, ebuserrors.ErrTimeout
+	}
+	ev := s.reads[0]
+	s.reads = s.reads[1:]
+	return ev.value, ev.err
+}
+
+func (s *arbitratingScriptedTransport) Write(payload []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.calls = append(s.calls, "write")
+	copyPayload := append([]byte(nil), payload...)
+	s.writes = append(s.writes, copyPayload)
+	return len(payload), nil
+}
+
+func (s *arbitratingScriptedTransport) Close() error {
+	return nil
+}
+
+func TestBus_ArbitrationCalledBeforeWrite(t *testing.T) {
+	t.Parallel()
+
+	tr := &arbitratingScriptedTransport{}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %+v; want nil", resp)
+	}
+
+	tr.mu.Lock()
+	calls := append([]string(nil), tr.calls...)
+	masters := append([]byte(nil), tr.arbitrationMasters...)
+	tr.mu.Unlock()
+
+	if len(calls) != 2 || calls[0] != "arbitrate" || calls[1] != "write" {
+		t.Fatalf("calls = %v; want [arbitrate write]", calls)
+	}
+	if len(masters) != 1 || masters[0] != 0x10 {
+		t.Fatalf("arbitration masters = %v; want [0x10]", masters)
+	}
+}
+
+func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
+	t.Parallel()
+
+	tr := &arbitratingScriptedTransport{
+		arbitrationResults: []error{ebuserrors.ErrBusCollision, nil},
+		reads: []readEvent{
+			{value: protocol.SymbolAck},
+		},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 1,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	})
+	if err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %+v; want nil", resp)
+	}
+
+	tr.mu.Lock()
+	writes := len(tr.writes)
+	masters := append([]byte(nil), tr.arbitrationMasters...)
+	tr.mu.Unlock()
+
+	if writes != 1 {
+		t.Fatalf("writes = %d; want 1", writes)
+	}
+	if len(masters) != 2 {
+		t.Fatalf("arbitration calls = %d; want 2", len(masters))
+	}
+}
+
 var _ transport.RawTransport = (*scriptedTransport)(nil)

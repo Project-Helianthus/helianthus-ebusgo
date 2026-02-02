@@ -133,6 +133,85 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	return framesWritten, nil
 }
 
+// StartArbitration requests bus ownership for the given master address.
+// It sends ENHReqStart(master) and blocks until ENHResStarted(master) or ENHResFailed(winner).
+//
+// Any received ENHResReceived bytes observed while waiting are queued so that subsequent ReadByte
+// calls can consume them.
+func (t *ENHTransport) StartArbitration(master byte) error {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+
+	t.writeMu.Lock()
+	seq := EncodeENH(ENHReqStart, master)
+	written := 0
+	for written < len(seq) {
+		if err := t.setWriteDeadline(); err != nil {
+			t.writeMu.Unlock()
+			return t.mapWriteError(err)
+		}
+		n, err := t.conn.Write(seq[written:])
+		written += n
+		if err != nil {
+			t.writeMu.Unlock()
+			return t.mapWriteError(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	t.writeMu.Unlock()
+	if written != len(seq) {
+		return ebuserrors.ErrInvalidPayload
+	}
+
+	for {
+		if err := t.setReadDeadline(); err != nil {
+			return t.mapReadError(err)
+		}
+
+		n, err := t.conn.Read(t.buffer)
+		if err != nil {
+			return t.mapReadError(err)
+		}
+		if n == 0 {
+			continue
+		}
+
+		msgs, err := t.parser.Parse(t.buffer[:n])
+		if err != nil {
+			return err
+		}
+
+		var arbitrationDone bool
+		var arbitrationErr error
+		for _, msg := range msgs {
+			switch msg.Kind {
+			case ENHMessageData:
+				t.pending = append(t.pending, msg.Byte)
+			case ENHMessageFrame:
+				switch msg.Command {
+				case ENHResReceived:
+					if !t.shouldSuppressEcho(msg.Data) {
+						t.pending = append(t.pending, msg.Data)
+					}
+				case ENHResStarted:
+					if msg.Data == master {
+						arbitrationDone = true
+					}
+				case ENHResFailed:
+					arbitrationDone = true
+					arbitrationErr = fmt.Errorf("enh arbitration failed (master 0x%02x, winner 0x%02x): %w", master, msg.Data, ebuserrors.ErrBusCollision)
+				}
+			}
+		}
+
+		if arbitrationDone {
+			return arbitrationErr
+		}
+	}
+}
+
 func (t *ENHTransport) Close() error {
 	return t.conn.Close()
 }
