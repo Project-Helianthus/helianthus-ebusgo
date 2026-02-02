@@ -85,7 +85,7 @@ func (p *ENHParser) Reset() {
 func (p *ENHParser) Feed(b byte) (ENHMessage, bool, error) {
 	if !p.pending {
 		if b&enhByteFlag == 0 {
-			return ENHMessage{Kind: ENHMessageData, Byte: b}, true, nil
+			return ENHMessage{Kind: ENHMessageFrame, Command: ENHResReceived, Data: b}, true, nil
 		}
 		if b&enhByteMask == enhByte2 {
 			return ENHMessage{}, false, ebuserrors.ErrInvalidPayload

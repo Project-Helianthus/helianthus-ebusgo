@@ -23,10 +23,12 @@ type ENHTransport struct {
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
+	echoMu  sync.Mutex
 
-	parser  ENHParser
-	pending []byte
-	buffer  []byte
+	parser      ENHParser
+	pending     []byte
+	buffer      []byte
+	echoPending []byte
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -54,15 +56,15 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			return 0, t.mapReadError(err)
 		}
 
-		n, err := t.conn.Read(t.buffer)
+		bytesRead, err := t.conn.Read(t.buffer)
 		if err != nil {
 			return 0, t.mapReadError(err)
 		}
-		if n == 0 {
+		if bytesRead == 0 {
 			continue
 		}
 
-		msgs, err := t.parser.Parse(t.buffer[:n])
+		msgs, err := t.parser.Parse(t.buffer[:bytesRead])
 		if err != nil {
 			return 0, err
 		}
@@ -72,7 +74,9 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 				t.pending = append(t.pending, msg.Byte)
 			case ENHMessageFrame:
 				if msg.Command == ENHResReceived {
-					t.pending = append(t.pending, msg.Data)
+					if !t.shouldSuppressEcho(msg.Data) {
+						t.pending = append(t.pending, msg.Data)
+					}
 				}
 			}
 		}
@@ -87,33 +91,40 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 		return 0, nil
 	}
 
-	framed := make([]byte, 0, len(payload)*2)
-	for _, b := range payload {
-		seq := EncodeENH(ENHReqSend, b)
-		framed = append(framed, seq[0], seq[1])
-	}
-
-	written := 0
-	for written < len(framed) {
+	framesWritten := 0
+	for _, payloadByte := range payload {
 		if err := t.setWriteDeadline(); err != nil {
-			return written / 2, t.mapWriteError(err)
+			return framesWritten, t.mapWriteError(err)
 		}
 
-		n, err := t.conn.Write(framed[written:])
-		written += n
-		if err != nil {
-			return written / 2, t.mapWriteError(err)
+		t.enqueueEcho([]byte{payloadByte})
+		seq := EncodeENH(ENHReqSend, payloadByte)
+		written := 0
+		for written < len(seq) {
+			chunkWritten, err := t.conn.Write(seq[written:])
+			written += chunkWritten
+			if err != nil {
+				if written < len(seq) {
+					t.removeLastEcho()
+				} else {
+					framesWritten++
+				}
+				return framesWritten, t.mapWriteError(err)
+			}
+			if chunkWritten == 0 {
+				break
+			}
 		}
-		if n == 0 {
-			break
+
+		if written < len(seq) {
+			t.removeLastEcho()
+			return framesWritten, ebuserrors.ErrInvalidPayload
 		}
+
+		framesWritten++
 	}
 
-	if written%2 != 0 {
-		return written / 2, ebuserrors.ErrInvalidPayload
-	}
-
-	return written / 2, nil
+	return framesWritten, nil
 }
 
 func (t *ENHTransport) Close() error {
@@ -152,6 +163,36 @@ func (t *ENHTransport) mapWriteError(err error) error {
 		return fmt.Errorf("enh transport write closed: %w", ebuserrors.ErrTransportClosed)
 	}
 	return fmt.Errorf("enh transport write failed: %v: %w", err, ebuserrors.ErrTransportClosed)
+}
+
+func (t *ENHTransport) shouldSuppressEcho(value byte) bool {
+	t.echoMu.Lock()
+	defer t.echoMu.Unlock()
+	if len(t.echoPending) == 0 {
+		return false
+	}
+	if t.echoPending[0] != value {
+		return false
+	}
+	t.echoPending = t.echoPending[1:]
+	return true
+}
+
+func (t *ENHTransport) enqueueEcho(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	t.echoMu.Lock()
+	t.echoPending = append(t.echoPending, payload...)
+	t.echoMu.Unlock()
+}
+
+func (t *ENHTransport) removeLastEcho() {
+	t.echoMu.Lock()
+	if len(t.echoPending) > 0 {
+		t.echoPending = t.echoPending[:len(t.echoPending)-1]
+	}
+	t.echoMu.Unlock()
 }
 
 func isTimeout(err error) bool {
