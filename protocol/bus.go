@@ -175,6 +175,15 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 		}
 
 		if err := b.startArbitration(request.frame.Source); err != nil {
+			if errors.Is(err, ebuserrors.ErrBusCollision) {
+				// Arbitration can be lost while another master owns the bus.
+				// ebusd waits for subsequent SYN symbols before retrying; do the
+				// same here (bounded by request context deadline).
+				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+					return nil, b.wrapRetryError(waitErr)
+				}
+				continue
+			}
 			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts); retry {
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 				continue
@@ -279,7 +288,7 @@ func (d *busDecoder) readSymbol(b *Bus, runCtx, reqCtx context.Context) (byte, e
 			case 0x01:
 				return SymbolSyn, nil
 			default:
-				return 0, fmt.Errorf("invalid escape sequence 0x%02x: %w", raw, ebuserrors.ErrTimeout)
+				return 0, fmt.Errorf("invalid escape sequence 0x%02x: %w", raw, ebuserrors.ErrInvalidPayload)
 			}
 		}
 
@@ -467,6 +476,30 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte) error {
 	}
 	if echo != raw {
 		return fmt.Errorf("echo mismatch (sent 0x%02x, got 0x%02x): %w", raw, echo, ebuserrors.ErrBusCollision)
+	}
+	return nil
+}
+
+func (b *Bus) waitForSyn(runCtx, reqCtx context.Context, count int) error {
+	if count <= 0 {
+		return nil
+	}
+	var decoder busDecoder
+	seen := 0
+	for seen < count {
+		if err := b.contextError(runCtx, reqCtx); err != nil {
+			return err
+		}
+		value, err := decoder.readSymbol(b, runCtx, reqCtx)
+		if err != nil {
+			if errors.Is(err, ebuserrors.ErrTimeout) {
+				continue
+			}
+			return err
+		}
+		if value == SymbolSyn {
+			seen++
+		}
 	}
 	return nil
 }

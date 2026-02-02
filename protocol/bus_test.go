@@ -520,7 +520,11 @@ func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
 
 	tr := &arbitratingScriptedTransport{
 		arbitrationResults: []error{ebuserrors.ErrBusCollision, nil},
-		inbound:           []readEvent{{value: protocol.SymbolAck}},
+		inbound: []readEvent{
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolSyn},
+			{value: protocol.SymbolAck},
+		},
 	}
 	config := protocol.BusConfig{
 		MasterSlave: protocol.RetryPolicy{
