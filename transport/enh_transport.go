@@ -91,39 +91,40 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 		return 0, nil
 	}
 
-	framed := make([]byte, 0, len(payload)*2)
+	framesWritten := 0
 	for _, payloadByte := range payload {
-		seq := EncodeENH(ENHReqSend, payloadByte)
-		framed = append(framed, seq[0], seq[1])
-	}
-
-	bytesWritten := 0
-	queuedFrames := 0
-	for bytesWritten < len(framed) {
 		if err := t.setWriteDeadline(); err != nil {
-			return queuedFrames, t.mapWriteError(err)
+			return framesWritten, t.mapWriteError(err)
 		}
 
-		chunkWritten, err := t.conn.Write(framed[bytesWritten:])
-		bytesWritten += chunkWritten
-		framesWritten := bytesWritten / 2
-		if framesWritten > queuedFrames {
-			t.enqueueEcho(payload[queuedFrames:framesWritten])
-			queuedFrames = framesWritten
+		t.enqueueEcho([]byte{payloadByte})
+		seq := EncodeENH(ENHReqSend, payloadByte)
+		written := 0
+		for written < len(seq) {
+			chunkWritten, err := t.conn.Write(seq[written:])
+			written += chunkWritten
+			if err != nil {
+				if written < len(seq) {
+					t.removeLastEcho()
+				} else {
+					framesWritten++
+				}
+				return framesWritten, t.mapWriteError(err)
+			}
+			if chunkWritten == 0 {
+				break
+			}
 		}
-		if err != nil {
-			return queuedFrames, t.mapWriteError(err)
+
+		if written < len(seq) {
+			t.removeLastEcho()
+			return framesWritten, ebuserrors.ErrInvalidPayload
 		}
-		if chunkWritten == 0 {
-			break
-		}
+
+		framesWritten++
 	}
 
-	if bytesWritten%2 != 0 {
-		return queuedFrames, ebuserrors.ErrInvalidPayload
-	}
-
-	return queuedFrames, nil
+	return framesWritten, nil
 }
 
 func (t *ENHTransport) Close() error {
@@ -183,6 +184,14 @@ func (t *ENHTransport) enqueueEcho(payload []byte) {
 	}
 	t.echoMu.Lock()
 	t.echoPending = append(t.echoPending, payload...)
+	t.echoMu.Unlock()
+}
+
+func (t *ENHTransport) removeLastEcho() {
+	t.echoMu.Lock()
+	if len(t.echoPending) > 0 {
+		t.echoPending = t.echoPending[:len(t.echoPending)-1]
+	}
 	t.echoMu.Unlock()
 }
 
