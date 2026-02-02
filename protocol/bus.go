@@ -226,7 +226,7 @@ func (b *Bus) retryPolicy(frameType FrameType) RetryPolicy {
 }
 
 func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int) (bool, int, int) {
-	if errors.Is(err, ebuserrors.ErrTimeout) {
+	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		if timeoutAttempts < policy.TimeoutRetries {
 			return true, timeoutAttempts + 1, nackAttempts
 		}
