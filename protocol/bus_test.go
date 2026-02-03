@@ -618,6 +618,51 @@ func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
 	}
 }
 
+func TestBus_ArbitrationCollisionBoundWithoutDeadline(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
+		Source:    0x30,
+		Target:    0x10,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
+	tr := &arbitratingScriptedTransport{
+		arbitrationResults: []error{ebuserrors.ErrBusCollision, ebuserrors.ErrBusCollision},
+	}
+	config := protocol.BusConfig{
+		MasterSlave: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		MasterMaster: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	runCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(runCtx)
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	defer reqCancel()
+
+	_, err := bus.Send(reqCtx, frame)
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("Send error = %v; want ErrBusCollision", err)
+	}
+
+	tr.mu.Lock()
+	masters := len(tr.arbitrationMasters)
+	tr.mu.Unlock()
+	if masters != 1 {
+		t.Fatalf("arbitration calls = %d; want 1", masters)
+	}
+}
+
 func TestBus_RetryOnCollisionDuringWriteWaitsForSyn(t *testing.T) {
 	t.Parallel()
 
