@@ -70,13 +70,30 @@ func (t *ENHTransport) Init(features byte) error {
 		return ebuserrors.ErrInvalidPayload
 	}
 
+	maxWait := t.readTimeout
+	if maxWait <= 0 {
+		maxWait = 2 * time.Second
+	}
+	start := time.Now()
+
 	for {
-		if err := t.setReadDeadline(); err != nil {
+		remaining := maxWait - time.Since(start)
+		if remaining <= 0 {
+			return nil
+		}
+		if t.readTimeout <= 0 || remaining < t.readTimeout {
+			if err := t.conn.SetReadDeadline(time.Now().Add(remaining)); err != nil {
+				return t.mapReadError(err)
+			}
+		} else if err := t.setReadDeadline(); err != nil {
 			return t.mapReadError(err)
 		}
 
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
+			if isTimeout(err) {
+				return nil
+			}
 			return t.mapReadError(err)
 		}
 		if n == 0 {
@@ -98,6 +115,8 @@ func (t *ENHTransport) Init(features byte) error {
 				case ENHResResetted:
 					t.resetStateLocked()
 					return nil
+				case ENHResInfo:
+					// Ignore info responses for now; leave any received bytes queued.
 				case ENHResErrorEBUS:
 					return fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 				case ENHResErrorHost:
