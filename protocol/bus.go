@@ -180,10 +180,14 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				// Arbitration can be lost while another master owns the bus.
 				// ebusd waits for subsequent SYN symbols before retrying; do the
 				// same here (bounded by request context deadline).
-				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
-					return nil, b.wrapRetryError(waitErr)
+				if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
+					timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
+					if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+						return nil, b.wrapRetryError(waitErr)
+					}
+					continue
 				}
-				continue
+				return nil, b.wrapRetryError(err)
 			}
 			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
@@ -262,7 +266,7 @@ func isBoundedContext(ctx context.Context) bool {
 	if _, ok := ctx.Deadline(); ok {
 		return true
 	}
-	return ctx.Done() != nil
+	return false
 }
 
 func (b *Bus) wrapRetryError(err error) error {
@@ -303,6 +307,9 @@ func (d *busDecoder) readSymbol(b *Bus, runCtx, reqCtx context.Context) (byte, e
 	for {
 		raw, err := b.readByte(runCtx, reqCtx)
 		if err != nil {
+			if errors.Is(err, ebuserrors.ErrTimeout) {
+				d.escape = false
+			}
 			return 0, err
 		}
 
@@ -519,7 +526,6 @@ func (b *Bus) waitForSyn(runCtx, reqCtx context.Context, count int) error {
 		value, err := decoder.readSymbol(b, runCtx, reqCtx)
 		if err != nil {
 			if errors.Is(err, ebuserrors.ErrTimeout) {
-				decoder.escape = false
 				continue
 			}
 			return err
