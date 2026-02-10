@@ -237,10 +237,12 @@ func TestEbusdTCPTransport_SendHexCommand_StripsLengthPrefix(t *testing.T) {
 				line, err := reader.ReadString('\n')
 				if err != nil {
 					serverErr <- err
+					_ = server.Close()
 					return
 				}
 				if line != test.wantCommand {
 					serverErr <- fmt.Errorf("command = %q; want %q", line, test.wantCommand)
+					_ = server.Close()
 					return
 				}
 				_, err = server.Write([]byte(test.response))
@@ -280,10 +282,12 @@ func TestEbusdTCPTransport_SendHexCommand_CommandFormatting(t *testing.T) {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			serverErr <- err
+			_ = server.Close()
 			return
 		}
 		if line != wantCommand {
 			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			_ = server.Close()
 			return
 		}
 		_, err = server.Write([]byte("01 00\n\n"))
@@ -346,10 +350,12 @@ func TestEbusdTCPTransport_SendHexCommand_ErrLines(t *testing.T) {
 				line, err := reader.ReadString('\n')
 				if err != nil {
 					serverErr <- err
+					_ = server.Close()
 					return
 				}
 				if line != wantCommand {
 					serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+					_ = server.Close()
 					return
 				}
 				_, err = server.Write([]byte(test.response))
@@ -396,10 +402,12 @@ func TestEbusdTCPTransport_Write_BroadcastDone(t *testing.T) {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			serverErr <- err
+			_ = server.Close()
 			return
 		}
 		if line != wantCommand {
 			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			_ = server.Close()
 			return
 		}
 		_, err = server.Write([]byte("done broadcast\n\n"))
