@@ -1,0 +1,75 @@
+[
+  {
+    "name": "first_hex_line_ignores_trailing_err",
+    "lines": [
+      "  0x03 01 02 03  ",
+      "ERR: spurious",
+      "ERR: timeout"
+    ],
+    "want_hex": "03 01 02 03"
+  },
+  {
+    "name": "hex_with_tabs",
+    "lines": [
+      "0x02\t11\t22"
+    ],
+    "want_hex": "02 11 22"
+  },
+  {
+    "name": "empty_payload_line",
+    "lines": [
+      "00"
+    ],
+    "want_hex": "00"
+  },
+  {
+    "name": "done_broadcast",
+    "lines": [
+      "done broadcast"
+    ],
+    "want_err": "no_hex"
+  },
+  {
+    "name": "err_timeout",
+    "lines": [
+      "ERR: timeout waiting for response"
+    ],
+    "want_err": "timeout"
+  },
+  {
+    "name": "err_no_answer",
+    "lines": [
+      "ERR: no answer"
+    ],
+    "want_err": "timeout"
+  },
+  {
+    "name": "err_other",
+    "lines": [
+      "ERR: access denied"
+    ],
+    "want_err": "invalid"
+  },
+  {
+    "name": "usage_line",
+    "lines": [
+      "Usage: hex <telegram>"
+    ],
+    "want_err": "invalid"
+  },
+  {
+    "name": "invalid_hex_length",
+    "lines": [
+      "0x0"
+    ],
+    "want_err": "invalid"
+  },
+  {
+    "name": "empty_lines_timeout",
+    "lines": [
+      "",
+      "   "
+    ],
+    "want_err": "timeout"
+  }
+]
