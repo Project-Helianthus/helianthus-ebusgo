@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
 	"github.com/d3vi1/helianthus-ebusgo/internal/crc"
@@ -21,6 +22,7 @@ const (
 	ebusSymbolSyn    = byte(0xAA)
 	ebusSymbolAck    = byte(0x00)
 	ebusBroadcast    = byte(0xFE)
+	ebusdDrainWindow = 10 * time.Millisecond
 )
 
 var errNoHexPayload = errors.New("ebusd: no hex payload")
@@ -205,7 +207,7 @@ func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, er
 		return nil, ebuserrors.ErrTransportClosed
 	}
 
-	lines, err := readResponseLines(t.reader)
+	lines, err := readResponseLines(t.conn, t.reader)
 	if err != nil {
 		return nil, err
 	}
@@ -216,29 +218,69 @@ func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, er
 	return stripLengthPrefix(resp), nil
 }
 
-func readResponseLines(reader *bufio.Reader) ([]string, error) {
+func readResponseLines(conn net.Conn, reader *bufio.Reader) ([]string, error) {
 	var lines []string
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
+			if isTimeout(err) {
+				return lines, ebuserrors.ErrTimeout
+			}
+			if isClosed(err) {
+				return lines, ebuserrors.ErrTransportClosed
+			}
 			return lines, ebuserrors.ErrTransportClosed
 		}
 
 		line = strings.TrimRight(line, "\r\n")
 		if strings.TrimSpace(line) == "" {
-			break
+			if len(lines) > 0 {
+				break
+			}
+			if errors.Is(err, io.EOF) {
+				return lines, ebuserrors.ErrTransportClosed
+			}
+			continue
 		}
 		lines = append(lines, line)
-
 		if errors.Is(err, io.EOF) {
+			return lines, nil
+		}
+		break
+	}
+
+	if len(lines) == 0 {
+		return lines, ebuserrors.ErrTimeout
+	}
+
+	if conn != nil {
+		_ = conn.SetReadDeadline(time.Now().Add(ebusdDrainWindow))
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if isTimeout(err) || errors.Is(err, io.EOF) || isClosed(err) {
+				break
+			}
 			break
 		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, line)
 	}
+	if conn != nil {
+		_ = conn.SetReadDeadline(time.Time{})
+	}
+
 	return lines, nil
 }
 
 func parseHexResponseLines(lines []string) ([]byte, error) {
-	seenDone := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -247,31 +289,32 @@ func parseHexResponseLines(lines []string) ([]byte, error) {
 
 		lower := strings.ToLower(trimmed)
 		if strings.HasPrefix(lower, "done") {
-			seenDone = true
-			continue
+			return nil, errNoHexPayload
 		}
-		if strings.HasPrefix(lower, "err:") {
-			continue
+		if strings.HasPrefix(lower, "err") {
+			if strings.Contains(lower, "timeout") ||
+				strings.Contains(lower, "timed out") ||
+				strings.Contains(lower, "no answer") {
+				return nil, ebuserrors.ErrTimeout
+			}
+			return nil, ebuserrors.ErrInvalidPayload
 		}
 		if strings.HasPrefix(lower, "usage:") {
 			return nil, ebuserrors.ErrInvalidPayload
 		}
+		if strings.HasPrefix(lower, "0x") {
+			trimmed = strings.TrimSpace(trimmed[2:])
+		}
 
 		hexText := stripHexSpaces(trimmed)
 		if len(hexText)%2 != 0 {
-			continue
-		}
-		if !isHexString(hexText) {
-			continue
+			return nil, ebuserrors.ErrInvalidPayload
 		}
 		payload, err := hex.DecodeString(hexText)
 		if err != nil {
-			continue
+			return nil, ebuserrors.ErrInvalidPayload
 		}
 		return payload, nil
-	}
-	if seenDone {
-		return nil, errNoHexPayload
 	}
 	return nil, ebuserrors.ErrTimeout
 }
@@ -280,21 +323,8 @@ func stripHexSpaces(value string) string {
 	return strings.NewReplacer(" ", "", "\t", "").Replace(value)
 }
 
-func isHexString(value string) bool {
-	for _, ch := range value {
-		switch {
-		case ch >= '0' && ch <= '9':
-		case ch >= 'a' && ch <= 'f':
-		case ch >= 'A' && ch <= 'F':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 func stripLengthPrefix(payload []byte) []byte {
-	if len(payload) == 0 {
+	if len(payload) < 2 {
 		return payload
 	}
 	if int(payload[0]) == len(payload)-1 {
