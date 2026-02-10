@@ -176,6 +176,20 @@ func TestParseHexResponseLines_DoneBroadcast(t *testing.T) {
 	}
 }
 
+func TestParseHexResponseLines_WhitespaceHex(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{" \t0x02 \t11  22\t "}
+	got, err := parseHexResponseLines(lines)
+	if err != nil {
+		t.Fatalf("parseHexResponseLines error = %v", err)
+	}
+	want := []byte{0x02, 0x11, 0x22}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("parseHexResponseLines = %v; want %v", got, want)
+	}
+}
+
 func TestEbusdTCPTransport_SendHexCommand_StripsLengthPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -239,6 +253,112 @@ func TestEbusdTCPTransport_SendHexCommand_StripsLengthPrefix(t *testing.T) {
 			}
 			if !bytes.Equal(got, test.wantPayload) {
 				t.Fatalf("sendHexCommand = %v; want %v", got, test.wantPayload)
+			}
+			if err := <-serverErr; err != nil {
+				t.Fatalf("server error = %v", err)
+			}
+		})
+	}
+}
+
+func TestEbusdTCPTransport_SendHexCommand_CommandFormatting(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	tr := NewEbusdTCPTransport(client)
+
+	src := byte(0x03)
+	payload := []byte{0x00, 0x0A, 0xF0}
+	wantCommand := "hex -s 03 000af0\n"
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if line != wantCommand {
+			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			return
+		}
+		_, err = server.Write([]byte("01 00\n\n"))
+		serverErr <- err
+	}()
+
+	got, err := tr.sendHexCommand(src, payload)
+	if err != nil {
+		t.Fatalf("sendHexCommand error = %v", err)
+	}
+	wantPayload := []byte{0x00}
+	if !bytes.Equal(got, wantPayload) {
+		t.Fatalf("sendHexCommand = %v; want %v", got, wantPayload)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestEbusdTCPTransport_SendHexCommand_ErrLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		response string
+		wantErr  error
+	}{
+		{
+			name:     "timeout",
+			response: "ERR: timeout waiting for response\n\n",
+			wantErr:  ebuserrors.ErrTimeout,
+		},
+		{
+			name:     "no answer",
+			response: "ERR: no answer\n\n",
+			wantErr:  ebuserrors.ErrTimeout,
+		},
+		{
+			name:     "access denied",
+			response: "ERR: access denied\n\n",
+			wantErr:  ebuserrors.ErrInvalidPayload,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+
+			tr := NewEbusdTCPTransport(client)
+			wantCommand := "hex -s 08 01\n"
+
+			serverErr := make(chan error, 1)
+			go func() {
+				reader := bufio.NewReader(server)
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					serverErr <- err
+					return
+				}
+				if line != wantCommand {
+					serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+					return
+				}
+				_, err = server.Write([]byte(test.response))
+				serverErr <- err
+			}()
+
+			_, err := tr.sendHexCommand(0x08, []byte{0x01})
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("sendHexCommand error = %v; want %v", err, test.wantErr)
 			}
 			if err := <-serverErr; err != nil {
 				t.Fatalf("server error = %v", err)
