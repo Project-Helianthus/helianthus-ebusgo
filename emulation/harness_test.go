@@ -170,6 +170,48 @@ func TestHarnessRunSequence_Errors(t *testing.T) {
 	}
 }
 
+func TestHarnessHistory_DeepCopiesFrameData(t *testing.T) {
+	t.Parallel()
+
+	target := &Target{
+		Address: 0x15,
+		Rules: []Rule{
+			{
+				Name:    "identify",
+				Matcher: MatchPrimarySecondary(0x07, 0x04),
+				Builder: BuildFunc(func(protocol.Frame) (ResponsePlan, error) {
+					return ResponsePlan{
+						Delay: 8 * time.Millisecond,
+						Data:  []byte{0xB5},
+					}, nil
+				}),
+			},
+		},
+	}
+
+	harness := NewHarness(target)
+	_, err := harness.Query(protocol.Frame{
+		Source:    0x10,
+		Target:    0x15,
+		Primary:   0x07,
+		Secondary: 0x04,
+	})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+
+	history := harness.History()
+	if len(history) != 1 {
+		t.Fatalf("len(history) = %d; want 1", len(history))
+	}
+	history[0].Frame.Data[0] = 0x00
+
+	freshHistory := harness.History()
+	if got := freshHistory[0].Frame.Data[0]; got != 0xB5 {
+		t.Fatalf("freshHistory[0].Frame.Data[0] = 0x%02x; want 0xb5", got)
+	}
+}
+
 func TestValidateResponseEnvelope(t *testing.T) {
 	t.Parallel()
 

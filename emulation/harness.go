@@ -120,6 +120,9 @@ func (h *Harness) History() []EmulatedResponse {
 		return nil
 	}
 	out := make([]EmulatedResponse, len(h.history))
-	copy(out, h.history)
+	for idx := range h.history {
+		out[idx] = h.history[idx]
+		out[idx].Frame.Data = append([]byte(nil), h.history[idx].Frame.Data...)
+	}
 	return out
 }

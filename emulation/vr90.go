@@ -72,6 +72,11 @@ func NewVR90Target(profile VR90Profile) (*Target, error) {
 }
 
 func normalizeVR90Profile(profile VR90Profile) (VR90Profile, error) {
+	hasIdentityOverrides := profile.Manufacturer != 0 ||
+		strings.TrimSpace(profile.DeviceID) != "" ||
+		profile.Software != 0 ||
+		profile.Hardware != 0
+
 	if profile.Address == 0 {
 		profile.Address = DefaultVR90Address
 	}
@@ -81,10 +86,8 @@ func normalizeVR90Profile(profile VR90Profile) (VR90Profile, error) {
 	if strings.TrimSpace(profile.DeviceID) == "" {
 		profile.DeviceID = DefaultVR90DeviceID
 	}
-	if profile.Software == 0 {
+	if !hasIdentityOverrides {
 		profile.Software = DefaultVR90Software
-	}
-	if profile.Hardware == 0 {
 		profile.Hardware = DefaultVR90Hardware
 	}
 	if profile.ResponseDelay <= 0 {
