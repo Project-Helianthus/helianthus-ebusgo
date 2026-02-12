@@ -19,7 +19,8 @@ Core layering in this repo:
 1. `transport` — `RawTransport` implementations (`ENH`, `ENS`, `ebusd-tcp`, loopback).
 2. `protocol` — frame model, CRC handling, and prioritized `Bus` send/receive state machine.
 3. `types` — eBUS codecs (`EXP`, `BCD`, `DATA1b`, `DATA2b`, `DATA2c`, `WORD`, structured types) with replacement-value semantics.
-4. `errors` — sentinel errors + helpers (`IsTransient`, `IsDefinitive`, `IsFatal`) for policy decisions.
+4. `emulation` — target-emulation framework + deterministic harness (VR90 minimal profile).
+5. `errors` — sentinel errors + helpers (`IsTransient`, `IsDefinitive`, `IsFatal`) for policy decisions.
 
 ## Prerequisites
 
@@ -60,6 +61,18 @@ tinygo build -target esp32-coreboard-v2 ./cmd/tinygo-check
 - Real-bus smoke/integration flow is run from `helianthus-ebusgateway` (`cmd/smoke`) and documented here:
   - https://github.com/d3vi1/helianthus-docs-ebus/blob/main/development/smoke-test.md
 - `transport/ebusd_tcp.go` is built only on non-TinyGo targets (`//go:build !tinygo`).
+- For target emulation with strict timing constraints, run near the adapter/firmware edge; `ebusd-tcp` is useful for functional checks but too jittery for precise cycle-accurate emulation.
+
+## Target Emulation (Issue #59 scope)
+
+- `emulation.Target` exposes request matcher + response builder + timing knobs.
+- `emulation.Harness` provides deterministic virtual-time query simulation for tests.
+- `emulation.NewVR90Target` implements minimal VR90 recognition behavior (`07 04` identify) with configurable target address and identity fields (manufacturer/device ID/software/hardware).
+- Minimal smoke check:
+
+```bash
+./scripts/smoke-vr90-minimal.sh
+```
 
 ## Package Map
 
@@ -69,6 +82,7 @@ tinygo build -target esp32-coreboard-v2 ./cmd/tinygo-check
 | `transport` | Byte-level transport adapters | Connect ENH/ENS/ebusd-tcp endpoints |
 | `protocol` | eBUS frame model + `Bus` queue/state machine | Send frames with typed retry semantics |
 | `types` | eBUS value codecs | Decode/encode payload fields |
+| `emulation` | Target-response rules + deterministic harness | Unit/integration test emulated devices |
 | `cmd/tinygo-check` | TinyGo compile probe | Validate package compatibility on embedded targets |
 | `internal/crc` | CRC implementation details | Internal-only support package |
 
@@ -110,6 +124,13 @@ _ = err
 ```
 
 Tip: use a bounded context (`context.WithTimeout`) for `Send` calls on multi-initiator buses.
+
+### 4) Work on target emulation / VR90 minimal behavior
+
+```bash
+go test ./emulation -count=1
+./scripts/smoke-vr90-minimal.sh
+```
 
 ## Troubleshooting
 
