@@ -94,6 +94,41 @@ func TestNewVR90Target_NormalizesDefaults(t *testing.T) {
 	}
 }
 
+func TestNewVR90Target_PreservesZeroSoftwareHardware(t *testing.T) {
+	t.Parallel()
+
+	profile := DefaultVR90Profile()
+	profile.Software = 0x0000
+	profile.Hardware = 0x0000
+
+	target, err := NewVR90Target(profile)
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	response, err := target.Emulate(RequestEvent{
+		Frame: protocol.Frame{
+			Source:    0x10,
+			Target:    DefaultVR90Address,
+			Primary:   0x07,
+			Secondary: 0x04,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Emulate() error = %v", err)
+	}
+
+	wantData := []byte{
+		DefaultVR90Manufacturer,
+		'B', '7', 'V', '0', '0',
+		0x00, 0x00,
+		0x00, 0x00,
+	}
+	if !bytes.Equal(response.Frame.Data, wantData) {
+		t.Fatalf("Frame data = %x; want %x", response.Frame.Data, wantData)
+	}
+}
+
 func TestNewVR90Target_Errors(t *testing.T) {
 	t.Parallel()
 
