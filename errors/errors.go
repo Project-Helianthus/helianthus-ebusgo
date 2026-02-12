@@ -6,7 +6,7 @@ var (
 	ErrBusCollision = stderrors.New("ebus: bus collision during arbitration")
 	ErrTimeout      = stderrors.New("ebus: no response within timeout window")
 	ErrCRCMismatch  = stderrors.New("ebus: CRC validation failed")
-	ErrNACK         = stderrors.New("ebus: slave returned NACK")
+	ErrNACK         = stderrors.New("ebus: target returned NACK")
 	ErrNoSuchDevice = stderrors.New("ebus: no device responded at address")
 
 	ErrRetryExhausted  = stderrors.New("ebus: retries exhausted")

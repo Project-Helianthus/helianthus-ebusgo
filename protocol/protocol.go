@@ -15,8 +15,8 @@ type FrameType uint8
 const (
 	FrameTypeUnknown FrameType = iota
 	FrameTypeBroadcast
-	FrameTypeMasterSlave
-	FrameTypeMasterMaster
+	FrameTypeInitiatorTarget
+	FrameTypeInitiatorInitiator
 )
 
 // Frame represents a parsed eBUS frame.
@@ -41,10 +41,10 @@ func FrameTypeForTarget(target byte) FrameType {
 	if !isValidAddress(target) {
 		return FrameTypeUnknown
 	}
-	if isMasterAddress(target) {
-		return FrameTypeMasterMaster
+	if isInitiatorCapableAddress(target) {
+		return FrameTypeInitiatorInitiator
 	}
-	return FrameTypeMasterSlave
+	return FrameTypeInitiatorTarget
 }
 
 // CRC calculates the eBUS CRC8 over unescaped symbols.
@@ -69,11 +69,11 @@ func isValidAddress(addr byte) bool {
 	return addr != SymbolEscape && addr != SymbolSyn
 }
 
-func isMasterAddress(addr byte) bool {
-	return masterPartIndex(addr&0x0F) > 0 && masterPartIndex((addr&0xF0)>>4) > 0
+func isInitiatorCapableAddress(addr byte) bool {
+	return initiatorPartIndex(addr&0x0F) > 0 && initiatorPartIndex((addr&0xF0)>>4) > 0
 }
 
-func masterPartIndex(bits byte) byte {
+func initiatorPartIndex(bits byte) byte {
 	switch bits {
 	case 0x0:
 		return 1

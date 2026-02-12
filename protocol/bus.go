@@ -18,17 +18,17 @@ type RetryPolicy struct {
 }
 
 type BusConfig struct {
-	MasterSlave  RetryPolicy
-	MasterMaster RetryPolicy
+	InitiatorTarget    RetryPolicy
+	InitiatorInitiator RetryPolicy
 }
 
 func DefaultBusConfig() BusConfig {
 	return BusConfig{
-		MasterSlave: RetryPolicy{
+		InitiatorTarget: RetryPolicy{
 			TimeoutRetries: 2,
 			NACKRetries:    1,
 		},
-		MasterMaster: RetryPolicy{
+		InitiatorInitiator: RetryPolicy{
 			TimeoutRetries: 2,
 			NACKRetries:    1,
 		},
@@ -47,7 +47,7 @@ type busResult struct {
 }
 
 type arbitrationTransport interface {
-	StartArbitration(master byte) error
+	StartArbitration(initiator byte) error
 }
 
 // Bus orchestrates prioritized frame sending and transaction matching.
@@ -77,7 +77,7 @@ func NewBus(tr transport.RawTransport, config BusConfig, queueCapacity int) *Bus
 		queue:     newPriorityQueue(),
 		// Capacity 1 to coalesce wake-ups from multiple Send calls.
 		notify: make(chan struct{}, 1),
-		outCap:    queueCapacity,
+		outCap: queueCapacity,
 	}
 }
 
@@ -177,7 +177,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 
 		if err := b.startArbitration(request.frame.Source); err != nil {
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
-				// Arbitration can be lost while another master owns the bus.
+				// Arbitration can be lost while another initiator owns the bus.
 				// ebusd waits for subsequent SYN symbols before retrying; do the
 				// same here (bounded by request context deadline).
 				if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
@@ -215,21 +215,21 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 
 func (b *Bus) retryPolicy(frameType FrameType) RetryPolicy {
 	switch frameType {
-	case FrameTypeMasterMaster:
-		return b.config.MasterMaster
-	case FrameTypeMasterSlave:
-		return b.config.MasterSlave
+	case FrameTypeInitiatorInitiator:
+		return b.config.InitiatorInitiator
+	case FrameTypeInitiatorTarget:
+		return b.config.InitiatorTarget
 	default:
 		return RetryPolicy{}
 	}
 }
 
-func (b *Bus) startArbitration(master byte) error {
+func (b *Bus) startArbitration(initiator byte) error {
 	tr, ok := b.transport.(arbitrationTransport)
 	if !ok {
 		return nil
 	}
-	if err := tr.StartArbitration(master); err != nil {
+	if err := tr.StartArbitration(initiator); err != nil {
 		return fmt.Errorf("bus arbitration failed: %w", err)
 	}
 	return nil
@@ -339,11 +339,11 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
 	}
 
-	// Master telegram (unescaped symbols): SRC DST PB SB LEN DATA... CRC
-	master := make([]byte, 0, 6+len(frame.Data))
-	master = append(master, frame.Source, frame.Target, frame.Primary, frame.Secondary, byte(len(frame.Data)))
-	master = append(master, frame.Data...)
-	master = append(master, CRC(master))
+	// Initiator telegram (unescaped symbols): SRC DST PB SB LEN DATA... CRC
+	telegram := make([]byte, 0, 6+len(frame.Data))
+	telegram = append(telegram, frame.Source, frame.Target, frame.Primary, frame.Secondary, byte(len(frame.Data)))
+	telegram = append(telegram, frame.Data...)
+	telegram = append(telegram, CRC(telegram))
 
 	decoder := &busDecoder{}
 
@@ -354,7 +354,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := b.sendMasterTelegram(runCtx, reqCtx, master, includeSource); err != nil {
+		if err := b.sendInitiatorTelegram(runCtx, reqCtx, telegram, includeSource); err != nil {
 			return nil, err
 		}
 
@@ -387,13 +387,13 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 		}
 	}
 
-	if frameType == FrameTypeMasterMaster {
+	if frameType == FrameTypeInitiatorInitiator {
 		if err := b.sendEndOfMessage(runCtx, reqCtx); err != nil {
 			return nil, err
 		}
 		return nil, nil
 	}
-	if frameType != FrameTypeMasterSlave {
+	if frameType != FrameTypeInitiatorTarget {
 		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
 	}
 
@@ -459,7 +459,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 	return nil, fmt.Errorf("unreachable response loop: %w", ebuserrors.ErrTimeout)
 }
 
-func (b *Bus) sendMasterTelegram(runCtx, reqCtx context.Context, telegram []byte, includeSource bool) error {
+func (b *Bus) sendInitiatorTelegram(runCtx, reqCtx context.Context, telegram []byte, includeSource bool) error {
 	start := 0
 	if !includeSource {
 		start = 1
