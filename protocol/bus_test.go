@@ -174,7 +174,7 @@ func TestBus_BroadcastDoesNotReadAck(t *testing.T) {
 	}
 }
 
-func TestBus_MasterMasterAckOnly(t *testing.T) {
+func TestBus_InitiatorInitiatorAckOnly(t *testing.T) {
 	t.Parallel()
 
 	frame := protocol.Frame{
@@ -237,11 +237,11 @@ func TestBus_ResponseCRCMismatch(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
@@ -287,11 +287,11 @@ func TestBus_RetryOnCRCMismatch(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 1,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 1,
 			NACKRetries:    0,
 		},
@@ -336,11 +336,11 @@ func TestBus_RetryOnTimeout(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 1,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 1,
 			NACKRetries:    0,
 		},
@@ -392,11 +392,11 @@ func TestBus_RetryOnNACK(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    1,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    1,
 		},
@@ -443,11 +443,11 @@ func TestBus_NACKExhaustedWrapsSentinel(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
@@ -472,16 +472,16 @@ type arbitratingScriptedTransport struct {
 	writes [][]byte
 	calls  []string
 
-	arbitrationMasters []byte
-	arbitrationResults []error
+	arbitrationInitiators []byte
+	arbitrationResults    []error
 }
 
-func (s *arbitratingScriptedTransport) StartArbitration(master byte) error {
+func (s *arbitratingScriptedTransport) StartArbitration(initiator byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.calls = append(s.calls, "arbitrate")
-	s.arbitrationMasters = append(s.arbitrationMasters, master)
+	s.arbitrationInitiators = append(s.arbitrationInitiators, initiator)
 	if len(s.arbitrationResults) == 0 {
 		return nil
 	}
@@ -550,14 +550,14 @@ func TestBus_ArbitrationCalledBeforeWrite(t *testing.T) {
 
 	tr.mu.Lock()
 	calls := append([]string(nil), tr.calls...)
-	masters := append([]byte(nil), tr.arbitrationMasters...)
+	initiators := append([]byte(nil), tr.arbitrationInitiators...)
 	tr.mu.Unlock()
 
 	if len(calls) < 2 || calls[0] != "arbitrate" {
 		t.Fatalf("calls = %v; want first call arbitrate", calls)
 	}
-	if len(masters) != 1 || masters[0] != 0x10 {
-		t.Fatalf("arbitration masters = %v; want [0x10]", masters)
+	if len(initiators) != 1 || initiators[0] != 0x10 {
+		t.Fatalf("arbitration initiators = %v; want [0x10]", initiators)
 	}
 }
 
@@ -583,11 +583,11 @@ func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 1,
 			NACKRetries:    0,
 		},
@@ -607,14 +607,14 @@ func TestBus_RetryOnCollisionDuringArbitration(t *testing.T) {
 
 	tr.mu.Lock()
 	writes := len(tr.writes)
-	masters := append([]byte(nil), tr.arbitrationMasters...)
+	initiators := append([]byte(nil), tr.arbitrationInitiators...)
 	tr.mu.Unlock()
 
 	if writes == 0 {
 		t.Fatalf("writes = %d; want >0", writes)
 	}
-	if len(masters) != 2 {
-		t.Fatalf("arbitration calls = %d; want 2", len(masters))
+	if len(initiators) != 2 {
+		t.Fatalf("arbitration calls = %d; want 2", len(initiators))
 	}
 }
 
@@ -633,11 +633,11 @@ func TestBus_ArbitrationCollisionBoundWithoutDeadline(t *testing.T) {
 		arbitrationResults: []error{ebuserrors.ErrBusCollision, ebuserrors.ErrBusCollision},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
@@ -656,10 +656,10 @@ func TestBus_ArbitrationCollisionBoundWithoutDeadline(t *testing.T) {
 	}
 
 	tr.mu.Lock()
-	masters := len(tr.arbitrationMasters)
+	initiators := len(tr.arbitrationInitiators)
 	tr.mu.Unlock()
-	if masters != 1 {
-		t.Fatalf("arbitration calls = %d; want 1", masters)
+	if initiators != 1 {
+		t.Fatalf("arbitration calls = %d; want 1", initiators)
 	}
 }
 
@@ -687,11 +687,11 @@ func TestBus_RetryOnCollisionDuringWriteWaitsForSyn(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 1,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 1,
 			NACKRetries:    0,
 		},
@@ -741,11 +741,11 @@ func TestBus_RetryOnCollisionDoesNotConsumeTimeoutRetries(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
@@ -788,11 +788,11 @@ func TestBus_CollisionRetryRespectsTimeoutRetriesWithoutDeadline(t *testing.T) {
 		},
 	}
 	config := protocol.BusConfig{
-		MasterSlave: protocol.RetryPolicy{
+		InitiatorTarget: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},
-		MasterMaster: protocol.RetryPolicy{
+		InitiatorInitiator: protocol.RetryPolicy{
 			TimeoutRetries: 0,
 			NACKRetries:    0,
 		},

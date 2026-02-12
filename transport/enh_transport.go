@@ -24,9 +24,9 @@ type ENHTransport struct {
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 
-	parser      ENHParser
-	pending     []byte
-	buffer      []byte
+	parser  ENHParser
+	pending []byte
+	buffer  []byte
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -207,17 +207,17 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	return len(payload), nil
 }
 
-// StartArbitration requests bus ownership for the given master address.
-// It sends ENHReqStart(master) and blocks until ENHResStarted(master) or ENHResFailed(winner).
+// StartArbitration requests bus ownership for the given initiator address.
+// It sends ENHReqStart(initiator) and blocks until ENHResStarted(initiator) or ENHResFailed(winner).
 //
 // Any received ENHResReceived bytes observed while waiting are queued so that subsequent ReadByte
 // calls can consume them.
-func (t *ENHTransport) StartArbitration(master byte) error {
+func (t *ENHTransport) StartArbitration(initiator byte) error {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
 	t.writeMu.Lock()
-	seq := EncodeENH(ENHReqStart, master)
+	seq := EncodeENH(ENHReqStart, initiator)
 	written := 0
 	for written < len(seq) {
 		if err := t.setWriteDeadline(); err != nil {
@@ -271,12 +271,12 @@ func (t *ENHTransport) StartArbitration(master byte) error {
 				case ENHResResetted:
 					t.resetStateLocked()
 				case ENHResStarted:
-					if msg.Data == master {
+					if msg.Data == initiator {
 						arbitrationDone = true
 					}
 				case ENHResFailed:
 					arbitrationDone = true
-					arbitrationErr = fmt.Errorf("enh arbitration failed (master 0x%02x, winner 0x%02x): %w", master, msg.Data, ebuserrors.ErrBusCollision)
+					arbitrationErr = fmt.Errorf("enh arbitration failed (initiator 0x%02x, winner 0x%02x): %w", initiator, msg.Data, ebuserrors.ErrBusCollision)
 				}
 			}
 		}

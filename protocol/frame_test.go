@@ -20,14 +20,14 @@ func TestFrameTypeForTarget(t *testing.T) {
 			want:   protocol.FrameTypeBroadcast,
 		},
 		{
-			name:   "MasterMaster",
+			name:   "InitiatorInitiator",
 			target: 0x10,
-			want:   protocol.FrameTypeMasterMaster,
+			want:   protocol.FrameTypeInitiatorInitiator,
 		},
 		{
-			name:   "MasterSlave",
+			name:   "InitiatorTarget",
 			target: 0x08,
-			want:   protocol.FrameTypeMasterSlave,
+			want:   protocol.FrameTypeInitiatorTarget,
 		},
 		{
 			name:   "InvalidAddress",
@@ -52,7 +52,7 @@ func TestFrame_Type(t *testing.T) {
 	t.Parallel()
 
 	frame := protocol.Frame{Target: 0x10}
-	if got := frame.Type(); got != protocol.FrameTypeMasterMaster {
-		t.Fatalf("Frame.Type = %v; want %v", got, protocol.FrameTypeMasterMaster)
+	if got := frame.Type(); got != protocol.FrameTypeInitiatorInitiator {
+		t.Fatalf("Frame.Type = %v; want %v", got, protocol.FrameTypeInitiatorInitiator)
 	}
 }

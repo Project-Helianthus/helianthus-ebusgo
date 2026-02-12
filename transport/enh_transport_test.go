@@ -254,7 +254,7 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 	defer server.Close()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
-	master := byte(0x10)
+	initiator := byte(0x10)
 
 	serverErr := make(chan error, 1)
 	// Goroutine exits after validating the request and sending responses.
@@ -264,19 +264,19 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 			serverErr <- err
 			return
 		}
-		want := transport.EncodeENH(transport.ENHReqStart, master)
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
 		if buf[0] != want[0] || buf[1] != want[1] {
 			serverErr <- errors.New("unexpected arbitration request")
 			return
 		}
 
-		started := transport.EncodeENH(transport.ENHResStarted, master)
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
 		payload := []byte{0x11, started[0], started[1], 0x22}
 		_, err := server.Write(payload)
 		serverErr <- err
 	}()
 
-	if err := enh.StartArbitration(master); err != nil {
+	if err := enh.StartArbitration(initiator); err != nil {
 		t.Fatalf("StartArbitration error = %v", err)
 	}
 
@@ -298,7 +298,7 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 	defer server.Close()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
-	master := byte(0x10)
+	initiator := byte(0x10)
 	winner := byte(0x30)
 
 	serverErr := make(chan error, 1)
@@ -309,7 +309,7 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 			serverErr <- err
 			return
 		}
-		want := transport.EncodeENH(transport.ENHReqStart, master)
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
 		if buf[0] != want[0] || buf[1] != want[1] {
 			serverErr <- errors.New("unexpected arbitration request")
 			return
@@ -321,7 +321,7 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 		serverErr <- err
 	}()
 
-	err := enh.StartArbitration(master)
+	err := enh.StartArbitration(initiator)
 	if !errors.Is(err, ebuserrors.ErrBusCollision) {
 		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
 	}

@@ -109,14 +109,14 @@ _ = resp
 _ = err
 ```
 
-Tip: use a bounded context (`context.WithTimeout`) for `Send` calls on multi-master buses.
+Tip: use a bounded context (`context.WithTimeout`) for `Send` calls on multi-initiator buses.
 
 ## Troubleshooting
 
 | Symptom / error | Likely cause | Practical fix |
 |---|---|---|
 | `ErrTimeout` | target did not answer, or timeout too short | verify address/telegram and increase read timeout / request context |
-| `ErrBusCollision` | arbitration lost to another master | retry with bounded context; verify master address and bus contention |
+| `ErrBusCollision` | arbitration lost to another initiator | retry with bounded context; verify initiator address and bus contention |
 | `ErrCRCMismatch` | framing/escaping mismatch or corrupted response | ensure transport matches endpoint (`enh` vs `ens` vs `ebusd-tcp`) |
 | `ErrInvalidPayload` | malformed adapter data or wrong backend assumption | confirm backend protocol and command endpoint; inspect raw response fixture |
 | `ErrTransportClosed` | socket/connection dropped | reconnect, recreate transport, then recreate/restart `Bus` |
