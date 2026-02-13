@@ -1,87 +1,126 @@
 # helianthus-ebusgo
 
-`helianthus-ebusgo` is the low-level eBUS core for the Helianthus stack: byte transports, frame encode/decode, bus arbitration + retries, and reusable eBUS data-type codecs.
+`helianthus-ebusgo` is the low-level eBUS core library for Helianthus. It provides transport adapters, wire framing, bus transaction flow, and reusable data-type codecs used by higher-level repositories.
 
-## Scope
+## Purpose and scope
 
-- In scope: `transport`, `protocol`, `types`, `emulation`, `errors`.
-- Out of scope: gateway APIs/projections/smoke orchestration (`helianthus-ebusgateway`, `helianthus-ebusreg`).
+### What belongs in this repo
 
-## Role / Use-Case Entry Paths
+- eBUS transports (`transport/`) including ENH, ENS, ebusd-tcp, and loopback test transport.
+- Wire/protocol primitives (`protocol/`) including framing, CRC handling, and bus transaction behavior.
+- Reusable type codecs (`types/`) and error taxonomy (`errors/`).
+- Deterministic target emulation helpers and smoke tests (`emulation/`, `scripts/`).
 
-| Role / use case | Start path(s) | First command |
-|---|---|---|
-| Integrate bus send/receive in a Go process | `transport/`, `protocol/bus.go`, `protocol/protocol.go` | `go test ./protocol -count=1` |
-| Extend transport behavior (ENH/ENS/ebusd-tcp/loopback) | `transport/` | `go test ./transport -count=1` |
-| Add/adjust eBUS value codecs | `types/` | `go test ./types -count=1` |
-| Build deterministic target emulation tests | `emulation/` | `go test ./emulation -count=1` |
-| Check embedded compile compatibility | `cmd/tinygo-check/` | `tinygo build -target esp32-coreboard-v2 ./cmd/tinygo-check` |
+### What does not belong in this repo
 
-## Transport Decision Matrix
+- GraphQL/API surfaces, registry/provider composition, or integration orchestration.
+- Live deployment or production gateway runtime wiring.
 
-| Transport | Choose it when | Constraints / notes | Entry constructor |
-|---|---|---|---|
-| `ENH` | Adapter/socket speaks ENH command framing and you want explicit init/arbitration semantics | Non-TinyGo build (`transport/enh_transport.go` has `//go:build !tinygo`); call `Init(features)` before normal traffic | `transport.NewENHTransport(conn, readTimeout, writeTimeout)` |
-| `ENS` | Endpoint is ENS-escaped raw byte stream (no ENH control channel) | Non-TinyGo build (`transport/ens_transport.go` has `//go:build !tinygo`) | `transport.NewENSTransport(conn, readTimeout, writeTimeout)` |
-| `ebusd-tcp` | You only have ebusd command TCP access and need functional request/response bridging | Non-TinyGo build (`transport/ebusd_tcp.go` has `//go:build !tinygo`); uses ebusd `hex` command flow; good for functional checks, not cycle-accurate timing/emulation | `transport.NewEbusdTCPTransport(conn)` |
-| `loopback` | Unit tests, local simulation, deterministic in-memory transport | No external endpoint/hardware; not a real bus adapter | `transport.NewLoopback()` |
+Those belong in:
+- `helianthus-ebusreg` (registry/provider layer),
+- `helianthus-ebusgateway` (gateway runtime and live-bus smoke path).
 
-Protocol references:
+## Status and maturity
 
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
+- **Maturity:** active foundation library with stable core test coverage and ongoing incremental feature work.
+- **Current posture:** suitable for contributor onboarding, protocol experimentation, and CI-validated low-level changes.
+- **Operational note:** this repo focuses on deterministic library/runtime behavior; live-bus rollout validation is performed in `helianthus-ebusgateway`.
 
-## Minimal Quick Start (first successful run)
+## How this fits in the Helianthus chain
+
+```text
+helianthus-ebusgo  ->  helianthus-ebusreg  ->  helianthus-ebusgateway  ->  integrations/add-ons
+ (transport+bus)       (registry+schemas)      (runtime/API/smoke)
+```
+
+## Quickstart (copy/paste)
+
+### 1) Clone and baseline checks
 
 ```bash
 git clone https://github.com/d3vi1/helianthus-ebusgo.git
 cd helianthus-ebusgo
 go test ./...
+go vet ./...
+go build ./...
+```
+
+### 2) CI-parity checks
+
+```bash
+go test -race -count=1 ./...
+```
+
+### 3) Local smoke tests (deterministic, no hardware required)
+
+```bash
 ./scripts/smoke-identify-only.sh
 ./scripts/smoke-vr90-minimal.sh
 ```
 
-Optional CI-parity checks:
+### 4) TinyGo compatibility check (optional)
 
 ```bash
-go vet ./...
-go test -race -count=1 ./...
+tinygo build -target esp32-coreboard-v2 ./cmd/tinygo-check
 ```
 
-Hardware smoke is intentionally out of scope in this repo. For live-bus smoke flow, use `helianthus-ebusgateway` (`cmd/smoke`) and:
+## Local smoke-test configuration examples
 
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/development/smoke-test.md
+Use these when extending `emulation/` behavior.
 
-## Change Area -> Test Matrix
+### Identify-only preset example
 
-| Change area | Focused test command(s) |
+```go
+profile := emulation.PresetVR90IdentifyOnlyProfile()
+target, err := emulation.NewIdentifyOnlyTarget(profile)
+```
+
+### VR90 extended discovery + mapped-command example
+
+```go
+profile := emulation.DefaultVR90Profile()
+profile.EnableB509Discovery = true
+profile.MappedCommands = []emulation.VR90MappedCommand{
+	{
+		Primary:      0xB5,
+		Secondary:    0x09,
+		PayloadExact: []byte{0x24},
+		ResponseData: []byte{0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'},
+	},
+}
+target, err := emulation.NewVR90Target(profile)
+```
+
+## Change area -> focused validation
+
+| Change area | Focused command(s) |
 |---|---|
-| `transport/enh*.go` | `go test ./transport -run ENH -count=1` |
-| `transport/ens*.go` | `go test ./transport -run ENS -count=1` |
-| `transport/ebusd_tcp*.go` | `go test ./transport -run EbusdTCP -count=1` |
+| `transport/` | `go test ./transport -count=1` |
 | `protocol/` | `go test ./protocol -count=1` |
 | `types/` | `go test ./types -count=1` |
-| `emulation/` | `go test ./emulation -count=1` + `./scripts/smoke-identify-only.sh` + `./scripts/smoke-vr90-minimal.sh` |
-| Cross-package behavior | `go test ./... -count=1` |
+| `emulation/` | `go test ./emulation -count=1` |
+| smoke scripts | `./scripts/smoke-identify-only.sh` and `./scripts/smoke-vr90-minimal.sh` |
+| cross-package | `go test ./... -count=1` |
 
-## Troubleshooting Pointers
+## Link map
 
-| Symptom / error | Likely cause | Practical pointer |
-|---|---|---|
-| `ErrTimeout` | No response or timeout too aggressive | Validate target address/query and increase transport read timeout or request context timeout |
-| `ErrBusCollision` | Arbitration lost to another initiator | Retry with bounded context; verify initiator address and bus contention |
-| `ErrCRCMismatch` / `ErrInvalidPayload` | Wrong transport expectation or malformed escaped payload | Re-check chosen transport against matrix above (`ENH` vs `ENS` vs `ebusd-tcp`) and inspect fixture/raw bytes |
-| `ErrTransportClosed` | Connection dropped/closed | Reconnect, recreate transport, then recreate/restart `protocol.Bus` |
+### Key protocol docs
 
-Error policy helpers:
+- eBUS overview: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
+- ENH framing: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
+- ENS framing: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
+- ebusd TCP behavior: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
 
-- `errors.IsTransient(err)` → retry/backoff candidate
-- `errors.IsDefinitive(err)` → protocol/target negative outcome
-- `errors.IsFatal(err)` → setup/transport/payload issue
-
-## Docs / CI / Issues
+### Local project pointers
 
 - CI workflow: `.github/workflows/ci.yml`
-- eBUS overview: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
-- Roadmap / bugs / support: https://github.com/d3vi1/helianthus-ebusgo/issues
+- smoke scripts: `scripts/smoke-identify-only.sh`, `scripts/smoke-vr90-minimal.sh`
+- TinyGo check entrypoint: `cmd/tinygo-check/main.go`
+
+### Issue workflow conventions
+
+- Use one issue-focused branch per change (example: `issue-72-readme-refresh`).
+- Keep PR scope aligned to issue acceptance criteria.
+- Include closing keyword in PR body (example: `Fixes #72`).
+- Track roadmap, bugs, and enhancements in GitHub Issues:
+  - https://github.com/d3vi1/helianthus-ebusgo/issues
