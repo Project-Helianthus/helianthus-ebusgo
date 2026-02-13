@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/d3vi1/helianthus-ebusgo/protocol"
 )
 
 const (
@@ -14,7 +12,6 @@ const (
 	DefaultVR90DeviceID     = "B7V00"
 	DefaultVR90Software     = uint16(0x0422)
 	DefaultVR90Hardware     = uint16(0x5503)
-	vr90DeviceIDLength      = 5
 )
 
 var (
@@ -52,23 +49,16 @@ func NewVR90Target(profile VR90Profile) (*Target, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Target{
+	return NewIdentifyOnlyTarget(IdentifyOnlyProfile{
 		Name:          fmt.Sprintf("vr90-minimal-0x%02x", normalized.Address),
 		Address:       normalized.Address,
-		DefaultTiming: normalized.Timing,
-		Rules: []Rule{
-			{
-				Name:    "identify",
-				Matcher: MatchPrimarySecondary(0x07, 0x04),
-				Builder: BuildFunc(func(_ protocol.Frame) (ResponsePlan, error) {
-					return ResponsePlan{
-						Delay: normalized.ResponseDelay,
-						Data:  normalized.identificationPayload(),
-					}, nil
-				}),
-			},
-		},
-	}, nil
+		Manufacturer:  normalized.Manufacturer,
+		DeviceID:      normalized.DeviceID,
+		Software:      normalized.Software,
+		Hardware:      normalized.Hardware,
+		ResponseDelay: normalized.ResponseDelay,
+		Timing:        normalized.Timing,
+	})
 }
 
 func normalizeVR90Profile(profile VR90Profile) (VR90Profile, error) {
@@ -104,26 +94,9 @@ func normalizeVR90Profile(profile VR90Profile) (VR90Profile, error) {
 	if trimmed == "" {
 		return VR90Profile{}, fmt.Errorf("vr90 profile empty device id: %w", ErrInvalidConfiguration)
 	}
-	if len(trimmed) > vr90DeviceIDLength {
-		trimmed = trimmed[:vr90DeviceIDLength]
+	if len(trimmed) > identifyOnlyDeviceIDLength {
+		trimmed = trimmed[:identifyOnlyDeviceIDLength]
 	}
 	profile.DeviceID = trimmed
 	return profile, nil
-}
-
-func (profile VR90Profile) identificationPayload() []byte {
-	deviceID := fmt.Sprintf("%-*s", vr90DeviceIDLength, profile.DeviceID)
-	payload := []byte{
-		profile.Manufacturer,
-		deviceID[0],
-		deviceID[1],
-		deviceID[2],
-		deviceID[3],
-		deviceID[4],
-		byte(profile.Software >> 8),
-		byte(profile.Software & 0xFF),
-		byte(profile.Hardware >> 8),
-		byte(profile.Hardware & 0xFF),
-	}
-	return payload
 }

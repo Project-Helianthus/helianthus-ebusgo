@@ -19,7 +19,7 @@ Core layering in this repo:
 1. `transport` — `RawTransport` implementations (`ENH`, `ENS`, `ebusd-tcp`, loopback).
 2. `protocol` — frame model, CRC handling, and prioritized `Bus` send/receive state machine.
 3. `types` — eBUS codecs (`EXP`, `BCD`, `DATA1b`, `DATA2b`, `DATA2c`, `WORD`, structured types) with replacement-value semantics.
-4. `emulation` — target-emulation framework + deterministic harness (VR90 minimal profile).
+4. `emulation` — target-emulation framework + deterministic harness (identify-only profiles with VR90/VR_71 presets).
 5. `errors` — sentinel errors + helpers (`IsTransient`, `IsDefinitive`, `IsFatal`) for policy decisions.
 
 ## Prerequisites
@@ -63,14 +63,17 @@ tinygo build -target esp32-coreboard-v2 ./cmd/tinygo-check
 - `transport/ebusd_tcp.go` is built only on non-TinyGo targets (`//go:build !tinygo`).
 - For target emulation with strict timing constraints, run near the adapter/firmware edge; `ebusd-tcp` is useful for functional checks but too jittery for precise cycle-accurate emulation.
 
-## Target Emulation (Issue #59 scope)
+## Target Emulation (Issues #59/#64 scope)
 
 - `emulation.Target` exposes request matcher + response builder + timing knobs.
 - `emulation.Harness` provides deterministic virtual-time query simulation for tests.
-- `emulation.NewVR90Target` implements minimal VR90 recognition behavior (`07 04` identify) with configurable target address and identity fields (manufacturer/device ID/software/hardware).
+- `emulation.NewIdentifyOnlyTarget` provides a generic identify-only constructor (`07 04`) for address + identity + timing profiles.
+- `emulation.PresetVR90IdentifyOnlyProfile` and `emulation.PresetVR71IdentifyOnlyProfile` provide predefined profiles.
+- `emulation.NewVR90Target` remains backward-compatible and delegates to the generic identify-only profile API.
 - Minimal smoke check:
 
 ```bash
+./scripts/smoke-identify-only.sh
 ./scripts/smoke-vr90-minimal.sh
 ```
 
@@ -125,10 +128,11 @@ _ = err
 
 Tip: use a bounded context (`context.WithTimeout`) for `Send` calls on multi-initiator buses.
 
-### 4) Work on target emulation / VR90 minimal behavior
+### 4) Work on target emulation / identify-only behavior
 
 ```bash
 go test ./emulation -count=1
+./scripts/smoke-identify-only.sh
 ./scripts/smoke-vr90-minimal.sh
 ```
 
