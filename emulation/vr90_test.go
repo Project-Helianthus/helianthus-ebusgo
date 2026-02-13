@@ -195,6 +195,205 @@ func TestVR90Target_NoMatchForOtherQueries(t *testing.T) {
 	}
 }
 
+func TestVR90B509ScanIDChunkEncoding(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		scanID       string
+		wantSegments [4]string
+	}{
+		{
+			name:   "default padding",
+			scanID: "",
+			wantSegments: [4]string{
+				"21231600",
+				"20260914",
+				"09530354",
+				"69N6    ",
+			},
+		},
+		{
+			name:   "short padded",
+			scanID: "ABCD",
+			wantSegments: [4]string{
+				"ABCD    ",
+				"        ",
+				"        ",
+				"        ",
+			},
+		},
+		{
+			name:   "long truncated",
+			scanID: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+			wantSegments: [4]string{
+				"01234567",
+				"89ABCDEF",
+				"GHIJKLMN",
+				"OPQRSTUV",
+			},
+		},
+	}
+
+	for _, test := range cases {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			for idx := 0; idx < vr90B509ScanIDChunkCount; idx++ {
+				selector := vr90B509ScanIDSelectorStart + byte(idx)
+				chunk, ok := vr90B509ScanIDChunk(test.scanID, selector)
+				if !ok {
+					t.Fatalf("vr90B509ScanIDChunk() ok = false for selector 0x%02x", selector)
+				}
+				want := append([]byte{0x00}, []byte(test.wantSegments[idx])...)
+				if !bytes.Equal(chunk, want) {
+					t.Fatalf("selector 0x%02x chunk = %x; want %x", selector, chunk, want)
+				}
+			}
+		})
+	}
+}
+
+func TestVR90Target_B509SelectorBehavior(t *testing.T) {
+	t.Parallel()
+
+	profile := DefaultVR90Profile()
+	profile.EnableB509Discovery = true
+	profile.ScanID = "21231600202609140953035469N6"
+
+	target, err := NewVR90Target(profile)
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		data     []byte
+		wantData []byte
+		wantErr  error
+	}{
+		{
+			name:     "selector 0x24",
+			data:     []byte{0x24},
+			wantData: []byte{0x00, '2', '1', '2', '3', '1', '6', '0', '0'},
+		},
+		{
+			name:     "selector 0x25",
+			data:     []byte{0x25},
+			wantData: []byte{0x00, '2', '0', '2', '6', '0', '9', '1', '4'},
+		},
+		{
+			name:     "selector 0x26",
+			data:     []byte{0x26},
+			wantData: []byte{0x00, '0', '9', '5', '3', '0', '3', '5', '4'},
+		},
+		{
+			name:     "selector 0x27",
+			data:     []byte{0x27},
+			wantData: []byte{0x00, '6', '9', 'N', '6', ' ', ' ', ' ', ' '},
+		},
+		{
+			name:    "unknown selector unmatched",
+			data:    []byte{0x28},
+			wantErr: ErrNoMatchingRule,
+		},
+		{
+			name:    "known selector with extra data unmatched",
+			data:    []byte{0x24, 0x00},
+			wantErr: ErrNoMatchingRule,
+		},
+	}
+
+	for _, test := range cases {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			response, err := target.Emulate(RequestEvent{
+				Frame: protocol.Frame{
+					Source:    0x10,
+					Target:    DefaultVR90Address,
+					Primary:   0xB5,
+					Secondary: 0x09,
+					Data:      append([]byte(nil), test.data...),
+				},
+			})
+
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) {
+					t.Fatalf("Emulate() error = %v; want %v", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Emulate() error = %v", err)
+			}
+			if response.Frame.Primary != 0xB5 || response.Frame.Secondary != 0x09 {
+				t.Fatalf("Frame PB/SB = 0x%02x/0x%02x; want 0xB5/0x09", response.Frame.Primary, response.Frame.Secondary)
+			}
+			if !bytes.Equal(response.Frame.Data, test.wantData) {
+				t.Fatalf("Frame data = %x; want %x", response.Frame.Data, test.wantData)
+			}
+		})
+	}
+}
+
+func TestVR90Target_B509DiscoveryDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	target, err := NewVR90Target(DefaultVR90Profile())
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	_, err = target.Emulate(RequestEvent{
+		Frame: protocol.Frame{
+			Source:    0x10,
+			Target:    DefaultVR90Address,
+			Primary:   0xB5,
+			Secondary: 0x09,
+			Data:      []byte{0x24},
+		},
+	})
+	if !errors.Is(err, ErrNoMatchingRule) {
+		t.Fatalf("Emulate() error = %v; want %v", err, ErrNoMatchingRule)
+	}
+}
+
+func TestVR90Target_B509DiscoveryPreservesIdentify(t *testing.T) {
+	t.Parallel()
+
+	profile := DefaultVR90Profile()
+	profile.EnableB509Discovery = true
+	target, err := NewVR90Target(profile)
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	response, err := target.Emulate(RequestEvent{
+		Frame: protocol.Frame{
+			Source:    0x10,
+			Target:    DefaultVR90Address,
+			Primary:   0x07,
+			Secondary: 0x04,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Emulate() error = %v", err)
+	}
+
+	wantData := []byte{
+		DefaultVR90Manufacturer,
+		'B', '7', 'V', '0', '0',
+		0x04, 0x22,
+		0x55, 0x03,
+	}
+	if !bytes.Equal(response.Frame.Data, wantData) {
+		t.Fatalf("Frame data = %x; want %x", response.Frame.Data, wantData)
+	}
+}
+
 func TestSmokeVR90MinimalQuerySet(t *testing.T) {
 	target, err := NewVR90Target(DefaultVR90Profile())
 	if err != nil {
@@ -228,6 +427,93 @@ func TestSmokeVR90MinimalQuerySet(t *testing.T) {
 	}
 	if gotID := string(response.Frame.Data[1:6]); gotID != DefaultVR90DeviceID {
 		t.Fatalf("DeviceID = %q; want %q", gotID, DefaultVR90DeviceID)
+	}
+
+	if err := ValidateResponseEnvelope(responses, ResponseEnvelope{
+		MinDelay: 5 * time.Millisecond,
+		MaxDelay: 30 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("ValidateResponseEnvelope() error = %v", err)
+	}
+}
+
+func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
+	profile := DefaultVR90Profile()
+	profile.EnableB509Discovery = true
+
+	target, err := NewVR90Target(profile)
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	harness := NewHarness(target)
+	responses, err := harness.RunSequence([]QueryStep{
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0x07,
+				Secondary: 0x04,
+			},
+		},
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x09,
+				Data:      []byte{0x24},
+			},
+		},
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x09,
+				Data:      []byte{0x25},
+			},
+		},
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x09,
+				Data:      []byte{0x26},
+			},
+		},
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x09,
+				Data:      []byte{0x27},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunSequence() error = %v", err)
+	}
+	if len(responses) != 5 {
+		t.Fatalf("len(responses) = %d; want 5", len(responses))
+	}
+
+	wantChunks := [][]byte{
+		{0x00, '2', '1', '2', '3', '1', '6', '0', '0'},
+		{0x00, '2', '0', '2', '6', '0', '9', '1', '4'},
+		{0x00, '0', '9', '5', '3', '0', '3', '5', '4'},
+		{0x00, '6', '9', 'N', '6', ' ', ' ', ' ', ' '},
+	}
+	for idx := range wantChunks {
+		response := responses[idx+1]
+		if response.Frame.Primary != 0xB5 || response.Frame.Secondary != 0x09 {
+			t.Fatalf("response[%d] PB/SB = 0x%02x/0x%02x; want 0xB5/0x09", idx+1, response.Frame.Primary, response.Frame.Secondary)
+		}
+		if !bytes.Equal(response.Frame.Data, wantChunks[idx]) {
+			t.Fatalf("response[%d] data = %x; want %x", idx+1, response.Frame.Data, wantChunks[idx])
+		}
 	}
 
 	if err := ValidateResponseEnvelope(responses, ResponseEnvelope{

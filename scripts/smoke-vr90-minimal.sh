@@ -4,4 +4,4 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-go test ./emulation -run '^TestSmokeVR90MinimalQuerySet$' -count=1 -v "$@"
+go test ./emulation -run '^TestSmokeVR90(MinimalQuerySet|B509DiscoveryQuerySet)$' -count=1 -v "$@"
