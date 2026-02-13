@@ -159,6 +159,33 @@ func TestNewVR90Target_Errors(t *testing.T) {
 			},
 			want: ErrInvalidConfiguration,
 		},
+		{
+			name: "mapped command has exact and prefix matchers",
+			profile: VR90Profile{
+				MappedCommands: []VR90MappedCommand{
+					{
+						Primary:       0xB5,
+						Secondary:     0x06,
+						PayloadExact:  []byte{0x01},
+						PayloadPrefix: []byte{0x01},
+						ResponseData:  []byte{0x00},
+					},
+				},
+			},
+			want: ErrInvalidConfiguration,
+		},
+		{
+			name: "mapped command empty response",
+			profile: VR90Profile{
+				MappedCommands: []VR90MappedCommand{
+					{
+						Primary:   0xB5,
+						Secondary: 0x06,
+					},
+				},
+			},
+			want: ErrInvalidConfiguration,
+		},
 	}
 
 	for _, test := range cases {
@@ -394,6 +421,212 @@ func TestVR90Target_B509DiscoveryPreservesIdentify(t *testing.T) {
 	}
 }
 
+func TestVR90Target_MappedCommandResponse(t *testing.T) {
+	t.Parallel()
+
+	profile := DefaultVR90Profile()
+	profile.MappedCommands = []VR90MappedCommand{
+		{
+			Name:          "mapped-room-temp",
+			Primary:       0xB5,
+			Secondary:     0x06,
+			PayloadPrefix: []byte{0x01, 0x00},
+			ResponseData:  []byte{0x00, 0x2A, 0x10},
+		},
+	}
+	target, err := NewVR90Target(profile)
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	response, err := target.Emulate(RequestEvent{
+		At: 30 * time.Millisecond,
+		Frame: protocol.Frame{
+			Source:    0x10,
+			Target:    DefaultVR90Address,
+			Primary:   0xB5,
+			Secondary: 0x06,
+			Data:      []byte{0x01, 0x00, 0x7F},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Emulate() error = %v", err)
+	}
+	if response.Rule != "mapped-room-temp" {
+		t.Fatalf("Rule = %q; want mapped-room-temp", response.Rule)
+	}
+	if response.RespondAt != 38*time.Millisecond {
+		t.Fatalf("RespondAt = %s; want %s", response.RespondAt, 38*time.Millisecond)
+	}
+	wantData := []byte{0x00, 0x2A, 0x10}
+	if !bytes.Equal(response.Frame.Data, wantData) {
+		t.Fatalf("Frame data = %x; want %x", response.Frame.Data, wantData)
+	}
+
+	response.Frame.Data[0] = 0xFF
+	next, err := target.Emulate(RequestEvent{
+		At: 50 * time.Millisecond,
+		Frame: protocol.Frame{
+			Source:    0x10,
+			Target:    DefaultVR90Address,
+			Primary:   0xB5,
+			Secondary: 0x06,
+			Data:      []byte{0x01, 0x00, 0x7F},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Emulate() second call error = %v", err)
+	}
+	if !bytes.Equal(next.Frame.Data, wantData) {
+		t.Fatalf("second Frame data = %x; want %x", next.Frame.Data, wantData)
+	}
+}
+
+func TestVR90Target_MappedCommandPrecedence(t *testing.T) {
+	t.Parallel()
+
+	t.Run("built-in rules win over mapped collisions", func(t *testing.T) {
+		t.Parallel()
+
+		profile := DefaultVR90Profile()
+		profile.EnableB509Discovery = true
+		profile.MappedCommands = []VR90MappedCommand{
+			{
+				Name:         "mapped-identify-collision",
+				Primary:      0x07,
+				Secondary:    0x04,
+				ResponseData: []byte{0xAA},
+			},
+			{
+				Name:         "mapped-b509-collision",
+				Primary:      0xB5,
+				Secondary:    0x09,
+				PayloadExact: []byte{0x24},
+				ResponseData: []byte{0xBB},
+			},
+		}
+		target, err := NewVR90Target(profile)
+		if err != nil {
+			t.Fatalf("NewVR90Target() error = %v", err)
+		}
+
+		identify, err := target.Emulate(RequestEvent{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0x07,
+				Secondary: 0x04,
+			},
+		})
+		if err != nil {
+			t.Fatalf("identify Emulate() error = %v", err)
+		}
+		if identify.Rule != "identify" {
+			t.Fatalf("identify Rule = %q; want identify", identify.Rule)
+		}
+
+		b509, err := target.Emulate(RequestEvent{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x09,
+				Data:      []byte{0x24},
+			},
+		})
+		if err != nil {
+			t.Fatalf("b509 Emulate() error = %v", err)
+		}
+		if b509.Rule != "vaillant-b509-scanid" {
+			t.Fatalf("b509 Rule = %q; want vaillant-b509-scanid", b509.Rule)
+		}
+		wantChunk, ok := vr90B509ScanIDChunk(profile.ScanID, 0x24)
+		if !ok {
+			t.Fatalf("vr90B509ScanIDChunk() ok = false")
+		}
+		if !bytes.Equal(b509.Frame.Data, wantChunk) {
+			t.Fatalf("b509 Frame data = %x; want %x", b509.Frame.Data, wantChunk)
+		}
+	})
+
+	t.Run("mapped commands follow declaration order", func(t *testing.T) {
+		t.Parallel()
+
+		profile := DefaultVR90Profile()
+		profile.MappedCommands = []VR90MappedCommand{
+			{
+				Name:          "first-prefix",
+				Primary:       0xB5,
+				Secondary:     0x06,
+				PayloadPrefix: []byte{0x01},
+				ResponseData:  []byte{0x10},
+			},
+			{
+				Name:         "second-exact",
+				Primary:      0xB5,
+				Secondary:    0x06,
+				PayloadExact: []byte{0x01, 0x02},
+				ResponseData: []byte{0x20},
+			},
+		}
+		target, err := NewVR90Target(profile)
+		if err != nil {
+			t.Fatalf("NewVR90Target() error = %v", err)
+		}
+
+		response, err := target.Emulate(RequestEvent{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x06,
+				Data:      []byte{0x01, 0x02},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Emulate() error = %v", err)
+		}
+		if response.Rule != "first-prefix" {
+			t.Fatalf("Rule = %q; want first-prefix", response.Rule)
+		}
+		if !bytes.Equal(response.Frame.Data, []byte{0x10}) {
+			t.Fatalf("Frame data = %x; want %x", response.Frame.Data, []byte{0x10})
+		}
+	})
+}
+
+func TestVR90Target_MappedCommandUnknownFallback(t *testing.T) {
+	t.Parallel()
+
+	profile := DefaultVR90Profile()
+	profile.MappedCommands = []VR90MappedCommand{
+		{
+			Name:          "mapped-room-temp",
+			Primary:       0xB5,
+			Secondary:     0x06,
+			PayloadPrefix: []byte{0x01, 0x00},
+			ResponseData:  []byte{0x00, 0x2A, 0x10},
+		},
+	}
+	target, err := NewVR90Target(profile)
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	_, err = target.Emulate(RequestEvent{
+		Frame: protocol.Frame{
+			Source:    0x10,
+			Target:    DefaultVR90Address,
+			Primary:   0xB5,
+			Secondary: 0x06,
+			Data:      []byte{0x01, 0x01},
+		},
+	})
+	if !errors.Is(err, ErrNoMatchingRule) {
+		t.Fatalf("Emulate() error = %v; want %v", err, ErrNoMatchingRule)
+	}
+}
+
 func TestSmokeVR90MinimalQuerySet(t *testing.T) {
 	target, err := NewVR90Target(DefaultVR90Profile())
 	if err != nil {
@@ -514,6 +747,100 @@ func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
 		if !bytes.Equal(response.Frame.Data, wantChunks[idx]) {
 			t.Fatalf("response[%d] data = %x; want %x", idx+1, response.Frame.Data, wantChunks[idx])
 		}
+	}
+
+	if err := ValidateResponseEnvelope(responses, ResponseEnvelope{
+		MinDelay: 5 * time.Millisecond,
+		MaxDelay: 30 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("ValidateResponseEnvelope() error = %v", err)
+	}
+}
+
+func TestSmokeVR90MappedCommandQuerySet(t *testing.T) {
+	profile := DefaultVR90Profile()
+	profile.EnableB509Discovery = true
+	profile.MappedCommands = []VR90MappedCommand{
+		{
+			Name:          "mapped-room-temp",
+			Primary:       0xB5,
+			Secondary:     0x06,
+			PayloadPrefix: []byte{0x01, 0x00},
+			ResponseData:  []byte{0x00, 0x2A, 0x10},
+		},
+	}
+
+	target, err := NewVR90Target(profile)
+	if err != nil {
+		t.Fatalf("NewVR90Target() error = %v", err)
+	}
+
+	harness := NewHarness(target)
+	responses, err := harness.RunSequence([]QueryStep{
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0x07,
+				Secondary: 0x04,
+			},
+		},
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x09,
+				Data:      []byte{0x24},
+			},
+		},
+		{
+			Frame: protocol.Frame{
+				Source:    0x10,
+				Target:    DefaultVR90Address,
+				Primary:   0xB5,
+				Secondary: 0x06,
+				Data:      []byte{0x01, 0x00, 0x33},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunSequence() error = %v", err)
+	}
+	if len(responses) != 3 {
+		t.Fatalf("len(responses) = %d; want 3", len(responses))
+	}
+
+	identify := responses[0]
+	if identify.Rule != "identify" {
+		t.Fatalf("responses[0].Rule = %q; want identify", identify.Rule)
+	}
+	if gotID := string(identify.Frame.Data[1:6]); gotID != DefaultVR90DeviceID {
+		t.Fatalf("responses[0] DeviceID = %q; want %q", gotID, DefaultVR90DeviceID)
+	}
+
+	b509 := responses[1]
+	if b509.Rule != "vaillant-b509-scanid" {
+		t.Fatalf("responses[1].Rule = %q; want vaillant-b509-scanid", b509.Rule)
+	}
+	wantChunk, ok := vr90B509ScanIDChunk(profile.ScanID, 0x24)
+	if !ok {
+		t.Fatalf("vr90B509ScanIDChunk() ok = false")
+	}
+	if !bytes.Equal(b509.Frame.Data, wantChunk) {
+		t.Fatalf("responses[1] data = %x; want %x", b509.Frame.Data, wantChunk)
+	}
+
+	mapped := responses[2]
+	if mapped.Rule != "mapped-room-temp" {
+		t.Fatalf("responses[2].Rule = %q; want mapped-room-temp", mapped.Rule)
+	}
+	if mapped.Frame.Primary != 0xB5 || mapped.Frame.Secondary != 0x06 {
+		t.Fatalf("responses[2] PB/SB = 0x%02x/0x%02x; want 0xB5/0x06", mapped.Frame.Primary, mapped.Frame.Secondary)
+	}
+	wantMapped := []byte{0x00, 0x2A, 0x10}
+	if !bytes.Equal(mapped.Frame.Data, wantMapped) {
+		t.Fatalf("responses[2] data = %x; want %x", mapped.Frame.Data, wantMapped)
 	}
 
 	if err := ValidateResponseEnvelope(responses, ResponseEnvelope{
