@@ -1,164 +1,87 @@
 # helianthus-ebusgo
 
-`helianthus-ebusgo` is the low-level eBUS core for the Helianthus stack. It provides byte transports, frame encoding/decoding, bus arbitration + retries, and reusable eBUS data-type codecs.
+`helianthus-ebusgo` is the low-level eBUS core for the Helianthus stack: byte transports, frame encode/decode, bus arbitration + retries, and reusable eBUS data-type codecs.
 
-## Purpose and Audience
+## Scope
 
-This repository is for:
+- In scope: `transport`, `protocol`, `types`, `emulation`, `errors`.
+- Out of scope: gateway APIs/projections/smoke orchestration (`helianthus-ebusgateway`, `helianthus-ebusreg`).
 
-- engineers implementing eBUS integrations in Go,
-- maintainers extending transport/protocol behavior, and
-- operators validating transport-level behavior before wiring higher-level services.
+## Role / Use-Case Entry Paths
 
-This repository is **not** a full gateway daemon. API endpoints, registry/projections, and smoke orchestration live in sibling repos (`helianthus-ebusgateway`, `helianthus-ebusreg`).
+| Role / use case | Start path(s) | First command |
+|---|---|---|
+| Integrate bus send/receive in a Go process | `transport/`, `protocol/bus.go`, `protocol/protocol.go` | `go test ./protocol -count=1` |
+| Extend transport behavior (ENH/ENS/ebusd-tcp/loopback) | `transport/` | `go test ./transport -count=1` |
+| Add/adjust eBUS value codecs | `types/` | `go test ./types -count=1` |
+| Build deterministic target emulation tests | `emulation/` | `go test ./emulation -count=1` |
+| Check embedded compile compatibility | `cmd/tinygo-check/` | `tinygo build -target esp32-coreboard-v2 ./cmd/tinygo-check` |
 
-## Architecture Summary
+## Transport Decision Matrix
 
-Core layering in this repo:
+| Transport | Choose it when | Constraints / notes | Entry constructor |
+|---|---|---|---|
+| `ENH` | Adapter/socket speaks ENH command framing and you want explicit init/arbitration semantics | Non-TinyGo build (`transport/enh_transport.go` has `//go:build !tinygo`); call `Init(features)` before normal traffic | `transport.NewENHTransport(conn, readTimeout, writeTimeout)` |
+| `ENS` | Endpoint is ENS-escaped raw byte stream (no ENH control channel) | Non-TinyGo build (`transport/ens_transport.go` has `//go:build !tinygo`) | `transport.NewENSTransport(conn, readTimeout, writeTimeout)` |
+| `ebusd-tcp` | You only have ebusd command TCP access and need functional request/response bridging | Non-TinyGo build (`transport/ebusd_tcp.go` has `//go:build !tinygo`); uses ebusd `hex` command flow; good for functional checks, not cycle-accurate timing/emulation | `transport.NewEbusdTCPTransport(conn)` |
+| `loopback` | Unit tests, local simulation, deterministic in-memory transport | No external endpoint/hardware; not a real bus adapter | `transport.NewLoopback()` |
 
-1. `transport` — `RawTransport` implementations (`ENH`, `ENS`, `ebusd-tcp`, loopback).
-2. `protocol` — frame model, CRC handling, and prioritized `Bus` send/receive state machine.
-3. `types` — eBUS codecs (`EXP`, `BCD`, `DATA1b`, `DATA2b`, `DATA2c`, `WORD`, structured types) with replacement-value semantics.
-4. `emulation` — target-emulation framework + deterministic harness (identify-only profiles with VR90/VR_71 presets).
-5. `errors` — sentinel errors + helpers (`IsTransient`, `IsDefinitive`, `IsFatal`) for policy decisions.
+Protocol references:
 
-## Prerequisites
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
 
-- Go `1.22+`
-- Git
-- Optional (for TinyGo compatibility checks): TinyGo `0.40.1` (matches CI)
-- Optional (for live transport validation): access to an ENH/ENS endpoint or ebusd TCP command port
-
-## Quick Start (Clean Machine)
+## Minimal Quick Start (first successful run)
 
 ```bash
 git clone https://github.com/d3vi1/helianthus-ebusgo.git
 cd helianthus-ebusgo
-
-# Build all packages
-go build ./...
-
-# Run unit tests
 go test ./...
+./scripts/smoke-identify-only.sh
+./scripts/smoke-vr90-minimal.sh
 ```
 
-CI-parity local checks:
+Optional CI-parity checks:
 
 ```bash
 go vet ./...
 go test -race -count=1 ./...
 ```
 
-Optional TinyGo check (same target pattern as CI):
+Hardware smoke is intentionally out of scope in this repo. For live-bus smoke flow, use `helianthus-ebusgateway` (`cmd/smoke`) and:
 
-```bash
-tinygo build -target esp32-coreboard-v2 ./cmd/tinygo-check
-```
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/development/smoke-test.md
 
-## Smoke-Test Context and Limits
+## Change Area -> Test Matrix
 
-- This repo focuses on deterministic library/unit behavior; it does **not** include a hardware smoke runner.
-- Real-bus smoke/integration flow is run from `helianthus-ebusgateway` (`cmd/smoke`) and documented here:
-  - https://github.com/d3vi1/helianthus-docs-ebus/blob/main/development/smoke-test.md
-- `transport/ebusd_tcp.go` is built only on non-TinyGo targets (`//go:build !tinygo`).
-- For target emulation with strict timing constraints, run near the adapter/firmware edge; `ebusd-tcp` is useful for functional checks but too jittery for precise cycle-accurate emulation.
+| Change area | Focused test command(s) |
+|---|---|
+| `transport/enh*.go` | `go test ./transport -run ENH -count=1` |
+| `transport/ens*.go` | `go test ./transport -run ENS -count=1` |
+| `transport/ebusd_tcp*.go` | `go test ./transport -run EbusdTCP -count=1` |
+| `protocol/` | `go test ./protocol -count=1` |
+| `types/` | `go test ./types -count=1` |
+| `emulation/` | `go test ./emulation -count=1` + `./scripts/smoke-identify-only.sh` + `./scripts/smoke-vr90-minimal.sh` |
+| Cross-package behavior | `go test ./... -count=1` |
 
-## Target Emulation (Issues #59/#64 scope)
+## Troubleshooting Pointers
 
-- `emulation.Target` exposes request matcher + response builder + timing knobs.
-- `emulation.Harness` provides deterministic virtual-time query simulation for tests.
-- `emulation.NewIdentifyOnlyTarget` provides a generic identify-only constructor (`07 04`) for address + identity + timing profiles.
-- `emulation.PresetVR90IdentifyOnlyProfile` and `emulation.PresetVR71IdentifyOnlyProfile` provide predefined profiles.
-- `emulation.NewVR90Target` remains backward-compatible and delegates to the generic identify-only profile API.
-- Minimal smoke check:
-
-```bash
-./scripts/smoke-identify-only.sh
-./scripts/smoke-vr90-minimal.sh
-```
-
-## Package Map
-
-| Package | Role | Typical use |
+| Symptom / error | Likely cause | Practical pointer |
 |---|---|---|
-| `errors` | Sentinel error taxonomy + classifiers | Retry/backoff/failure policy |
-| `transport` | Byte-level transport adapters | Connect ENH/ENS/ebusd-tcp endpoints |
-| `protocol` | eBUS frame model + `Bus` queue/state machine | Send frames with typed retry semantics |
-| `types` | eBUS value codecs | Decode/encode payload fields |
-| `emulation` | Target-response rules + deterministic harness | Unit/integration test emulated devices |
-| `cmd/tinygo-check` | TinyGo compile probe | Validate package compatibility on embedded targets |
-| `internal/crc` | CRC implementation details | Internal-only support package |
+| `ErrTimeout` | No response or timeout too aggressive | Validate target address/query and increase transport read timeout or request context timeout |
+| `ErrBusCollision` | Arbitration lost to another initiator | Retry with bounded context; verify initiator address and bus contention |
+| `ErrCRCMismatch` / `ErrInvalidPayload` | Wrong transport expectation or malformed escaped payload | Re-check chosen transport against matrix above (`ENH` vs `ENS` vs `ebusd-tcp`) and inspect fixture/raw bytes |
+| `ErrTransportClosed` | Connection dropped/closed | Reconnect, recreate transport, then recreate/restart `protocol.Bus` |
 
-## Common Workflows
+Error policy helpers:
 
-### 1) Work on protocol retry/arbitration logic
-
-```bash
-go test ./protocol -count=1
-```
-
-### 2) Work on transport parsers/backends (including ebusd-tcp fixtures)
-
-```bash
-go test ./transport -count=1
-go test ./transport -run EbusdTCP -count=1
-```
-
-### 3) Integrate bus send/receive in your own process
-
-```go
-conn, err := net.Dial("unix", "/var/run/ebusd/ebusd.socket")
-if err != nil { /* handle */ }
-defer conn.Close()
-
-tr := transport.NewENHTransport(conn, 5*time.Second, 5*time.Second)
-if err := tr.Init(0x00); err != nil { /* handle */ }
-
-bus := protocol.NewBus(tr, protocol.DefaultBusConfig(), 0)
-ctx, cancel := context.WithCancel(context.Background())
-defer cancel()
-bus.Run(ctx)
-
-resp, err := bus.Send(ctx, protocol.Frame{
-    Source: 0x31, Target: 0x08, Primary: 0x07, Secondary: 0x04, Data: nil,
-})
-_ = resp
-_ = err
-```
-
-Tip: use a bounded context (`context.WithTimeout`) for `Send` calls on multi-initiator buses.
-
-### 4) Work on target emulation / identify-only behavior
-
-```bash
-go test ./emulation -count=1
-./scripts/smoke-identify-only.sh
-./scripts/smoke-vr90-minimal.sh
-```
-
-## Troubleshooting
-
-| Symptom / error | Likely cause | Practical fix |
-|---|---|---|
-| `ErrTimeout` | target did not answer, or timeout too short | verify address/telegram and increase read timeout / request context |
-| `ErrBusCollision` | arbitration lost to another initiator | retry with bounded context; verify initiator address and bus contention |
-| `ErrCRCMismatch` | framing/escaping mismatch or corrupted response | ensure transport matches endpoint (`enh` vs `ens` vs `ebusd-tcp`) |
-| `ErrInvalidPayload` | malformed adapter data or wrong backend assumption | confirm backend protocol and command endpoint; inspect raw response fixture |
-| `ErrTransportClosed` | socket/connection dropped | reconnect, recreate transport, then recreate/restart `Bus` |
-
-If you need policy-based behavior:
-
-- `errors.IsTransient(err)` → safe to retry
-- `errors.IsDefinitive(err)` → target/protocol-level negative outcome
-- `errors.IsFatal(err)` → transport/payload setup issue
+- `errors.IsTransient(err)` → retry/backoff candidate
+- `errors.IsDefinitive(err)` → protocol/target negative outcome
+- `errors.IsFatal(err)` → setup/transport/payload issue
 
 ## Docs / CI / Issues
 
 - CI workflow: `.github/workflows/ci.yml`
-- Protocol references:
-  - https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
-  - https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
-  - https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
-  - https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
+- eBUS overview: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
 - Roadmap / bugs / support: https://github.com/d3vi1/helianthus-ebusgo/issues
-- GitHub Releases: none published at the moment (consume by module commit/tag as needed).
