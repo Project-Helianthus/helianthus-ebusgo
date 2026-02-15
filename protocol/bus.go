@@ -399,12 +399,48 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 
 	var data []byte
 	for respAttempt := 0; respAttempt < 2; respAttempt++ {
+		respSource, err := decoder.readSymbol(b, runCtx, reqCtx)
+		if err != nil {
+			return nil, err
+		}
+		if respSource == SymbolSyn {
+			return nil, fmt.Errorf("syn while waiting for response: %w", ebuserrors.ErrTimeout)
+		}
+
+		respTarget, err := decoder.readSymbol(b, runCtx, reqCtx)
+		if err != nil {
+			return nil, err
+		}
+		if respTarget == SymbolSyn {
+			return nil, fmt.Errorf("syn while waiting for response dst: %w", ebuserrors.ErrTimeout)
+		}
+
+		respPrimary, err := decoder.readSymbol(b, runCtx, reqCtx)
+		if err != nil {
+			return nil, err
+		}
+		if respPrimary == SymbolSyn {
+			return nil, fmt.Errorf("syn while waiting for response pb: %w", ebuserrors.ErrTimeout)
+		}
+
+		respSecondary, err := decoder.readSymbol(b, runCtx, reqCtx)
+		if err != nil {
+			return nil, err
+		}
+		if respSecondary == SymbolSyn {
+			return nil, fmt.Errorf("syn while waiting for response sb: %w", ebuserrors.ErrTimeout)
+		}
+
+		if respSource != frame.Target || respTarget != frame.Source || respPrimary != frame.Primary || respSecondary != frame.Secondary {
+			return nil, fmt.Errorf("unexpected response header (src 0x%02x dst 0x%02x pb 0x%02x sb 0x%02x): %w", respSource, respTarget, respPrimary, respSecondary, ebuserrors.ErrBusCollision)
+		}
+
 		lengthSym, err := decoder.readSymbol(b, runCtx, reqCtx)
 		if err != nil {
 			return nil, err
 		}
 		if lengthSym == SymbolSyn {
-			return nil, fmt.Errorf("syn while waiting for response: %w", ebuserrors.ErrTimeout)
+			return nil, fmt.Errorf("syn while waiting for response length: %w", ebuserrors.ErrTimeout)
 		}
 
 		length := int(lengthSym)
@@ -428,7 +464,9 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 			return nil, fmt.Errorf("syn while waiting for response crc: %w", ebuserrors.ErrTimeout)
 		}
 
-		segment := append([]byte{lengthSym}, data...)
+		segment := make([]byte, 0, 5+len(data))
+		segment = append(segment, respSource, respTarget, respPrimary, respSecondary, lengthSym)
+		segment = append(segment, data...)
 		if CRC(segment) != crcValue {
 			if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolNack, true); err != nil {
 				return nil, err
@@ -448,10 +486,10 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 		}
 
 		return &Frame{
-			Source:    frame.Target,
-			Target:    frame.Source,
-			Primary:   frame.Primary,
-			Secondary: frame.Secondary,
+			Source:    respSource,
+			Target:    respTarget,
+			Primary:   respPrimary,
+			Secondary: respSecondary,
 			Data:      data,
 		}, nil
 	}
