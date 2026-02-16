@@ -15,8 +15,8 @@ func TestENHTransport_ReadByteDecodesFrames(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 	seqReceived := transport.EncodeENH(transport.ENHResReceived, 0x22)
@@ -50,8 +50,8 @@ func TestENHTransport_InitHandshake(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
@@ -88,8 +88,8 @@ func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
@@ -128,8 +128,8 @@ func TestENHTransport_WriteEncodesFrames(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
@@ -175,8 +175,8 @@ func TestENHTransport_ReadTimeout(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 50*time.Millisecond, 200*time.Millisecond)
 	_, err := enh.ReadByte()
@@ -189,7 +189,7 @@ func TestENHTransport_ReadClosed(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	_ = server.Close()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
@@ -203,8 +203,8 @@ func TestENHTransport_ForwardsEchoedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
@@ -250,8 +250,8 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 	initiator := byte(0x10)
@@ -294,8 +294,8 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 	initiator := byte(0x10)
