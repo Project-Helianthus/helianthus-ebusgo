@@ -136,6 +136,15 @@ func TestIdentifyOnlyProfile_Presets(t *testing.T) {
 		t.Fatalf("VR90 preset mismatch: %+v", vr90)
 	}
 
+	vr92 := PresetVR92IdentifyOnlyProfile()
+	if vr92.Address != DefaultVR92Address ||
+		vr92.Manufacturer != DefaultVR92Manufacturer ||
+		vr92.DeviceID != DefaultVR92DeviceID ||
+		vr92.Software != DefaultVR92Software ||
+		vr92.Hardware != DefaultVR92Hardware {
+		t.Fatalf("VR92 preset mismatch: %+v", vr92)
+	}
+
 	vr71 := PresetVR71IdentifyOnlyProfile()
 	if vr71.Address != DefaultVR71Address ||
 		vr71.Manufacturer != DefaultVR71Manufacturer ||
@@ -196,6 +205,10 @@ func TestSmokeIdentifyOnlyProfileValidation(t *testing.T) {
 		{
 			name:    "vr90",
 			profile: PresetVR90IdentifyOnlyProfile(),
+		},
+		{
+			name:    "vr92",
+			profile: PresetVR92IdentifyOnlyProfile(),
 		},
 		{
 			name:    "vr_71",

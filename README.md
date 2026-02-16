@@ -75,6 +75,11 @@ profile := emulation.PresetVR90IdentifyOnlyProfile()
 target, err := emulation.NewIdentifyOnlyTarget(profile)
 ```
 
+```go
+profile := emulation.PresetVR92IdentifyOnlyProfile()
+target, err := emulation.NewIdentifyOnlyTarget(profile)
+```
+
 ### VR90 extended discovery + mapped-command example
 
 ```go
