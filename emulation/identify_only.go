@@ -50,6 +50,19 @@ func PresetVR90IdentifyOnlyProfile() IdentifyOnlyProfile {
 	}
 }
 
+func PresetVR92IdentifyOnlyProfile() IdentifyOnlyProfile {
+	return IdentifyOnlyProfile{
+		Name:          fmt.Sprintf("vr92-minimal-0x%02x", DefaultVR92Address),
+		Address:       DefaultVR92Address,
+		Manufacturer:  DefaultVR92Manufacturer,
+		DeviceID:      DefaultVR92DeviceID,
+		Software:      DefaultVR92Software,
+		Hardware:      DefaultVR92Hardware,
+		ResponseDelay: defaultVR92ResponseDelay,
+		Timing:        defaultVR92Timing,
+	}
+}
+
 func PresetVR71IdentifyOnlyProfile() IdentifyOnlyProfile {
 	return IdentifyOnlyProfile{
 		Name:          fmt.Sprintf("vr71-minimal-0x%02x", DefaultVR71Address),
