@@ -13,7 +13,7 @@ func TestLoopback_ReadWrite(t *testing.T) {
 	t.Parallel()
 
 	lb := transport.NewLoopback()
-	defer lb.Close()
+	defer func() { _ = lb.Close() }()
 
 	payload := []byte{0x01, 0x02, 0x03}
 	n, err := lb.Write(payload)
@@ -39,7 +39,7 @@ func TestLoopback_BlockingReadUnblocksOnWrite(t *testing.T) {
 	t.Parallel()
 
 	lb := transport.NewLoopback()
-	defer lb.Close()
+	defer func() { _ = lb.Close() }()
 
 	readCh := make(chan byte, 1)
 	errCh := make(chan error, 1)

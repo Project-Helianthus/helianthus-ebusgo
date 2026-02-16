@@ -225,8 +225,8 @@ func TestEbusdTCPTransport_SendHexCommand_StripsLengthPrefix(t *testing.T) {
 			t.Parallel()
 
 			client, server := net.Pipe()
-			defer client.Close()
-			defer server.Close()
+			defer func() { _ = client.Close() }()
+			defer func() { _ = server.Close() }()
 
 			tr := NewEbusdTCPTransport(client)
 
@@ -267,8 +267,8 @@ func TestEbusdTCPTransport_SendHexCommand_CommandFormatting(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	tr := NewEbusdTCPTransport(client)
 
@@ -338,8 +338,8 @@ func TestEbusdTCPTransport_SendHexCommand_ErrLines(t *testing.T) {
 			t.Parallel()
 
 			client, server := net.Pipe()
-			defer client.Close()
-			defer server.Close()
+			defer func() { _ = client.Close() }()
+			defer func() { _ = server.Close() }()
 
 			tr := NewEbusdTCPTransport(client)
 			wantCommand := "hex -s 08 01\n"
@@ -377,8 +377,8 @@ func TestEbusdTCPTransport_Write_BroadcastDone(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	tr := NewEbusdTCPTransport(client)
 

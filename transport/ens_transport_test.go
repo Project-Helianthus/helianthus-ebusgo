@@ -15,8 +15,8 @@ func TestENSTransport_ReadByteDecodesEscapes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	ens := transport.NewENSTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 	raw := []byte{0x10, 0xA9, 0xAA, 0x20}
@@ -47,8 +47,8 @@ func TestENSTransport_WriteEncodesEscapes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	ens := transport.NewENSTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
@@ -93,8 +93,8 @@ func TestENSTransport_ReadTimeout(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	ens := transport.NewENSTransport(client, 50*time.Millisecond, 200*time.Millisecond)
 	_, err := ens.ReadByte()
@@ -107,7 +107,7 @@ func TestENSTransport_ReadClosed(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	_ = server.Close()
 
 	ens := transport.NewENSTransport(client, 200*time.Millisecond, 200*time.Millisecond)
