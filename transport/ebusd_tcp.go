@@ -49,6 +49,14 @@ type EbusdTCPTransport struct {
 	telegram []byte
 }
 
+type ebusdHexDispatch struct {
+	src     byte
+	dst     byte
+	pb      byte
+	sb      byte
+	payload []byte
+}
+
 // NewEbusdTCPTransport wraps an established ebusd command connection.
 func NewEbusdTCPTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *EbusdTCPTransport {
 	tr := &EbusdTCPTransport{
@@ -86,24 +94,73 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 
 func (t *EbusdTCPTransport) Write(payload []byte) (int, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	if t.closed {
+		t.mu.Unlock()
 		return 0, ebuserrors.ErrTransportClosed
 	}
 	if len(payload) == 0 {
+		t.mu.Unlock()
 		return 0, nil
 	}
 
 	for _, raw := range payload {
 		t.pending = append(t.pending, raw)
-		if err := t.consumeRawByte(raw); err != nil {
+		dispatch, err := t.consumeRawByte(raw)
+		if err != nil {
 			t.pendingErr = err
 			t.cond.Broadcast()
+			t.mu.Unlock()
 			return len(payload), err
 		}
+		if dispatch == nil {
+			continue
+		}
+
+		// Allow the bus reader to drain the echoed request bytes while we block on ebusd.
+		t.cond.Broadcast()
+		t.mu.Unlock()
+
+		respPayload, sendErr := t.sendHexCommand(dispatch.src, dispatch.payload)
+
+		t.mu.Lock()
+		if sendErr != nil {
+			if errors.Is(sendErr, errNoHexPayload) && dispatch.dst == ebusBroadcast {
+				continue
+			}
+			if errors.Is(sendErr, ebuserrors.ErrTransportClosed) {
+				t.closed = true
+				t.pendingErr = sendErr
+				t.cond.Broadcast()
+				t.mu.Unlock()
+				return len(payload), sendErr
+			}
+			t.pendingErr = sendErr
+			t.cond.Broadcast()
+			continue
+		}
+
+		if dispatch.dst == ebusBroadcast {
+			continue
+		}
+
+		t.pending = append(t.pending, ebusSymbolAck)
+		if isInitiatorCapableAddress(dispatch.dst) {
+			t.ignoreUntilSyn = true
+			t.cond.Broadcast()
+			continue
+		}
+
+		response := make([]byte, 0, 6+len(respPayload))
+		response = append(response, dispatch.dst, dispatch.src, dispatch.pb, dispatch.sb, byte(len(respPayload)))
+		response = append(response, respPayload...)
+		response = append(response, crcValue(response))
+
+		t.pending = append(t.pending, escapeBytes(response)...)
+		t.ignoreUntilSyn = true
 	}
 	t.cond.Broadcast()
+	t.mu.Unlock()
 	return len(payload), nil
 }
 
@@ -122,7 +179,7 @@ func (t *EbusdTCPTransport) Close() error {
 	return nil
 }
 
-func (t *EbusdTCPTransport) consumeRawByte(raw byte) error {
+func (t *EbusdTCPTransport) consumeRawByte(raw byte) (*ebusdHexDispatch, error) {
 	if t.ignoreUntilSyn {
 		switch {
 		case t.escape:
@@ -134,7 +191,7 @@ func (t *EbusdTCPTransport) consumeRawByte(raw byte) error {
 			t.escape = false
 			t.telegram = t.telegram[:0]
 		}
-		return nil
+		return nil, nil
 	}
 
 	if t.escape {
@@ -146,52 +203,52 @@ func (t *EbusdTCPTransport) consumeRawByte(raw byte) error {
 			t.telegram = append(t.telegram, ebusSymbolSyn)
 		default:
 			t.telegram = t.telegram[:0]
-			return ebuserrors.ErrInvalidPayload
+			return nil, ebuserrors.ErrInvalidPayload
 		}
 		return t.maybeDispatchTelegram()
 	}
 
 	if raw == ebusSymbolEscape {
 		t.escape = true
-		return nil
+		return nil, nil
 	}
 	if raw == ebusSymbolSyn {
 		// End-of-message boundary (sent by the bus state machine after a full transaction).
 		t.telegram = t.telegram[:0]
-		return nil
+		return nil, nil
 	}
 
 	t.telegram = append(t.telegram, raw)
 	return t.maybeDispatchTelegram()
 }
 
-func (t *EbusdTCPTransport) maybeDispatchTelegram() error {
+func (t *EbusdTCPTransport) maybeDispatchTelegram() (*ebusdHexDispatch, error) {
 	if len(t.telegram) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	if len(t.telegram) < 5 {
-		return nil
+		return nil, nil
 	}
 
 	dataLen := int(t.telegram[4])
 	expected := 6 + dataLen
 	if len(t.telegram) < expected {
-		return nil
+		return nil, nil
 	}
 	if len(t.telegram) != expected {
 		t.telegram = t.telegram[:0]
-		return ebuserrors.ErrInvalidPayload
+		return nil, ebuserrors.ErrInvalidPayload
 	}
 
 	if len(t.telegram) < 6 {
 		t.telegram = t.telegram[:0]
-		return ebuserrors.ErrInvalidPayload
+		return nil, ebuserrors.ErrInvalidPayload
 	}
 
 	if crcValue(t.telegram[:len(t.telegram)-1]) != t.telegram[len(t.telegram)-1] {
 		t.telegram = t.telegram[:0]
-		return ebuserrors.ErrCRCMismatch
+		return nil, ebuserrors.ErrCRCMismatch
 	}
 
 	src := t.telegram[0]
@@ -201,42 +258,13 @@ func (t *EbusdTCPTransport) maybeDispatchTelegram() error {
 	payload := append([]byte(nil), t.telegram[1:len(t.telegram)-1]...)
 	t.telegram = t.telegram[:0]
 
-	respPayload, err := t.sendHexCommand(src, payload)
-	if err != nil {
-		if errors.Is(err, errNoHexPayload) && dst == ebusBroadcast {
-			return nil
-		}
-		if errors.Is(err, ebuserrors.ErrTransportClosed) {
-			t.closed = true
-			t.pendingErr = err
-			t.cond.Broadcast()
-			return err
-		}
-		t.pendingErr = err
-		t.cond.Broadcast()
-		return nil
-	}
-
-	if dst == ebusBroadcast {
-		return nil
-	}
-
-	t.pending = append(t.pending, ebusSymbolAck)
-	if isInitiatorCapableAddress(dst) {
-		t.ignoreUntilSyn = true
-		t.cond.Broadcast()
-		return nil
-	}
-
-	response := make([]byte, 0, 6+len(respPayload))
-	response = append(response, dst, src, pb, sb, byte(len(respPayload)))
-	response = append(response, respPayload...)
-	response = append(response, crcValue(response))
-
-	t.pending = append(t.pending, escapeBytes(response)...)
-	t.cond.Broadcast()
-	t.ignoreUntilSyn = true
-	return nil
+	return &ebusdHexDispatch{
+		src:     src,
+		dst:     dst,
+		pb:      pb,
+		sb:      sb,
+		payload: payload,
+	}, nil
 }
 
 func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, error) {

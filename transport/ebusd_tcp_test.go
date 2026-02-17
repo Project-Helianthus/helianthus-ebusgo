@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
 )
@@ -526,5 +527,105 @@ func TestEbusdTCPTransport_Write_CommandInjectsAckAndResponse(t *testing.T) {
 
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestEbusdTCPTransport_Write_AllowsEchoDrainWhileWaitingForEbusd(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 0, 0)
+
+	src := byte(0x31)
+	dst := byte(0x15)
+	pb := byte(0x07)
+	sb := byte(0x04)
+
+	telegram := []byte{src, dst, pb, sb, 0x00}
+	telegram = append(telegram, crcValue(telegram))
+
+	wantCommand := "hex -s 31 15070400\n"
+
+	commandRead := make(chan struct{})
+	allowResponse := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if line != wantCommand {
+			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			return
+		}
+		close(commandRead)
+		<-allowResponse
+		_, err = server.Write([]byte("0a b5 41 53 56 32 05 07 17 04\n\n"))
+		serverErr <- err
+	}()
+
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := tr.Write(telegram)
+		writeErr <- err
+	}()
+
+	select {
+	case <-commandRead:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatalf("server did not receive command line within timeout")
+	}
+
+	// While ebusd is blocked waiting to respond, we should still be able to drain
+	// the echoed request bytes from the transport. If Write() holds the internal
+	// lock during sendHexCommand, ReadByte() would block here.
+	for _, b := range telegram {
+		valueCh := make(chan struct {
+			value byte
+			err   error
+		}, 1)
+		go func() {
+			value, err := tr.ReadByte()
+			valueCh <- struct {
+				value byte
+				err   error
+			}{value: value, err: err}
+		}()
+		select {
+		case got := <-valueCh:
+			if got.err != nil {
+				t.Fatalf("ReadByte (echo) error = %v", got.err)
+			}
+			if got.value != b {
+				t.Fatalf("echo = 0x%02x; want 0x%02x", got.value, b)
+			}
+		case <-time.After(250 * time.Millisecond):
+			t.Fatalf("ReadByte (echo) timed out; likely blocked on internal mutex")
+		}
+	}
+
+	close(allowResponse)
+
+	select {
+	case err := <-writeErr:
+		if err != nil {
+			t.Fatalf("Write error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Write did not complete after server response")
+	}
+
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("server error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not complete within timeout")
 	}
 }
