@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
 )
@@ -228,7 +229,7 @@ func TestEbusdTCPTransport_SendHexCommand_StripsLengthPrefix(t *testing.T) {
 			defer func() { _ = client.Close() }()
 			defer func() { _ = server.Close() }()
 
-			tr := NewEbusdTCPTransport(client)
+			tr := NewEbusdTCPTransport(client, 0, 0)
 
 			serverErr := make(chan error, 1)
 			// Goroutine exits after validating the command and writing one response.
@@ -270,7 +271,7 @@ func TestEbusdTCPTransport_SendHexCommand_CommandFormatting(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
-	tr := NewEbusdTCPTransport(client)
+	tr := NewEbusdTCPTransport(client, 0, 0)
 
 	src := byte(0x03)
 	payload := []byte{0x00, 0x0A, 0xF0}
@@ -341,7 +342,7 @@ func TestEbusdTCPTransport_SendHexCommand_ErrLines(t *testing.T) {
 			defer func() { _ = client.Close() }()
 			defer func() { _ = server.Close() }()
 
-			tr := NewEbusdTCPTransport(client)
+			tr := NewEbusdTCPTransport(client, 0, 0)
 			wantCommand := "hex -s 08 01\n"
 
 			serverErr := make(chan error, 1)
@@ -380,19 +381,11 @@ func TestEbusdTCPTransport_Write_BroadcastDone(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
-	tr := NewEbusdTCPTransport(client)
+	tr := NewEbusdTCPTransport(client, 0, 0)
 
 	src := byte(0x10)
-	telegram := []byte{
-		src,
-		ebusBroadcast,
-		0xB5,
-		0x24,
-		0x01,
-		0x02,
-		0x00,
-	}
-	raw := append(telegram, ebusSymbolSyn)
+	telegram := []byte{src, ebusBroadcast, 0xB5, 0x24, 0x01, 0x02}
+	telegram = append(telegram, crcValue(telegram))
 	wantCommand := "hex -s 10 feb5240102\n"
 
 	serverErr := make(chan error, 1)
@@ -414,12 +407,12 @@ func TestEbusdTCPTransport_Write_BroadcastDone(t *testing.T) {
 		serverErr <- err
 	}()
 
-	written, err := tr.Write(raw)
+	written, err := tr.Write(telegram)
 	if err != nil {
 		t.Fatalf("Write error = %v", err)
 	}
-	if written != len(raw) {
-		t.Fatalf("Write = %d; want %d", written, len(raw))
+	if written != len(telegram) {
+		t.Fatalf("Write = %d; want %d", written, len(telegram))
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
@@ -430,7 +423,209 @@ func TestEbusdTCPTransport_Write_BroadcastDone(t *testing.T) {
 	if tr.pendingErr != nil {
 		t.Fatalf("pendingErr = %v; want nil", tr.pendingErr)
 	}
-	if len(tr.pending) != len(raw) {
-		t.Fatalf("pending = %d; want %d", len(tr.pending), len(raw))
+	if len(tr.pending) != len(telegram) {
+		t.Fatalf("pending = %d; want %d", len(tr.pending), len(telegram))
+	}
+}
+
+func TestEbusdTCPTransport_Write_CommandInjectsAckAndResponse(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 0, 0)
+
+	src := byte(0x31)
+	dst := byte(0x15)
+	pb := byte(0x07)
+	sb := byte(0x04)
+
+	telegram := []byte{src, dst, pb, sb, 0x00}
+	telegram = append(telegram, crcValue(telegram))
+
+	wantCommand := "hex -s 31 15070400\n"
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			_ = server.Close()
+			return
+		}
+		if line != wantCommand {
+			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			_ = server.Close()
+			return
+		}
+		_, err = server.Write([]byte("03 11 22 33\n\n"))
+		serverErr <- err
+	}()
+
+	for _, b := range telegram {
+		if _, err := tr.Write([]byte{b}); err != nil {
+			t.Fatalf("Write error = %v", err)
+		}
+		echo, err := tr.ReadByte()
+		if err != nil {
+			t.Fatalf("ReadByte (echo) error = %v", err)
+		}
+		if echo != b {
+			t.Fatalf("echo = 0x%02x; want 0x%02x", echo, b)
+		}
+	}
+
+	ack, err := tr.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte (ack) error = %v", err)
+	}
+	if ack != ebusSymbolAck {
+		t.Fatalf("ack = 0x%02x; want 0x%02x", ack, ebusSymbolAck)
+	}
+
+	respData := []byte{0x11, 0x22, 0x33}
+	respTelegram := []byte{dst, src, pb, sb, byte(len(respData))}
+	respTelegram = append(respTelegram, respData...)
+	respTelegram = append(respTelegram, crcValue(respTelegram))
+
+	gotResp := make([]byte, len(respTelegram))
+	for i := range gotResp {
+		value, err := tr.ReadByte()
+		if err != nil {
+			t.Fatalf("ReadByte (response) error = %v", err)
+		}
+		gotResp[i] = value
+	}
+	if !bytes.Equal(gotResp, respTelegram) {
+		t.Fatalf("response = %x; want %x", gotResp, respTelegram)
+	}
+
+	if _, err := tr.Write([]byte{ebusSymbolAck}); err != nil {
+		t.Fatalf("Write (response ack) error = %v", err)
+	}
+	echo, err := tr.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte (response ack echo) error = %v", err)
+	}
+	if echo != ebusSymbolAck {
+		t.Fatalf("response ack echo = 0x%02x; want 0x%02x", echo, ebusSymbolAck)
+	}
+
+	if _, err := tr.Write([]byte{ebusSymbolSyn}); err != nil {
+		t.Fatalf("Write (syn) error = %v", err)
+	}
+	echo, err = tr.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte (syn echo) error = %v", err)
+	}
+	if echo != ebusSymbolSyn {
+		t.Fatalf("syn echo = 0x%02x; want 0x%02x", echo, ebusSymbolSyn)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestEbusdTCPTransport_Write_AllowsEchoDrainWhileWaitingForEbusd(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 0, 0)
+
+	src := byte(0x31)
+	dst := byte(0x15)
+	pb := byte(0x07)
+	sb := byte(0x04)
+
+	telegram := []byte{src, dst, pb, sb, 0x00}
+	telegram = append(telegram, crcValue(telegram))
+
+	wantCommand := "hex -s 31 15070400\n"
+
+	commandRead := make(chan struct{})
+	allowResponse := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if line != wantCommand {
+			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			return
+		}
+		close(commandRead)
+		<-allowResponse
+		_, err = server.Write([]byte("0a b5 41 53 56 32 05 07 17 04\n\n"))
+		serverErr <- err
+	}()
+
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := tr.Write(telegram)
+		writeErr <- err
+	}()
+
+	select {
+	case <-commandRead:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatalf("server did not receive command line within timeout")
+	}
+
+	// While ebusd is blocked waiting to respond, we should still be able to drain
+	// the echoed request bytes from the transport. If Write() holds the internal
+	// lock during sendHexCommand, ReadByte() would block here.
+	for _, b := range telegram {
+		valueCh := make(chan struct {
+			value byte
+			err   error
+		}, 1)
+		go func() {
+			value, err := tr.ReadByte()
+			valueCh <- struct {
+				value byte
+				err   error
+			}{value: value, err: err}
+		}()
+		select {
+		case got := <-valueCh:
+			if got.err != nil {
+				t.Fatalf("ReadByte (echo) error = %v", got.err)
+			}
+			if got.value != b {
+				t.Fatalf("echo = 0x%02x; want 0x%02x", got.value, b)
+			}
+		case <-time.After(250 * time.Millisecond):
+			t.Fatalf("ReadByte (echo) timed out; likely blocked on internal mutex")
+		}
+	}
+
+	close(allowResponse)
+
+	select {
+	case err := <-writeErr:
+		if err != nil {
+			t.Fatalf("Write error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Write did not complete after server response")
+	}
+
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("server error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not complete within timeout")
 	}
 }
