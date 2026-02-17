@@ -214,7 +214,6 @@ func (t *EbusdTCPTransport) maybeDispatchTelegram() error {
 		}
 		t.pendingErr = err
 		t.cond.Broadcast()
-		t.ignoreUntilSyn = true
 		return nil
 	}
 
