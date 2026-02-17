@@ -68,12 +68,12 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 	for len(t.pending) == 0 && t.pendingErr == nil && !t.closed {
 		t.cond.Wait()
 	}
-	if t.pendingErr != nil {
-		err := t.pendingErr
-		t.pendingErr = nil
-		return 0, err
-	}
 	if len(t.pending) == 0 {
+		if t.pendingErr != nil {
+			err := t.pendingErr
+			t.pendingErr = nil
+			return 0, err
+		}
 		if t.closed {
 			return 0, ebuserrors.ErrTransportClosed
 		}
@@ -340,6 +340,7 @@ func readResponseLines(conn net.Conn, reader *bufio.Reader) ([]string, error) {
 func parseHexResponseLines(lines []string) ([]byte, error) {
 	sawDone := false
 	sawTimeout := false
+	sawCollision := false
 	sawErr := false
 
 	for _, line := range lines {
@@ -355,9 +356,21 @@ func parseHexResponseLines(lines []string) ([]byte, error) {
 		}
 		if strings.HasPrefix(lower, "err") {
 			sawErr = true
+			if strings.Contains(lower, "arbitration lost") ||
+				strings.Contains(lower, "arbitration") && strings.Contains(lower, "lost") ||
+				strings.Contains(lower, "collision") {
+				sawCollision = true
+				continue
+			}
 			if strings.Contains(lower, "timeout") ||
 				strings.Contains(lower, "timed out") ||
 				strings.Contains(lower, "no answer") {
+				sawTimeout = true
+			}
+			if strings.Contains(lower, "no signal") ||
+				strings.Contains(lower, "signal lost") ||
+				strings.Contains(lower, "device invalid") ||
+				strings.Contains(lower, "generic i/o error") {
 				sawTimeout = true
 			}
 			continue
@@ -403,6 +416,9 @@ func parseHexResponseLines(lines []string) ([]byte, error) {
 	}
 	if sawTimeout {
 		return nil, ebuserrors.ErrTimeout
+	}
+	if sawCollision {
+		return nil, ebuserrors.ErrBusCollision
 	}
 	if sawErr {
 		return nil, ebuserrors.ErrInvalidPayload
