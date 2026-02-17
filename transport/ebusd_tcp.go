@@ -40,15 +40,22 @@ type EbusdTCPTransport struct {
 	pending    []byte
 	pendingErr error
 
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+
+	ignoreUntilSyn bool
+
 	escape   bool
 	telegram []byte
 }
 
 // NewEbusdTCPTransport wraps an established ebusd command connection.
-func NewEbusdTCPTransport(conn net.Conn) *EbusdTCPTransport {
+func NewEbusdTCPTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *EbusdTCPTransport {
 	tr := &EbusdTCPTransport{
-		conn:   conn,
-		reader: bufio.NewReader(conn),
+		conn:         conn,
+		reader:       bufio.NewReader(conn),
+		readTimeout:  readTimeout,
+		writeTimeout: writeTimeout,
 	}
 	tr.cond = sync.NewCond(&tr.mu)
 	return tr
@@ -116,6 +123,20 @@ func (t *EbusdTCPTransport) Close() error {
 }
 
 func (t *EbusdTCPTransport) consumeRawByte(raw byte) error {
+	if t.ignoreUntilSyn {
+		switch {
+		case t.escape:
+			t.escape = false
+		case raw == ebusSymbolEscape:
+			t.escape = true
+		case raw == ebusSymbolSyn:
+			t.ignoreUntilSyn = false
+			t.escape = false
+			t.telegram = t.telegram[:0]
+		}
+		return nil
+	}
+
 	if t.escape {
 		t.escape = false
 		switch raw {
@@ -127,7 +148,7 @@ func (t *EbusdTCPTransport) consumeRawByte(raw byte) error {
 			t.telegram = t.telegram[:0]
 			return ebuserrors.ErrInvalidPayload
 		}
-		return nil
+		return t.maybeDispatchTelegram()
 	}
 
 	if raw == ebusSymbolEscape {
@@ -135,16 +156,32 @@ func (t *EbusdTCPTransport) consumeRawByte(raw byte) error {
 		return nil
 	}
 	if raw == ebusSymbolSyn {
-		return t.flushTelegram()
+		// End-of-message boundary (sent by the bus state machine after a full transaction).
+		t.telegram = t.telegram[:0]
+		return nil
 	}
 
 	t.telegram = append(t.telegram, raw)
-	return nil
+	return t.maybeDispatchTelegram()
 }
 
-func (t *EbusdTCPTransport) flushTelegram() error {
+func (t *EbusdTCPTransport) maybeDispatchTelegram() error {
 	if len(t.telegram) == 0 {
 		return nil
+	}
+
+	if len(t.telegram) < 5 {
+		return nil
+	}
+
+	dataLen := int(t.telegram[4])
+	expected := 6 + dataLen
+	if len(t.telegram) < expected {
+		return nil
+	}
+	if len(t.telegram) != expected {
+		t.telegram = t.telegram[:0]
+		return ebuserrors.ErrInvalidPayload
 	}
 
 	if len(t.telegram) < 6 {
@@ -152,11 +189,9 @@ func (t *EbusdTCPTransport) flushTelegram() error {
 		return ebuserrors.ErrInvalidPayload
 	}
 
-	dataLen := int(t.telegram[4])
-	expected := 6 + dataLen
-	if len(t.telegram) != expected {
+	if crcValue(t.telegram[:len(t.telegram)-1]) != t.telegram[len(t.telegram)-1] {
 		t.telegram = t.telegram[:0]
-		return ebuserrors.ErrInvalidPayload
+		return ebuserrors.ErrCRCMismatch
 	}
 
 	src := t.telegram[0]
@@ -179,10 +214,18 @@ func (t *EbusdTCPTransport) flushTelegram() error {
 		}
 		t.pendingErr = err
 		t.cond.Broadcast()
+		t.ignoreUntilSyn = true
 		return nil
 	}
 
 	if dst == ebusBroadcast {
+		return nil
+	}
+
+	t.pending = append(t.pending, ebusSymbolAck)
+	if isInitiatorCapableAddress(dst) {
+		t.ignoreUntilSyn = true
+		t.cond.Broadcast()
 		return nil
 	}
 
@@ -191,9 +234,9 @@ func (t *EbusdTCPTransport) flushTelegram() error {
 	response = append(response, respPayload...)
 	response = append(response, crcValue(response))
 
-	t.pending = append(t.pending, ebusSymbolAck)
 	t.pending = append(t.pending, escapeBytes(response)...)
 	t.cond.Broadcast()
+	t.ignoreUntilSyn = true
 	return nil
 }
 
@@ -203,13 +246,28 @@ func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, er
 	}
 
 	command := fmt.Sprintf("hex -s %02X %s\n", src, hex.EncodeToString(payload))
+	if t.conn != nil && t.writeTimeout > 0 {
+		_ = t.conn.SetWriteDeadline(time.Now().Add(t.writeTimeout))
+	}
 	if _, err := io.WriteString(t.conn, command); err != nil {
 		return nil, ebuserrors.ErrTransportClosed
 	}
+	if t.conn != nil {
+		_ = t.conn.SetWriteDeadline(time.Time{})
+	}
 
+	if t.conn != nil && t.readTimeout > 0 {
+		_ = t.conn.SetReadDeadline(time.Now().Add(t.readTimeout))
+	}
 	lines, err := readResponseLines(t.conn, t.reader)
 	if err != nil {
+		if t.conn != nil {
+			_ = t.conn.SetReadDeadline(time.Time{})
+		}
 		return nil, err
+	}
+	if t.conn != nil {
+		_ = t.conn.SetReadDeadline(time.Time{})
 	}
 	resp, err := parseHexResponseLines(lines)
 	if err != nil {
@@ -281,6 +339,10 @@ func readResponseLines(conn net.Conn, reader *bufio.Reader) ([]string, error) {
 }
 
 func parseHexResponseLines(lines []string) ([]byte, error) {
+	sawDone := false
+	sawTimeout := false
+	sawErr := false
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -289,32 +351,62 @@ func parseHexResponseLines(lines []string) ([]byte, error) {
 
 		lower := strings.ToLower(trimmed)
 		if strings.HasPrefix(lower, "done") {
-			return nil, errNoHexPayload
+			sawDone = true
+			continue
 		}
 		if strings.HasPrefix(lower, "err") {
+			sawErr = true
 			if strings.Contains(lower, "timeout") ||
 				strings.Contains(lower, "timed out") ||
 				strings.Contains(lower, "no answer") {
-				return nil, ebuserrors.ErrTimeout
+				sawTimeout = true
 			}
-			return nil, ebuserrors.ErrInvalidPayload
+			continue
 		}
 		if strings.HasPrefix(lower, "usage:") {
-			return nil, ebuserrors.ErrInvalidPayload
+			sawErr = true
+			continue
 		}
 		if strings.HasPrefix(lower, "0x") {
 			trimmed = strings.TrimSpace(trimmed[2:])
 		}
 
 		hexText := stripHexSpaces(trimmed)
+		isHex := true
+		for _, r := range hexText {
+			switch {
+			case r >= '0' && r <= '9':
+			case r >= 'a' && r <= 'f':
+			case r >= 'A' && r <= 'F':
+			default:
+				isHex = false
+			}
+			if !isHex {
+				break
+			}
+		}
+		if !isHex || hexText == "" {
+			continue
+		}
 		if len(hexText)%2 != 0 {
-			return nil, ebuserrors.ErrInvalidPayload
+			sawErr = true
+			continue
 		}
 		payload, err := hex.DecodeString(hexText)
 		if err != nil {
-			return nil, ebuserrors.ErrInvalidPayload
+			sawErr = true
+			continue
 		}
 		return payload, nil
+	}
+	if sawDone {
+		return nil, errNoHexPayload
+	}
+	if sawTimeout {
+		return nil, ebuserrors.ErrTimeout
+	}
+	if sawErr {
+		return nil, ebuserrors.ErrInvalidPayload
 	}
 	return nil, ebuserrors.ErrTimeout
 }
@@ -363,6 +455,27 @@ func crcValue(payload []byte) byte {
 		}
 	}
 	return value
+}
+
+func isInitiatorCapableAddress(addr byte) bool {
+	return initiatorPartIndex(addr&0x0F) > 0 && initiatorPartIndex((addr&0xF0)>>4) > 0
+}
+
+func initiatorPartIndex(bits byte) byte {
+	switch bits {
+	case 0x0:
+		return 1
+	case 0x1:
+		return 2
+	case 0x3:
+		return 3
+	case 0x7:
+		return 4
+	case 0xF:
+		return 5
+	default:
+		return 0
+	}
 }
 
 var _ RawTransport = (*EbusdTCPTransport)(nil)
