@@ -48,6 +48,7 @@ go build ./...
 ### 2) CI-parity checks
 
 ```bash
+./scripts/ci_local.sh
 go test -race -count=1 ./...
 ```
 

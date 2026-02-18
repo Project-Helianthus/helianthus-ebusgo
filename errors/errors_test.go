@@ -117,4 +117,3 @@ func TestClassifiers_CoverAllSentinels(t *testing.T) {
 		})
 	}
 }
-
