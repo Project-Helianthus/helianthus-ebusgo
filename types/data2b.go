@@ -8,13 +8,13 @@ import (
 )
 
 const (
-	data2bSize        = 2
-	data2bDivisor     = 256.0
-	data2bEpsilon     = 1e-9
-	data2bReplacement = uint16(0x8000)
+	data2bSize           = 2
+	data2bDivisor        = 256.0
+	data2bEpsilon        = 1e-9
+	data2bReplacement    = uint16(0x8000)
 	data2bReplacementInt = int64(-32768)
-	data2bMinInt      = int64(-32767)
-	data2bMaxInt      = int64(32767)
+	data2bMinInt         = int64(-32767)
+	data2bMaxInt         = int64(32767)
 )
 
 var (
