@@ -34,12 +34,14 @@ type UDPPlainTransport struct {
 	buffer  []byte
 }
 
+const udpReadBufferSize = 65535
+
 func NewUDPPlainTransport(conn *net.UDPConn, readTimeout, writeTimeout time.Duration) *UDPPlainTransport {
 	return &UDPPlainTransport{
 		conn:         conn,
 		readTimeout:  readTimeout,
 		writeTimeout: writeTimeout,
-		buffer:       make([]byte, 2048),
+		buffer:       make([]byte, udpReadBufferSize),
 	}
 }
 

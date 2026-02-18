@@ -13,6 +13,39 @@ import (
 	"github.com/d3vi1/helianthus-ebusgo/transport"
 )
 
+func TestUDPPlainTransport_ReadByteHandlesLargeDatagram(t *testing.T) {
+	t.Parallel()
+
+	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP error = %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	clientConn, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("DialUDP error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	tr := transport.NewUDPPlainTransport(clientConn, 200*time.Millisecond, 200*time.Millisecond)
+
+	payload := bytes.Repeat([]byte{0x5A}, 4096)
+	if _, err := server.WriteToUDP(payload, clientConn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("server WriteToUDP error = %v", err)
+	}
+
+	for index, want := range payload {
+		got, err := tr.ReadByte()
+		if err != nil {
+			t.Fatalf("ReadByte[%d] error = %v", index, err)
+		}
+		if got != want {
+			t.Fatalf("ReadByte[%d] = 0x%02x; want 0x%02x", index, got, want)
+		}
+	}
+}
+
 func TestUDPPlainTransport_WriteSendsDatagram(t *testing.T) {
 	t.Parallel()
 
