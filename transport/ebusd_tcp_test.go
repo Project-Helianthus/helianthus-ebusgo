@@ -629,3 +629,140 @@ func TestEbusdTCPTransport_Write_AllowsEchoDrainWhileWaitingForEbusd(t *testing.
 		t.Fatalf("server did not complete within timeout")
 	}
 }
+
+func TestEbusdTCPTransport_SendHexCommand_HandlesNoiseBeforeHex(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 500*time.Millisecond, 0)
+	wantCommand := "hex -s 31 feb5240100\n"
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if line != wantCommand {
+			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			return
+		}
+
+		if _, err := server.Write([]byte("\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte("dump enabled\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte("ERR: invalid numeric argument\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		time.Sleep(40 * time.Millisecond)
+		if _, err := server.Write([]byte("0400004040\n\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	got, err := tr.sendHexCommand(0x31, []byte{0xFE, 0xB5, 0x24, 0x01, 0x00})
+	if err != nil {
+		t.Fatalf("sendHexCommand error = %v", err)
+	}
+	want := []byte{0x00, 0x00, 0x40, 0x40}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("sendHexCommand = %x; want %x", got, want)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestEbusdTCPTransport_Write_SerializesConcurrentHexCommands(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 500*time.Millisecond, 0)
+
+	telegramA := []byte{0x31, 0xFE, 0x07, 0xFE, 0x00}
+	telegramA = append(telegramA, crcValue(telegramA))
+	commandA := "hex -s 31 fe07fe00\n"
+
+	telegramB := []byte{0x10, 0xFE, 0xB5, 0x16, 0x01, 0x01}
+	telegramB = append(telegramB, crcValue(telegramB))
+	commandB := "hex -s 10 feb5160101\n"
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		first, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+
+		_ = server.SetReadDeadline(time.Now().Add(60 * time.Millisecond))
+		secondEarly, err := reader.ReadString('\n')
+		if err == nil {
+			serverErr <- fmt.Errorf("second command arrived before first response: %q", secondEarly)
+			return
+		}
+		if !isTimeout(err) {
+			serverErr <- fmt.Errorf("unexpected pre-response read error: %v", err)
+			return
+		}
+		_ = server.SetReadDeadline(time.Time{})
+
+		if _, err := server.Write([]byte("done broadcast\n\n")); err != nil {
+			serverErr <- err
+			return
+		}
+
+		second, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte("done broadcast\n\n")); err != nil {
+			serverErr <- err
+			return
+		}
+
+		if (first != commandA || second != commandB) && (first != commandB || second != commandA) {
+			serverErr <- fmt.Errorf("commands = [%q, %q]; want permutations of [%q, %q]", first, second, commandA, commandB)
+			return
+		}
+
+		serverErr <- nil
+	}()
+
+	writeErr := make(chan error, 2)
+	go func() {
+		_, err := tr.Write(telegramA)
+		writeErr <- err
+	}()
+	go func() {
+		_, err := tr.Write(telegramB)
+		writeErr <- err
+	}()
+
+	for index := 0; index < 2; index++ {
+		if err := <-writeErr; err != nil {
+			t.Fatalf("Write #%d error = %v", index+1, err)
+		}
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}

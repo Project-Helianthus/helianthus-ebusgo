@@ -18,11 +18,11 @@ import (
 )
 
 const (
-	ebusSymbolEscape = byte(0xA9)
-	ebusSymbolSyn    = byte(0xAA)
-	ebusSymbolAck    = byte(0x00)
-	ebusBroadcast    = byte(0xFE)
-	ebusdDrainWindow = 10 * time.Millisecond
+	ebusSymbolEscape    = byte(0xA9)
+	ebusSymbolSyn       = byte(0xAA)
+	ebusSymbolAck       = byte(0x00)
+	ebusBroadcast       = byte(0xFE)
+	ebusdFollowupWindow = 150 * time.Millisecond
 )
 
 var errNoHexPayload = errors.New("ebusd: no hex payload")
@@ -36,6 +36,7 @@ type EbusdTCPTransport struct {
 
 	mu         sync.Mutex
 	cond       *sync.Cond
+	writeMu    sync.Mutex
 	closed     bool
 	pending    []byte
 	pendingErr error
@@ -93,6 +94,9 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 }
 
 func (t *EbusdTCPTransport) Write(payload []byte) (int, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	t.mu.Lock()
 
 	if t.closed {
@@ -286,15 +290,9 @@ func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, er
 	if t.conn != nil && t.readTimeout > 0 {
 		_ = t.conn.SetReadDeadline(time.Now().Add(t.readTimeout))
 	}
-	lines, err := readResponseLines(t.conn, t.reader)
+	lines, err := readResponseLines(t.conn, t.reader, t.readTimeout)
 	if err != nil {
-		if t.conn != nil {
-			_ = t.conn.SetReadDeadline(time.Time{})
-		}
 		return nil, err
-	}
-	if t.conn != nil {
-		_ = t.conn.SetReadDeadline(time.Time{})
 	}
 	resp, err := parseHexResponseLines(lines)
 	if err != nil {
@@ -303,66 +301,125 @@ func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, er
 	return stripLengthPrefix(resp), nil
 }
 
-func readResponseLines(conn net.Conn, reader *bufio.Reader) ([]string, error) {
+func readResponseLines(conn net.Conn, reader *bufio.Reader, readTimeout time.Duration) ([]string, error) {
 	var lines []string
+
+	if conn != nil && readTimeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	}
+
+	followupDeadlineSet := false
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
 			if isTimeout(err) {
+				if conn != nil {
+					_ = conn.SetReadDeadline(time.Time{})
+				}
+				if len(lines) > 0 {
+					return lines, nil
+				}
 				return lines, ebuserrors.ErrTimeout
 			}
 			if isClosed(err) {
+				if conn != nil {
+					_ = conn.SetReadDeadline(time.Time{})
+				}
+				if len(lines) > 0 {
+					return lines, nil
+				}
 				return lines, ebuserrors.ErrTransportClosed
+			}
+			if conn != nil {
+				_ = conn.SetReadDeadline(time.Time{})
 			}
 			return lines, ebuserrors.ErrTransportClosed
 		}
 
-		line = strings.TrimRight(line, "\r\n")
-		if strings.TrimSpace(line) == "" {
-			if len(lines) > 0 {
-				break
-			}
+		trimmed := strings.TrimSpace(strings.TrimRight(line, "\r\n"))
+		if trimmed == "" {
 			if errors.Is(err, io.EOF) {
+				if conn != nil {
+					_ = conn.SetReadDeadline(time.Time{})
+				}
+				if len(lines) > 0 {
+					return lines, nil
+				}
 				return lines, ebuserrors.ErrTransportClosed
 			}
 			continue
 		}
-		lines = append(lines, line)
-		if errors.Is(err, io.EOF) {
-			return lines, nil
-		}
-		break
-	}
 
-	if len(lines) == 0 {
-		return lines, ebuserrors.ErrTimeout
-	}
-
-	if conn != nil {
-		_ = conn.SetReadDeadline(time.Now().Add(ebusdDrainWindow))
-	}
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if isTimeout(err) || errors.Is(err, io.EOF) || isClosed(err) {
-				break
+		lower := strings.ToLower(trimmed)
+		if isIgnorableResponseLine(lower) {
+			if errors.Is(err, io.EOF) {
+				if conn != nil {
+					_ = conn.SetReadDeadline(time.Time{})
+				}
+				if len(lines) > 0 {
+					return lines, nil
+				}
+				return lines, ebuserrors.ErrTransportClosed
 			}
-			break
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
-		}
-		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		lines = append(lines, line)
+
+		lines = append(lines, trimmed)
+
+		if looksLikeHexResponseLine(trimmed) || strings.HasPrefix(lower, "done") {
+			break
+		}
+
+		if conn != nil && !followupDeadlineSet {
+			followup := ebusdFollowupWindow
+			if readTimeout > 0 && readTimeout < followup {
+				followup = readTimeout
+			}
+			if followup > 0 {
+				_ = conn.SetReadDeadline(time.Now().Add(followup))
+				followupDeadlineSet = true
+			}
+		}
+
+		if errors.Is(err, io.EOF) {
+			break
+		}
 	}
+
 	if conn != nil {
 		_ = conn.SetReadDeadline(time.Time{})
 	}
-
+	if len(lines) == 0 {
+		return lines, ebuserrors.ErrTimeout
+	}
 	return lines, nil
+}
+
+func isIgnorableResponseLine(lower string) bool {
+	return strings.Contains(lower, "dump enabled") ||
+		strings.Contains(lower, "dump disabled")
+}
+
+func looksLikeHexResponseLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(strings.ToLower(trimmed), "0x") {
+		trimmed = strings.TrimSpace(trimmed[2:])
+	}
+	hexText := stripHexSpaces(trimmed)
+	if hexText == "" || len(hexText)%2 != 0 {
+		return false
+	}
+	for _, r := range hexText {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func parseHexResponseLines(lines []string) ([]byte, error) {
