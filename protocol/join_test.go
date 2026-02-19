@@ -48,6 +48,10 @@ type memoryJoinStateStore struct {
 	saves     []byte
 }
 
+func nilContext() context.Context {
+	return nil
+}
+
 func (s *memoryJoinStateStore) LoadInitiator(context.Context) (byte, error) {
 	return s.loadValue, s.loadErr
 }
@@ -233,5 +237,39 @@ func TestJoiner_PersistedInitiatorFallsBackWhenOccupied(t *testing.T) {
 	}
 	if result.Initiator != 0xFF {
 		t.Fatalf("Initiator = 0x%02x; want 0xff", result.Initiator)
+	}
+}
+
+func TestJoiner_NilContextDefaultsToBackground(t *testing.T) {
+	t.Parallel()
+
+	joiner := NewJoiner(&scriptedJoinBus{}, nil, JoinConfig{
+		ListenWarmup:  2 * time.Millisecond,
+		PreferHighest: true,
+	})
+
+	result, err := joiner.Join(nilContext())
+	if err != nil {
+		t.Fatalf("Join error = %v", err)
+	}
+	if result.Initiator != 0xFF {
+		t.Fatalf("Initiator = 0x%02x; want 0xff", result.Initiator)
+	}
+}
+
+func TestJoiner_PropagatesInquiryCancellation(t *testing.T) {
+	t.Parallel()
+
+	bus := &scriptedJoinBus{inquiryErr: context.Canceled}
+	joiner := NewJoiner(bus, nil, JoinConfig{
+		ListenWarmup:       2 * time.Millisecond,
+		PreferHighest:      true,
+		InquiryEnabled:     true,
+		InquiryMaxAttempts: 1,
+	})
+
+	_, err := joiner.Join(context.Background())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Join error = %v; want context.Canceled", err)
 	}
 }

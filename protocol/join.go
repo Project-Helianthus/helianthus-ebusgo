@@ -130,6 +130,9 @@ func (j *Joiner) Join(ctx context.Context) (JoinResult, error) {
 	if j == nil || j.bus == nil {
 		return JoinResult{}, fmt.Errorf("ebus: joiner bus is nil")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cfg := normalizeJoinConfig(j.cfg)
 
 	observation := newJoinObservation()
@@ -148,6 +151,10 @@ func (j *Joiner) Join(ctx context.Context) (JoinResult, error) {
 			}
 			after := len(observation.observedInitiators)
 			j.markInquiryResult(cfg, after > before)
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return JoinResult{}, err
+		} else if ctx.Err() != nil {
+			return JoinResult{}, ctx.Err()
 		}
 	}
 
