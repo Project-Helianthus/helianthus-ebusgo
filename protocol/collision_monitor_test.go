@@ -185,3 +185,63 @@ func TestCollisionMonitor_IsErrArbitrationFailed(t *testing.T) {
 		t.Fatalf("IsErrArbitrationFailed(ErrArbitrationFailed) = false; want true")
 	}
 }
+
+func TestCollisionMonitor_ObserveRXReturnsDefensiveEventCopy(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 19, 17, 0, 0, 0, time.UTC)
+	monitor := NewCollisionMonitor(CollisionMonitorConfig{})
+	monitor.now = func() time.Time { return now }
+	monitor.SetInitiator(0x31)
+
+	event := monitor.ObserveRX(Frame{
+		Source:    0x31,
+		Target:    0x15,
+		Primary:   0xB5,
+		Secondary: 0x24,
+		Data:      []byte{0x01, 0x02},
+	})
+	if event == nil {
+		t.Fatalf("ObserveRX returned nil event; want collision")
+	}
+
+	event.Frame.Data[0] = 0xAA
+	stored := monitor.LastEvent()
+	if stored == nil {
+		t.Fatalf("LastEvent returned nil; want event")
+	}
+	if stored.Frame.Data[0] == 0xAA {
+		t.Fatalf("LastEvent data mutated via ObserveRX return value")
+	}
+}
+
+func TestCollisionMonitor_LastEventReturnsDefensiveFrameCopy(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 19, 17, 0, 0, 0, time.UTC)
+	monitor := NewCollisionMonitor(CollisionMonitorConfig{})
+	monitor.now = func() time.Time { return now }
+	monitor.SetInitiator(0x31)
+
+	_ = monitor.ObserveRX(Frame{
+		Source:    0x31,
+		Target:    0x15,
+		Primary:   0xB5,
+		Secondary: 0x24,
+		Data:      []byte{0x03, 0x04},
+	})
+
+	first := monitor.LastEvent()
+	if first == nil {
+		t.Fatalf("LastEvent returned nil; want event")
+	}
+	first.Frame.Data[0] = 0xBB
+
+	second := monitor.LastEvent()
+	if second == nil {
+		t.Fatalf("LastEvent returned nil on second read; want event")
+	}
+	if second.Frame.Data[0] == 0xBB {
+		t.Fatalf("LastEvent data mutated via caller-owned snapshot")
+	}
+}

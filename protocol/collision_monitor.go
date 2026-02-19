@@ -168,8 +168,7 @@ func (m *CollisionMonitor) LastEvent() *EventCollisionDetected {
 	if m.lastEvent == nil {
 		return nil
 	}
-	event := *m.lastEvent
-	return &event
+	return cloneCollisionEvent(m.lastEvent)
 }
 
 func (m *CollisionMonitor) activateCollision(now time.Time, frame Frame, reason CollisionReason) *EventCollisionDetected {
@@ -181,7 +180,7 @@ func (m *CollisionMonitor) activateCollision(now time.Time, frame Frame, reason 
 		Reason:    reason,
 	}
 	m.lastEvent = event
-	return event
+	return cloneCollisionEvent(event)
 }
 
 func (m *CollisionMonitor) matchesRecentTX(frame Frame, now time.Time) bool {
@@ -223,6 +222,15 @@ func cloneFrame(frame Frame) Frame {
 	cloned := frame
 	cloned.Data = append([]byte(nil), frame.Data...)
 	return cloned
+}
+
+func cloneCollisionEvent(event *EventCollisionDetected) *EventCollisionDetected {
+	if event == nil {
+		return nil
+	}
+	cloned := *event
+	cloned.Frame = cloneFrame(event.Frame)
+	return &cloned
 }
 
 func framesEqual(left, right Frame) bool {
