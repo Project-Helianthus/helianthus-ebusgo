@@ -309,6 +309,19 @@ func readResponseLines(conn net.Conn, reader *bufio.Reader, readTimeout time.Dur
 	}
 
 	followupDeadlineSet := false
+	setFollowupDeadline := func() {
+		if conn == nil || followupDeadlineSet {
+			return
+		}
+		followup := ebusdFollowupWindow
+		if readTimeout > 0 && readTimeout < followup {
+			followup = readTimeout
+		}
+		if followup > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(followup))
+			followupDeadlineSet = true
+		}
+	}
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -368,19 +381,14 @@ func readResponseLines(conn net.Conn, reader *bufio.Reader, readTimeout time.Dur
 		lines = append(lines, trimmed)
 
 		if looksLikeHexResponseLine(trimmed) || strings.HasPrefix(lower, "done") {
-			break
+			setFollowupDeadline()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			continue
 		}
 
-		if conn != nil && !followupDeadlineSet {
-			followup := ebusdFollowupWindow
-			if readTimeout > 0 && readTimeout < followup {
-				followup = readTimeout
-			}
-			if followup > 0 {
-				_ = conn.SetReadDeadline(time.Now().Add(followup))
-				followupDeadlineSet = true
-			}
-		}
+		setFollowupDeadline()
 
 		if errors.Is(err, io.EOF) {
 			break

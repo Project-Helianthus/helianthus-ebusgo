@@ -686,6 +686,75 @@ func TestEbusdTCPTransport_SendHexCommand_HandlesNoiseBeforeHex(t *testing.T) {
 	}
 }
 
+func TestEbusdTCPTransport_SendHexCommand_DrainsTrailingLinesBeforeNextCommand(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 500*time.Millisecond, 0)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+
+		first, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if first != "hex -s 31 15070400\n" {
+			serverErr <- fmt.Errorf("first command = %q; want %q", first, "hex -s 31 15070400\n")
+			return
+		}
+		if _, err := server.Write([]byte("01aa\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte("ERR: invalid numeric argument\n\n")); err != nil {
+			serverErr <- err
+			return
+		}
+
+		second, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if second != "hex -s 31 15070401\n" {
+			serverErr <- fmt.Errorf("second command = %q; want %q", second, "hex -s 31 15070401\n")
+			return
+		}
+		if _, err := server.Write([]byte("01bb\n\n")); err != nil {
+			serverErr <- err
+			return
+		}
+
+		serverErr <- nil
+	}()
+
+	gotFirst, err := tr.sendHexCommand(0x31, []byte{0x15, 0x07, 0x04, 0x00})
+	if err != nil {
+		t.Fatalf("first sendHexCommand error = %v", err)
+	}
+	if !bytes.Equal(gotFirst, []byte{0xAA}) {
+		t.Fatalf("first sendHexCommand = %x; want aa", gotFirst)
+	}
+
+	gotSecond, err := tr.sendHexCommand(0x31, []byte{0x15, 0x07, 0x04, 0x01})
+	if err != nil {
+		t.Fatalf("second sendHexCommand error = %v", err)
+	}
+	if !bytes.Equal(gotSecond, []byte{0xBB}) {
+		t.Fatalf("second sendHexCommand = %x; want bb", gotSecond)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestEbusdTCPTransport_Write_SerializesConcurrentHexCommands(t *testing.T) {
 	t.Parallel()
 
