@@ -499,8 +499,9 @@ type arbitratingScriptedTransport struct {
 	writes [][]byte
 	calls  []string
 
-	arbitrationInitiators []byte
-	arbitrationResults    []error
+	arbitrationInitiators  []byte
+	arbitrationResults     []error
+	arbitrationSendsSource bool
 }
 
 func (s *arbitratingScriptedTransport) StartArbitration(initiator byte) error {
@@ -515,6 +516,12 @@ func (s *arbitratingScriptedTransport) StartArbitration(initiator byte) error {
 	err := s.arbitrationResults[0]
 	s.arbitrationResults = s.arbitrationResults[1:]
 	return err
+}
+
+func (s *arbitratingScriptedTransport) ArbitrationSendsSource() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.arbitrationSendsSource
 }
 
 func (s *arbitratingScriptedTransport) ReadByte() (byte, error) {
@@ -585,6 +592,72 @@ func TestBus_ArbitrationCalledBeforeWrite(t *testing.T) {
 	}
 	if len(initiators) != 1 || initiators[0] != 0x10 {
 		t.Fatalf("arbitration initiators = %v; want [0x10]", initiators)
+	}
+}
+
+func TestBus_ArbitrationSendsSourceSkipsSourceByte(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0x07,
+		Secondary: 0xFE,
+		Data:      []byte{0x00},
+	}
+
+	tr := &arbitratingScriptedTransport{
+		arbitrationSendsSource: true,
+	}
+	bus := protocol.NewBus(tr, protocol.DefaultBusConfig(), 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	if _, err := bus.Send(ctx, frame); err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if len(tr.writes) == 0 || len(tr.writes[0]) == 0 {
+		t.Fatalf("writes = %v; want at least one write", tr.writes)
+	}
+	if got := tr.writes[0][0]; got != frame.Target {
+		t.Fatalf("first write byte = 0x%02x; want target 0x%02x when arbitration sends source", got, frame.Target)
+	}
+}
+
+func TestBus_ArbitrationWithoutSourceInjectionIncludesSourceByte(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0x07,
+		Secondary: 0xFE,
+		Data:      []byte{0x00},
+	}
+
+	tr := &arbitratingScriptedTransport{
+		arbitrationSendsSource: false,
+	}
+	bus := protocol.NewBus(tr, protocol.DefaultBusConfig(), 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	if _, err := bus.Send(ctx, frame); err != nil {
+		t.Fatalf("Send error = %v", err)
+	}
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if len(tr.writes) == 0 || len(tr.writes[0]) == 0 {
+		t.Fatalf("writes = %v; want at least one write", tr.writes)
+	}
+	if got := tr.writes[0][0]; got != frame.Source {
+		t.Fatalf("first write byte = 0x%02x; want source 0x%02x when arbitration does not send source", got, frame.Source)
 	}
 }
 

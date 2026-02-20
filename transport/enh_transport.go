@@ -20,6 +20,9 @@ type ENHTransport struct {
 	conn         net.Conn
 	readTimeout  time.Duration
 	writeTimeout time.Duration
+	// true for ENH mode: START arbitration already transmits source symbol on wire.
+	// false for ENS mode: source symbol must still be written in telegram payload.
+	arbitrationSendsSource bool
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
@@ -32,11 +35,28 @@ type ENHTransport struct {
 // NewENHTransport creates a new ENH transport with read/write timeouts.
 func NewENHTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *ENHTransport {
 	return &ENHTransport{
-		conn:         conn,
-		readTimeout:  readTimeout,
-		writeTimeout: writeTimeout,
-		buffer:       make([]byte, 256),
+		conn:                   conn,
+		readTimeout:            readTimeout,
+		writeTimeout:           writeTimeout,
+		buffer:                 make([]byte, 256),
+		arbitrationSendsSource: true,
 	}
+}
+
+// NewENSTransport creates an ENS transport over ENH framing.
+//
+// ENS still uses START arbitration, but callers must include the source byte in
+// the outgoing telegram payload.
+func NewENSTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *ENHTransport {
+	transport := NewENHTransport(conn, readTimeout, writeTimeout)
+	transport.arbitrationSendsSource = false
+	return transport
+}
+
+// ArbitrationSendsSource reports whether START arbitration already placed the
+// source byte on the wire.
+func (t *ENHTransport) ArbitrationSendsSource() bool {
+	return t.arbitrationSendsSource
 }
 
 // Init performs an ENH initialization handshake by sending ENHReqInit(features)
@@ -277,6 +297,12 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 				case ENHResFailed:
 					arbitrationDone = true
 					arbitrationErr = fmt.Errorf("enh arbitration failed (initiator 0x%02x, winner 0x%02x): %w", initiator, msg.Data, ebuserrors.ErrBusCollision)
+				case ENHResErrorEBUS:
+					arbitrationDone = true
+					arbitrationErr = fmt.Errorf("enh arbitration ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrBusCollision)
+				case ENHResErrorHost:
+					arbitrationDone = true
+					arbitrationErr = fmt.Errorf("enh arbitration host error 0x%02x: %w", msg.Data, ebuserrors.ErrBusCollision)
 				}
 			}
 		}

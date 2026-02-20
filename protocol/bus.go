@@ -50,6 +50,10 @@ type arbitrationTransport interface {
 	StartArbitration(initiator byte) error
 }
 
+type arbitrationSourceBehavior interface {
+	ArbitrationSendsSource() bool
+}
+
 // Bus orchestrates prioritized frame sending and transaction matching.
 type Bus struct {
 	transport transport.RawTransport
@@ -351,6 +355,9 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 	includeSource := true
 	if _, ok := b.transport.(arbitrationTransport); ok {
 		includeSource = false
+		if behavior, ok := b.transport.(arbitrationSourceBehavior); ok {
+			includeSource = !behavior.ArbitrationSendsSource()
+		}
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {

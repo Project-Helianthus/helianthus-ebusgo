@@ -335,3 +335,97 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 		t.Fatalf("server error = %v", err)
 	}
 }
+
+func TestENHTransport_StartArbitrationHostErrorReturnsCollision(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+		hostErr := transport.EncodeENH(transport.ENHResErrorHost, 0x00)
+		_, err := server.Write(hostErr[:])
+		serverErr <- err
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_StartArbitrationEbusErrorReturnsCollision(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+		ebusErr := transport.EncodeENH(transport.ENHResErrorEBUS, 0x01)
+		_, err := server.Write(ebusErr[:])
+		serverErr <- err
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENSTransport_ArbitrationSourceInjectionFlag(t *testing.T) {
+	t.Parallel()
+
+	clientEnh, serverEnh := net.Pipe()
+	defer func() { _ = clientEnh.Close() }()
+	defer func() { _ = serverEnh.Close() }()
+	enh := transport.NewENHTransport(clientEnh, 200*time.Millisecond, 200*time.Millisecond)
+	if !enh.ArbitrationSendsSource() {
+		t.Fatalf("ENH transport ArbitrationSendsSource = false; want true")
+	}
+
+	clientEns, serverEns := net.Pipe()
+	defer func() { _ = clientEns.Close() }()
+	defer func() { _ = serverEns.Close() }()
+	ens := transport.NewENSTransport(clientEns, 200*time.Millisecond, 200*time.Millisecond)
+	if ens.ArbitrationSendsSource() {
+		t.Fatalf("ENS transport ArbitrationSendsSource = true; want false")
+	}
+}
