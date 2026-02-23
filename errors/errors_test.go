@@ -270,6 +270,21 @@ func TestNormalizeErrorMapping(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit unknown source stays unknown", func(t *testing.T) {
+		t.Parallel()
+
+		got := ebuserrors.NormalizeErrorMapping(ebuserrors.ErrTimeout, "future-layer")
+		want := ebuserrors.Mapping{
+			Code:        ebuserrors.CodeTimeout,
+			Category:    ebuserrors.CategoryTransient,
+			Retriable:   true,
+			SourceLayer: ebuserrors.SourceLayerUnknown,
+		}
+		if got != want {
+			t.Fatalf("NormalizeErrorMapping(timeout, future-layer) = %#v; want %#v", got, want)
+		}
+	})
+
 	t.Run("unknown error keeps unknown classification", func(t *testing.T) {
 		t.Parallel()
 

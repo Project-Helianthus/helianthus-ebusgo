@@ -100,8 +100,9 @@ func NormalizeSourceLayer(source string) SourceLayer {
 func NormalizeErrorMapping(err error, source string) Mapping {
 	code := NormalizeErrorCode(err)
 	category := categoryForCode(code)
-	layer := NormalizeSourceLayer(source)
-	if code != CodeUnknown && layer == SourceLayerUnknown {
+	normalizedSource := strings.TrimSpace(source)
+	layer := NormalizeSourceLayer(normalizedSource)
+	if code != CodeUnknown && normalizedSource == "" {
 		layer = SourceLayerEbusgo
 	}
 
