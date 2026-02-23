@@ -34,6 +34,9 @@ else
   echo "==> golangci-lint not found; skipping"
 fi
 
+echo "==> transport gate"
+./scripts/transport_gate.sh
+
 if command -v tinygo >/dev/null 2>&1; then
   echo "==> tinygo build (main packages)"
   toolchain="${TINYGO_GOTOOLCHAIN:-go1.25.0}"
