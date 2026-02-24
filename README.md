@@ -8,7 +8,7 @@
 
 - eBUS transports (`transport/`) including ENH, ENS, ebusd-tcp, and loopback test transport.
 - Wire/protocol primitives (`protocol/`) including framing, CRC handling, and bus transaction behavior.
-- Reusable type codecs (`types/`) and error taxonomy/normalization primitives (`errors/`).
+- Reusable type codecs (`types/`), error taxonomy/normalization primitives (`errors/`), and deterministic invoke helpers (`determinism/`).
 - Deterministic target emulation helpers and smoke tests (`emulation/`, `scripts/`).
 
 ### What does not belong in this repo
