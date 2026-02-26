@@ -2,7 +2,10 @@ package protocol
 
 import (
 	"bytes"
+	"errors"
 	"testing"
+
+	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
 )
 
 func TestEscapeBytes(t *testing.T) {
@@ -65,7 +68,11 @@ func TestEncodeSlaveResponse(t *testing.T) {
 
 		// CRC([0x00]) == 0x00
 		want := []byte{0x00, 0x00}
-		if got := EncodeSlaveResponse(nil); !bytes.Equal(got, want) {
+		got, err := EncodeSlaveResponse(nil)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(nil) unexpected error: %v", err)
+		}
+		if !bytes.Equal(got, want) {
 			t.Fatalf("EncodeSlaveResponse(nil) = %v; want %v", got, want)
 		}
 	})
@@ -78,7 +85,11 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		want := append([]byte{}, raw...)
 		want = append(want, CRC(raw))
 
-		if got := EncodeSlaveResponse(data); !bytes.Equal(got, want) {
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(%v) unexpected error: %v", data, err)
+		}
+		if !bytes.Equal(got, want) {
 			t.Fatalf("EncodeSlaveResponse(%v) = %v; want %v", data, got, want)
 		}
 	})
@@ -87,7 +98,10 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		t.Parallel()
 
 		data := []byte{SymbolEscape}
-		got := EncodeSlaveResponse(data)
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(%v) unexpected error: %v", data, err)
+		}
 		wantPrefix := []byte{0x01, SymbolEscape, 0x00}
 		if !bytes.HasPrefix(got, wantPrefix) {
 			t.Fatalf("EncodeSlaveResponse(%v) = %v; missing escaped data prefix %v", data, got, wantPrefix)
@@ -98,7 +112,10 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		t.Parallel()
 
 		data := []byte{SymbolSyn}
-		got := EncodeSlaveResponse(data)
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(%v) unexpected error: %v", data, err)
+		}
 		wantPrefix := []byte{0x01, SymbolEscape, 0x01}
 		if !bytes.HasPrefix(got, wantPrefix) {
 			t.Fatalf("EncodeSlaveResponse(%v) = %v; missing escaped data prefix %v", data, got, wantPrefix)
@@ -109,7 +126,10 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		t.Parallel()
 
 		data := []byte{SymbolEscape, 0x42, SymbolSyn}
-		got := EncodeSlaveResponse(data)
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(%v) unexpected error: %v", data, err)
+		}
 		segment := decodeEscapedSegment(t, got)
 		if len(segment) != len(data)+2 {
 			t.Fatalf("decoded segment len = %d; want %d", len(segment), len(data)+2)
@@ -138,7 +158,11 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		data := []byte{0x31}
 		want := []byte{0x01, 0x31, SymbolEscape, 0x01}
 
-		if got := EncodeSlaveResponse(data); !bytes.Equal(got, want) {
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(%v) unexpected error: %v", data, err)
+		}
+		if !bytes.Equal(got, want) {
 			t.Fatalf("EncodeSlaveResponse(%v) = %v; want %v", data, got, want)
 		}
 	})
@@ -147,7 +171,10 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		t.Parallel()
 
 		data := make([]byte, int(SymbolEscape))
-		got := EncodeSlaveResponse(data)
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(len=%d) unexpected error: %v", len(data), err)
+		}
 		if len(got) < 2 {
 			t.Fatalf("EncodeSlaveResponse len = %d; want >=2", len(got))
 		}
@@ -158,6 +185,63 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		decoded := decodeEscapedSegment(t, got)
 		if decoded[0] != SymbolEscape {
 			t.Fatalf("decoded NN = 0x%02x; want 0x%02x", decoded[0], SymbolEscape)
+		}
+	})
+
+	t.Run("NN is escaped on wire when length is SymbolSyn", func(t *testing.T) {
+		t.Parallel()
+
+		data := make([]byte, int(SymbolSyn))
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(len=%d) unexpected error: %v", len(data), err)
+		}
+		if len(got) < 2 {
+			t.Fatalf("EncodeSlaveResponse len = %d; want >=2", len(got))
+		}
+		if got[0] != SymbolEscape || got[1] != 0x01 {
+			t.Fatalf("encoded prefix = %v; want escaped NN [0x%02x 0x01]", got[:2], SymbolEscape)
+		}
+
+		decoded := decodeEscapedSegment(t, got)
+		if decoded[0] != SymbolSyn {
+			t.Fatalf("decoded NN = 0x%02x; want 0x%02x", decoded[0], SymbolSyn)
+		}
+	})
+
+	t.Run("data length exceeds 255 returns error", func(t *testing.T) {
+		t.Parallel()
+
+		data := make([]byte, 256)
+		got, err := EncodeSlaveResponse(data)
+		if err == nil {
+			t.Fatalf("EncodeSlaveResponse(len=256) = %v; want error", got)
+		}
+		if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+			t.Fatalf("EncodeSlaveResponse(len=256) error = %v; want ErrInvalidPayload", err)
+		}
+		if got != nil {
+			t.Fatalf("EncodeSlaveResponse(len=256) = %v; want nil on error", got)
+		}
+	})
+
+	t.Run("max valid length 255", func(t *testing.T) {
+		t.Parallel()
+
+		data := make([]byte, 255)
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(len=255) unexpected error: %v", err)
+		}
+
+		decoded := decodeEscapedSegment(t, got)
+		if decoded[0] != 0xFF {
+			t.Fatalf("decoded NN = 0x%02x; want 0xFF", decoded[0])
+		}
+		wantCRC := CRC(decoded[:len(decoded)-1])
+		gotCRC := decoded[len(decoded)-1]
+		if gotCRC != wantCRC {
+			t.Fatalf("CRC byte = 0x%02x; want 0x%02x", gotCRC, wantCRC)
 		}
 	})
 }
