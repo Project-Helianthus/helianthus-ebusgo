@@ -487,7 +487,7 @@ func TestEbusdTCPTransport_Write_CommandInjectsAckAndResponse(t *testing.T) {
 	}
 
 	respData := []byte{0x11, 0x22, 0x33}
-	respTelegram := []byte{dst, src, pb, sb, byte(len(respData))}
+	respTelegram := []byte{byte(len(respData))}
 	respTelegram = append(respTelegram, respData...)
 	respTelegram = append(respTelegram, crcValue(respTelegram))
 
