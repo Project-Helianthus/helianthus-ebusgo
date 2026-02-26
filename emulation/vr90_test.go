@@ -9,6 +9,14 @@ import (
 	"github.com/d3vi1/helianthus-ebusgo/protocol"
 )
 
+const testVR90Address = byte(0x75)
+
+func defaultVR90TestProfile() VR90Profile {
+	profile := DefaultVR90Profile()
+	profile.Address = testVR90Address
+	return profile
+}
+
 func TestNewVR90Target_IdentifyResponseUsesProfile(t *testing.T) {
 	t.Parallel()
 
@@ -63,41 +71,31 @@ func TestNewVR90Target_IdentifyResponseUsesProfile(t *testing.T) {
 func TestNewVR90Target_NormalizesDefaults(t *testing.T) {
 	t.Parallel()
 
-	target, err := NewVR90Target(VR90Profile{})
-	if err != nil {
-		t.Fatalf("NewVR90Target() error = %v", err)
+	_, err := NewVR90Target(VR90Profile{})
+	if err == nil {
+		t.Fatalf("NewVR90Target() error = nil; want error")
 	}
-	if target.Address != DefaultVR90Address {
-		t.Fatalf("Address = 0x%02x; want 0x%02x", target.Address, DefaultVR90Address)
+	if !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("NewVR90Target() error = %v; want %v", err, ErrInvalidConfiguration)
 	}
+	if got, want := err.Error(), "vr90 profile missing address"; !bytes.Contains([]byte(got), []byte(want)) {
+		t.Fatalf("NewVR90Target() error = %q; want substring %q", got, want)
+	}
+}
 
-	response, err := target.Emulate(RequestEvent{
-		Frame: protocol.Frame{
-			Source:    0x10,
-			Target:    DefaultVR90Address,
-			Primary:   0x07,
-			Secondary: 0x04,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Emulate() error = %v", err)
-	}
+func TestNewVR90Target_ErrorOnZeroAddress(t *testing.T) {
+	t.Parallel()
 
-	wantData := []byte{
-		DefaultVR90Manufacturer,
-		'B', '7', 'V', '0', '0',
-		0x04, 0x22,
-		0x55, 0x03,
-	}
-	if !bytes.Equal(response.Frame.Data, wantData) {
-		t.Fatalf("Frame data = %x; want %x", response.Frame.Data, wantData)
+	_, err := NewVR90Target(VR90Profile{})
+	if !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("NewVR90Target() error = %v; want %v", err, ErrInvalidConfiguration)
 	}
 }
 
 func TestNewVR90Target_PreservesZeroSoftwareHardware(t *testing.T) {
 	t.Parallel()
 
-	profile := DefaultVR90Profile()
+	profile := defaultVR90TestProfile()
 	profile.Software = 0x0000
 	profile.Hardware = 0x0000
 
@@ -109,7 +107,7 @@ func TestNewVR90Target_PreservesZeroSoftwareHardware(t *testing.T) {
 	response, err := target.Emulate(RequestEvent{
 		Frame: protocol.Frame{
 			Source:    0x10,
-			Target:    DefaultVR90Address,
+			Target:    testVR90Address,
 			Primary:   0x07,
 			Secondary: 0x04,
 		},
@@ -140,6 +138,7 @@ func TestNewVR90Target_Errors(t *testing.T) {
 		{
 			name: "timing violation",
 			profile: VR90Profile{
+				Address:       testVR90Address,
 				ResponseDelay: 2 * time.Millisecond,
 				Timing: TimingConstraints{
 					MinResponseDelay: 5 * time.Millisecond,
@@ -151,6 +150,7 @@ func TestNewVR90Target_Errors(t *testing.T) {
 		{
 			name: "invalid timing range",
 			profile: VR90Profile{
+				Address:       testVR90Address,
 				ResponseDelay: 8 * time.Millisecond,
 				Timing: TimingConstraints{
 					MinResponseDelay: 10 * time.Millisecond,
@@ -162,6 +162,7 @@ func TestNewVR90Target_Errors(t *testing.T) {
 		{
 			name: "mapped command has exact and prefix matchers",
 			profile: VR90Profile{
+				Address: testVR90Address,
 				MappedCommands: []VR90MappedCommand{
 					{
 						Primary:       0xB5,
@@ -177,6 +178,7 @@ func TestNewVR90Target_Errors(t *testing.T) {
 		{
 			name: "mapped command empty response",
 			profile: VR90Profile{
+				Address: testVR90Address,
 				MappedCommands: []VR90MappedCommand{
 					{
 						Primary:   0xB5,
@@ -204,7 +206,7 @@ func TestNewVR90Target_Errors(t *testing.T) {
 func TestVR90Target_NoMatchForOtherQueries(t *testing.T) {
 	t.Parallel()
 
-	target, err := NewVR90Target(DefaultVR90Profile())
+	target, err := NewVR90Target(defaultVR90TestProfile())
 	if err != nil {
 		t.Fatalf("NewVR90Target() error = %v", err)
 	}
@@ -212,7 +214,7 @@ func TestVR90Target_NoMatchForOtherQueries(t *testing.T) {
 	_, err = target.Emulate(RequestEvent{
 		Frame: protocol.Frame{
 			Source:    0x10,
-			Target:    DefaultVR90Address,
+			Target:    testVR90Address,
 			Primary:   0x01,
 			Secondary: 0x02,
 		},
@@ -285,7 +287,7 @@ func TestVR90B509ScanIDChunkEncoding(t *testing.T) {
 func TestVR90Target_B509SelectorBehavior(t *testing.T) {
 	t.Parallel()
 
-	profile := DefaultVR90Profile()
+	profile := defaultVR90TestProfile()
 	profile.EnableB509Discovery = true
 	profile.ScanID = "21231600202609140953035469N6"
 
@@ -340,7 +342,7 @@ func TestVR90Target_B509SelectorBehavior(t *testing.T) {
 			response, err := target.Emulate(RequestEvent{
 				Frame: protocol.Frame{
 					Source:    0x10,
-					Target:    DefaultVR90Address,
+					Target:    testVR90Address,
 					Primary:   0xB5,
 					Secondary: 0x09,
 					Data:      append([]byte(nil), test.data...),
@@ -369,7 +371,7 @@ func TestVR90Target_B509SelectorBehavior(t *testing.T) {
 func TestVR90Target_B509DiscoveryDisabledByDefault(t *testing.T) {
 	t.Parallel()
 
-	target, err := NewVR90Target(DefaultVR90Profile())
+	target, err := NewVR90Target(defaultVR90TestProfile())
 	if err != nil {
 		t.Fatalf("NewVR90Target() error = %v", err)
 	}
@@ -377,7 +379,7 @@ func TestVR90Target_B509DiscoveryDisabledByDefault(t *testing.T) {
 	_, err = target.Emulate(RequestEvent{
 		Frame: protocol.Frame{
 			Source:    0x10,
-			Target:    DefaultVR90Address,
+			Target:    testVR90Address,
 			Primary:   0xB5,
 			Secondary: 0x09,
 			Data:      []byte{0x24},
@@ -391,7 +393,7 @@ func TestVR90Target_B509DiscoveryDisabledByDefault(t *testing.T) {
 func TestVR90Target_B509DiscoveryPreservesIdentify(t *testing.T) {
 	t.Parallel()
 
-	profile := DefaultVR90Profile()
+	profile := defaultVR90TestProfile()
 	profile.EnableB509Discovery = true
 	target, err := NewVR90Target(profile)
 	if err != nil {
@@ -401,7 +403,7 @@ func TestVR90Target_B509DiscoveryPreservesIdentify(t *testing.T) {
 	response, err := target.Emulate(RequestEvent{
 		Frame: protocol.Frame{
 			Source:    0x10,
-			Target:    DefaultVR90Address,
+			Target:    testVR90Address,
 			Primary:   0x07,
 			Secondary: 0x04,
 		},
@@ -424,7 +426,7 @@ func TestVR90Target_B509DiscoveryPreservesIdentify(t *testing.T) {
 func TestVR90Target_MappedCommandResponse(t *testing.T) {
 	t.Parallel()
 
-	profile := DefaultVR90Profile()
+	profile := defaultVR90TestProfile()
 	profile.MappedCommands = []VR90MappedCommand{
 		{
 			Name:          "mapped-room-temp",
@@ -443,7 +445,7 @@ func TestVR90Target_MappedCommandResponse(t *testing.T) {
 		At: 30 * time.Millisecond,
 		Frame: protocol.Frame{
 			Source:    0x10,
-			Target:    DefaultVR90Address,
+			Target:    testVR90Address,
 			Primary:   0xB5,
 			Secondary: 0x06,
 			Data:      []byte{0x01, 0x00, 0x7F},
@@ -468,7 +470,7 @@ func TestVR90Target_MappedCommandResponse(t *testing.T) {
 		At: 50 * time.Millisecond,
 		Frame: protocol.Frame{
 			Source:    0x10,
-			Target:    DefaultVR90Address,
+			Target:    testVR90Address,
 			Primary:   0xB5,
 			Secondary: 0x06,
 			Data:      []byte{0x01, 0x00, 0x7F},
@@ -488,7 +490,7 @@ func TestVR90Target_MappedCommandPrecedence(t *testing.T) {
 	t.Run("built-in rules win over mapped collisions", func(t *testing.T) {
 		t.Parallel()
 
-		profile := DefaultVR90Profile()
+		profile := defaultVR90TestProfile()
 		profile.EnableB509Discovery = true
 		profile.MappedCommands = []VR90MappedCommand{
 			{
@@ -513,7 +515,7 @@ func TestVR90Target_MappedCommandPrecedence(t *testing.T) {
 		identify, err := target.Emulate(RequestEvent{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0x07,
 				Secondary: 0x04,
 			},
@@ -528,7 +530,7 @@ func TestVR90Target_MappedCommandPrecedence(t *testing.T) {
 		b509, err := target.Emulate(RequestEvent{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x09,
 				Data:      []byte{0x24},
@@ -552,7 +554,7 @@ func TestVR90Target_MappedCommandPrecedence(t *testing.T) {
 	t.Run("mapped commands follow declaration order", func(t *testing.T) {
 		t.Parallel()
 
-		profile := DefaultVR90Profile()
+		profile := defaultVR90TestProfile()
 		profile.MappedCommands = []VR90MappedCommand{
 			{
 				Name:          "first-prefix",
@@ -577,7 +579,7 @@ func TestVR90Target_MappedCommandPrecedence(t *testing.T) {
 		response, err := target.Emulate(RequestEvent{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x06,
 				Data:      []byte{0x01, 0x02},
@@ -598,7 +600,7 @@ func TestVR90Target_MappedCommandPrecedence(t *testing.T) {
 func TestVR90Target_MappedCommandUnknownFallback(t *testing.T) {
 	t.Parallel()
 
-	profile := DefaultVR90Profile()
+	profile := defaultVR90TestProfile()
 	profile.MappedCommands = []VR90MappedCommand{
 		{
 			Name:          "mapped-room-temp",
@@ -616,7 +618,7 @@ func TestVR90Target_MappedCommandUnknownFallback(t *testing.T) {
 	_, err = target.Emulate(RequestEvent{
 		Frame: protocol.Frame{
 			Source:    0x10,
-			Target:    DefaultVR90Address,
+			Target:    testVR90Address,
 			Primary:   0xB5,
 			Secondary: 0x06,
 			Data:      []byte{0x01, 0x01},
@@ -628,7 +630,7 @@ func TestVR90Target_MappedCommandUnknownFallback(t *testing.T) {
 }
 
 func TestSmokeVR90MinimalQuerySet(t *testing.T) {
-	target, err := NewVR90Target(DefaultVR90Profile())
+	target, err := NewVR90Target(defaultVR90TestProfile())
 	if err != nil {
 		t.Fatalf("NewVR90Target() error = %v", err)
 	}
@@ -638,7 +640,7 @@ func TestSmokeVR90MinimalQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0x07,
 				Secondary: 0x04,
 			},
@@ -652,8 +654,8 @@ func TestSmokeVR90MinimalQuerySet(t *testing.T) {
 	}
 
 	response := responses[0]
-	if response.Frame.Source != DefaultVR90Address || response.Frame.Target != 0x10 {
-		t.Fatalf("Frame source/target = 0x%02x/0x%02x; want 0x%02x/0x10", response.Frame.Source, response.Frame.Target, DefaultVR90Address)
+	if response.Frame.Source != testVR90Address || response.Frame.Target != 0x10 {
+		t.Fatalf("Frame source/target = 0x%02x/0x%02x; want 0x%02x/0x10", response.Frame.Source, response.Frame.Target, testVR90Address)
 	}
 	if response.Frame.Primary != 0x07 || response.Frame.Secondary != 0x04 {
 		t.Fatalf("Frame PB/SB = 0x%02x/0x%02x; want 0x07/0x04", response.Frame.Primary, response.Frame.Secondary)
@@ -671,7 +673,7 @@ func TestSmokeVR90MinimalQuerySet(t *testing.T) {
 }
 
 func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
-	profile := DefaultVR90Profile()
+	profile := defaultVR90TestProfile()
 	profile.EnableB509Discovery = true
 
 	target, err := NewVR90Target(profile)
@@ -684,7 +686,7 @@ func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0x07,
 				Secondary: 0x04,
 			},
@@ -692,7 +694,7 @@ func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x09,
 				Data:      []byte{0x24},
@@ -701,7 +703,7 @@ func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x09,
 				Data:      []byte{0x25},
@@ -710,7 +712,7 @@ func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x09,
 				Data:      []byte{0x26},
@@ -719,7 +721,7 @@ func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x09,
 				Data:      []byte{0x27},
@@ -758,7 +760,7 @@ func TestSmokeVR90B509DiscoveryQuerySet(t *testing.T) {
 }
 
 func TestSmokeVR90MappedCommandQuerySet(t *testing.T) {
-	profile := DefaultVR90Profile()
+	profile := defaultVR90TestProfile()
 	profile.EnableB509Discovery = true
 	profile.MappedCommands = []VR90MappedCommand{
 		{
@@ -780,7 +782,7 @@ func TestSmokeVR90MappedCommandQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0x07,
 				Secondary: 0x04,
 			},
@@ -788,7 +790,7 @@ func TestSmokeVR90MappedCommandQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x09,
 				Data:      []byte{0x24},
@@ -797,7 +799,7 @@ func TestSmokeVR90MappedCommandQuerySet(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Source:    0x10,
-				Target:    DefaultVR90Address,
+				Target:    testVR90Address,
 				Primary:   0xB5,
 				Secondary: 0x06,
 				Data:      []byte{0x01, 0x00, 0x33},

@@ -128,7 +128,7 @@ func TestIdentifyOnlyProfile_Presets(t *testing.T) {
 	t.Parallel()
 
 	vr90 := PresetVR90IdentifyOnlyProfile()
-	if vr90.Address != DefaultVR90Address ||
+	if vr90.Address != 0x15 ||
 		vr90.Manufacturer != DefaultVR90Manufacturer ||
 		vr90.DeviceID != DefaultVR90DeviceID ||
 		vr90.Software != DefaultVR90Software ||
@@ -137,7 +137,7 @@ func TestIdentifyOnlyProfile_Presets(t *testing.T) {
 	}
 
 	vr92 := PresetVR92IdentifyOnlyProfile()
-	if vr92.Address != DefaultVR92Address ||
+	if vr92.Address != 0x30 ||
 		vr92.Manufacturer != DefaultVR92Manufacturer ||
 		vr92.DeviceID != DefaultVR92DeviceID ||
 		vr92.Software != DefaultVR92Software ||

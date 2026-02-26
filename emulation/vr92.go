@@ -7,7 +7,6 @@ import (
 )
 
 const (
-	DefaultVR92Address      = byte(0x30)
 	DefaultVR92Manufacturer = byte(0xB5)
 	DefaultVR92DeviceID     = "VR_92"
 	DefaultVR92Software     = uint16(0x0514)
@@ -25,6 +24,8 @@ var (
 type VR92MappedCommand = VR90MappedCommand
 
 type VR92Profile struct {
+	// Address is the eBUS slave address for this device. Required — must be
+	// set explicitly. Address is installation-specific; there is no safe default.
 	Address             byte
 	Manufacturer        byte
 	DeviceID            string
@@ -39,7 +40,6 @@ type VR92Profile struct {
 
 func DefaultVR92Profile() VR92Profile {
 	return VR92Profile{
-		Address:       DefaultVR92Address,
 		Manufacturer:  DefaultVR92Manufacturer,
 		DeviceID:      DefaultVR92DeviceID,
 		Software:      DefaultVR92Software,
@@ -65,7 +65,7 @@ func normalizeVR92Profile(profile VR92Profile) (VR92Profile, error) {
 		profile.Hardware != 0
 
 	if profile.Address == 0 {
-		profile.Address = DefaultVR92Address
+		return VR92Profile{}, fmt.Errorf("vr92 profile missing address: %w", ErrInvalidConfiguration)
 	}
 	if profile.Manufacturer == 0 {
 		profile.Manufacturer = DefaultVR92Manufacturer
