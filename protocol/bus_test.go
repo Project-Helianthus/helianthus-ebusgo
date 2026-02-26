@@ -223,22 +223,14 @@ func TestBus_ResponseCRCMismatch(t *testing.T) {
 	}
 
 	data := byte(0x10)
-	responseSegment := []byte{frame.Target, frame.Source, frame.Primary, frame.Secondary, 0x01, data}
+	responseSegment := []byte{0x01, data}
 	badCRC := protocol.CRC(responseSegment) ^ 0xFF
 	tr := &scriptedTransport{
 		inbound: []readEvent{
 			{value: protocol.SymbolAck},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: badCRC},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: badCRC},
@@ -263,8 +255,8 @@ func TestBus_ResponseCRCMismatch(t *testing.T) {
 	if !errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		t.Fatalf("Send error = %v; want ErrCRCMismatch", err)
 	}
-	if tr.inboundReadsConsumed() != 15 {
-		t.Fatalf("inbound reads = %d; want 15", tr.inboundReadsConsumed())
+	if tr.inboundReadsConsumed() != 7 {
+		t.Fatalf("inbound reads = %d; want 7", tr.inboundReadsConsumed())
 	}
 }
 
@@ -280,24 +272,16 @@ func TestBus_RetryOnCRCMismatch(t *testing.T) {
 	}
 
 	data := byte(0x10)
-	responseSegment := []byte{frame.Target, frame.Source, frame.Primary, frame.Secondary, 0x01, data}
+	responseSegment := []byte{0x01, data}
 	goodCRC := protocol.CRC(responseSegment)
 	badCRC := goodCRC ^ 0xFF
 
 	tr := &scriptedTransport{
 		inbound: []readEvent{
 			{value: protocol.SymbolAck},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: badCRC},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: goodCRC},
@@ -325,8 +309,8 @@ func TestBus_RetryOnCRCMismatch(t *testing.T) {
 	if resp == nil || len(resp.Data) != 1 || resp.Data[0] != data {
 		t.Fatalf("response = %+v; want data [0x10]", resp)
 	}
-	if tr.inboundReadsConsumed() != 15 {
-		t.Fatalf("inbound reads = %d; want 15", tr.inboundReadsConsumed())
+	if tr.inboundReadsConsumed() != 7 {
+		t.Fatalf("inbound reads = %d; want 7", tr.inboundReadsConsumed())
 	}
 }
 
@@ -341,17 +325,13 @@ func TestBus_RetryOnTimeout(t *testing.T) {
 		Data:      []byte{0x03},
 	}
 	data := byte(0x10)
-	responseSegment := []byte{frame.Target, frame.Source, frame.Primary, frame.Secondary, 0x01, data}
+	responseSegment := []byte{0x01, data}
 	respCRC := protocol.CRC(responseSegment)
 
 	tr := &scriptedTransport{
 		inbound: []readEvent{
 			{err: ebuserrors.ErrTimeout},
 			{value: protocol.SymbolAck},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: respCRC},
@@ -402,17 +382,13 @@ func TestBus_RetryOnNACK(t *testing.T) {
 		Data:      []byte{0x03},
 	}
 	data := byte(0x20)
-	responseSegment := []byte{frame.Target, frame.Source, frame.Primary, frame.Secondary, 0x01, data}
+	responseSegment := []byte{0x01, data}
 	respCRC := protocol.CRC(responseSegment)
 
 	tr := &scriptedTransport{
 		inbound: []readEvent{
 			{value: protocol.SymbolNack},
 			{value: protocol.SymbolAck},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: respCRC},
@@ -774,7 +750,7 @@ func TestBus_RetryOnCollisionDuringWriteWaitsForSyn(t *testing.T) {
 	}
 
 	data := byte(0x10)
-	responseSegment := []byte{frame.Target, frame.Source, frame.Primary, frame.Secondary, 0x01, data}
+	responseSegment := []byte{0x01, data}
 	respCRC := protocol.CRC(responseSegment)
 	tr := &collisionOnceTransport{
 		collideOnFirstEcho: true,
@@ -782,10 +758,6 @@ func TestBus_RetryOnCollisionDuringWriteWaitsForSyn(t *testing.T) {
 			{value: protocol.SymbolSyn},
 			{value: protocol.SymbolSyn},
 			{value: protocol.SymbolAck},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: respCRC},
@@ -817,8 +789,8 @@ func TestBus_RetryOnCollisionDuringWriteWaitsForSyn(t *testing.T) {
 	tr.mu.Lock()
 	inReads := tr.inboundReads
 	tr.mu.Unlock()
-	if inReads != 10 {
-		t.Fatalf("inbound reads = %d; want 10", inReads)
+	if inReads != 6 {
+		t.Fatalf("inbound reads = %d; want 6", inReads)
 	}
 }
 
@@ -833,7 +805,7 @@ func TestBus_RetryOnCollisionDoesNotConsumeTimeoutRetries(t *testing.T) {
 	}
 
 	data := byte(0x10)
-	responseSegment := []byte{frame.Target, frame.Source, frame.Primary, frame.Secondary, 0x01, data}
+	responseSegment := []byte{0x01, data}
 	respCRC := protocol.CRC(responseSegment)
 	tr := &collisionOnceTransport{
 		collideOnFirstEcho: true,
@@ -841,10 +813,6 @@ func TestBus_RetryOnCollisionDoesNotConsumeTimeoutRetries(t *testing.T) {
 			{value: protocol.SymbolSyn},
 			{value: protocol.SymbolSyn},
 			{value: protocol.SymbolAck},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: respCRC},
@@ -885,7 +853,7 @@ func TestBus_CollisionRetryRespectsTimeoutRetriesWithoutDeadline(t *testing.T) {
 	}
 
 	data := byte(0x10)
-	responseSegment := []byte{frame.Target, frame.Source, frame.Primary, frame.Secondary, 0x01, data}
+	responseSegment := []byte{0x01, data}
 	respCRC := protocol.CRC(responseSegment)
 	tr := &collisionOnceTransport{
 		collideOnFirstEcho: true,
@@ -893,10 +861,6 @@ func TestBus_CollisionRetryRespectsTimeoutRetriesWithoutDeadline(t *testing.T) {
 			{value: protocol.SymbolSyn},
 			{value: protocol.SymbolSyn},
 			{value: protocol.SymbolAck},
-			{value: frame.Target},
-			{value: frame.Source},
-			{value: frame.Primary},
-			{value: frame.Secondary},
 			{value: 0x01},
 			{value: data},
 			{value: respCRC},
