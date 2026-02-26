@@ -45,12 +45,11 @@ func NewENHTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *EN
 
 // NewENSTransport creates an ENS transport over ENH framing.
 //
-// ENS still uses START arbitration, but callers must include the source byte in
-// the outgoing telegram payload.
+// ENS uses START arbitration and the adapter transmits the source byte on the
+// wire during arbitration, same as ENH. Callers must NOT include the source
+// byte in the outgoing telegram payload.
 func NewENSTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *ENHTransport {
-	transport := NewENHTransport(conn, readTimeout, writeTimeout)
-	transport.arbitrationSendsSource = false
-	return transport
+	return NewENHTransport(conn, readTimeout, writeTimeout)
 }
 
 // ArbitrationSendsSource reports whether START arbitration already placed the
@@ -308,6 +307,15 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		}
 
 		if arbitrationDone {
+			// Reset parser and pending queue so that ReadByte starts with a
+			// clean state. TCP fragmentation can leave the parser with a
+			// pending byte1 from a partially-received frame that arrived
+			// alongside the STARTED/FAILED response. Without this reset,
+			// the stale byte1 combines with the first byte of the next
+			// RECEIVED echo to produce a wrong value, causing
+			// sendSymbolWithEcho to detect an echo mismatch.
+			t.parser.Reset()
+			t.pending = t.pending[:0]
 			return arbitrationErr
 		}
 	}

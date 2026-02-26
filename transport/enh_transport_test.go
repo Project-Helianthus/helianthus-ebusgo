@@ -425,7 +425,7 @@ func TestENSTransport_ArbitrationSourceInjectionFlag(t *testing.T) {
 	defer func() { _ = clientEns.Close() }()
 	defer func() { _ = serverEns.Close() }()
 	ens := transport.NewENSTransport(clientEns, 200*time.Millisecond, 200*time.Millisecond)
-	if ens.ArbitrationSendsSource() {
-		t.Fatalf("ENS transport ArbitrationSendsSource = true; want false")
+	if !ens.ArbitrationSendsSource() {
+		t.Fatalf("ENS transport ArbitrationSendsSource = false; want true")
 	}
 }
