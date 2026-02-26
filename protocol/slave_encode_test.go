@@ -167,6 +167,34 @@ func TestEncodeSlaveResponse(t *testing.T) {
 		}
 	})
 
+	t.Run("known vector with escaped CRC SymbolEscape", func(t *testing.T) {
+		t.Parallel()
+
+		// Hand-calculated CRC for raw [0x01, 0x32]:
+		// crc0=0x00 -> Update(0x00,0x01)=0x01 -> Update(0x01,0x32)=0xA9.
+		data := []byte{0x32}
+		got, err := EncodeSlaveResponse(data)
+		if err != nil {
+			t.Fatalf("EncodeSlaveResponse(%v) unexpected error: %v", data, err)
+		}
+
+		// Last two bytes on wire must be the escaped CRC: [0xA9, 0x00]
+		if len(got) < 2 {
+			t.Fatalf("encoded len = %d; want >= 2", len(got))
+		}
+		tail := got[len(got)-2:]
+		if tail[0] != SymbolEscape || tail[1] != 0x00 {
+			t.Fatalf("encoded CRC tail = %v; want [0x%02x 0x00] (escaped 0xA9)", tail, SymbolEscape)
+		}
+
+		// Round-trip: decoded CRC must equal 0xA9
+		decoded := decodeEscapedSegment(t, got)
+		gotCRC := decoded[len(decoded)-1]
+		if gotCRC != SymbolEscape {
+			t.Fatalf("decoded CRC = 0x%02x; want 0x%02x (SymbolEscape)", gotCRC, SymbolEscape)
+		}
+	})
+
 	t.Run("NN is escaped on wire when length is SymbolEscape", func(t *testing.T) {
 		t.Parallel()
 
