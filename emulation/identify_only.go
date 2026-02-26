@@ -39,8 +39,8 @@ type IdentifyOnlyProfile struct {
 
 func PresetVR90IdentifyOnlyProfile() IdentifyOnlyProfile {
 	return IdentifyOnlyProfile{
-		Name:          fmt.Sprintf("vr90-minimal-0x%02x", DefaultVR90Address),
-		Address:       DefaultVR90Address,
+		Name:          fmt.Sprintf("vr90-minimal-0x%02x", 0x15),
+		Address:       0x15,
 		Manufacturer:  DefaultVR90Manufacturer,
 		DeviceID:      DefaultVR90DeviceID,
 		Software:      DefaultVR90Software,
@@ -52,8 +52,8 @@ func PresetVR90IdentifyOnlyProfile() IdentifyOnlyProfile {
 
 func PresetVR92IdentifyOnlyProfile() IdentifyOnlyProfile {
 	return IdentifyOnlyProfile{
-		Name:          fmt.Sprintf("vr92-minimal-0x%02x", DefaultVR92Address),
-		Address:       DefaultVR92Address,
+		Name:          fmt.Sprintf("vr92-minimal-0x%02x", 0x30),
+		Address:       0x30,
 		Manufacturer:  DefaultVR92Manufacturer,
 		DeviceID:      DefaultVR92DeviceID,
 		Software:      DefaultVR92Software,
