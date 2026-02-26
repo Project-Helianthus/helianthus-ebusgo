@@ -85,6 +85,7 @@ target, err := emulation.NewIdentifyOnlyTarget(profile)
 
 ```go
 profile := emulation.DefaultVR90Profile()
+profile.Address = 0x75 // Set to your installation's RCC slave address
 profile.EnableB509Discovery = true
 profile.MappedCommands = []emulation.VR90MappedCommand{
 	{

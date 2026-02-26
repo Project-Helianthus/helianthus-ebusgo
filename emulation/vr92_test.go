@@ -62,6 +62,15 @@ func TestNewVR92Target_IdentifyResponseUsesObservedIdentity(t *testing.T) {
 	}
 }
 
+func TestNewVR92Target_ErrorOnZeroAddress(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewVR92Target(VR92Profile{})
+	if !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("NewVR92Target() error = %v; want %v", err, ErrInvalidConfiguration)
+	}
+}
+
 func TestNewVR92Target_B509RequiresScanID(t *testing.T) {
 	t.Parallel()
 
