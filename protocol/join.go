@@ -174,7 +174,7 @@ func (j *Joiner) Join(ctx context.Context) (JoinResult, error) {
 
 	var persistedCandidate *byte
 	if cfg.PersistLastGood && j.store != nil {
-		if persisted, loadErr := j.store.LoadInitiator(ctx); loadErr == nil && isInitiatorCapableAddress(persisted) {
+		if persisted, loadErr := j.store.LoadInitiator(ctx); loadErr == nil && IsInitiatorCapableAddress(persisted) {
 			persistedCandidate = &persisted
 		}
 	}
@@ -335,7 +335,7 @@ func companionTargetRejectionReasons(observation *joinObservation, initiator byt
 	companionTarget := initiator + 0x05
 	reasons := make([]string, 0, 2)
 
-	if !isInitiatorCapableAddress(companionTarget) && observation.sourceCount[companionTarget] >= defaultLikelyTargetSourceMin {
+	if !IsInitiatorCapableAddress(companionTarget) && observation.sourceCount[companionTarget] >= defaultLikelyTargetSourceMin {
 		reasons = append(reasons, "companion-target-seen-as-probable-target-source")
 	}
 	if observation.targetCount[companionTarget] >= defaultLikelyTargetDestinationMin {
@@ -395,7 +395,7 @@ func (o *joinObservation) addFrame(frame Frame) {
 	o.sourceCount[frame.Source]++
 	o.targetCount[frame.Target]++
 	o.observedSources[frame.Source] = struct{}{}
-	if isInitiatorCapableAddress(frame.Source) {
+	if IsInitiatorCapableAddress(frame.Source) {
 		o.observedInitiators[frame.Source] = struct{}{}
 		return
 	}

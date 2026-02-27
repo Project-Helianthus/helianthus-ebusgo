@@ -41,7 +41,7 @@ func FrameTypeForTarget(target byte) FrameType {
 	if !isValidAddress(target) {
 		return FrameTypeUnknown
 	}
-	if isInitiatorCapableAddress(target) {
+	if IsInitiatorCapableAddress(target) {
 		return FrameTypeInitiatorInitiator
 	}
 	return FrameTypeInitiatorTarget
@@ -69,7 +69,9 @@ func isValidAddress(addr byte) bool {
 	return addr != SymbolEscape && addr != SymbolSyn
 }
 
-func isInitiatorCapableAddress(addr byte) bool {
+// IsInitiatorCapableAddress reports whether addr is a valid eBUS initiator
+// (master) address according to the eBUS address table.
+func IsInitiatorCapableAddress(addr byte) bool {
 	return initiatorPartIndex(addr&0x0F) > 0 && initiatorPartIndex((addr&0xF0)>>4) > 0
 }
 
