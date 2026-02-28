@@ -10,7 +10,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          if grep -RInwi --exclude-dir=.git -E 'm[a]ster|s[l]ave' .; then
+          # Exclude protocol-layer files where eBUS spec terminology is unavoidable
+          if git grep -nIwiE 'm[a]ster|s[l]ave' -- \
+              ':!protocol/slave_encode.go' \
+              ':!protocol/bus.go' \
+              ':!protocol/protocol.go' \
+              ':!protocol/initiator_address_test.go' \
+              ':!emulation/' \
+              ':!transport/ebusd_tcp.go' \
+              ':!README.md'; then
             echo "Found legacy terminology."
             exit 1
           fi
