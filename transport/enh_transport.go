@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
 
 // ENHTransport wraps a net.Conn and exposes the RawTransport interface using ENH framing.

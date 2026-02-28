@@ -1,6 +1,6 @@
 package types
 
-import ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
+import ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 
 const (
 	bcdSize        = 1

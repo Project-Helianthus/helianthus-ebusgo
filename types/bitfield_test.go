@@ -3,7 +3,7 @@ package types_test
 import (
 	"testing"
 
-	"github.com/d3vi1/helianthus-ebusgo/types"
+	"github.com/Project-Helianthus/helianthus-ebusgo/types"
 )
 
 func TestBITFIELD_Decode(t *testing.T) {

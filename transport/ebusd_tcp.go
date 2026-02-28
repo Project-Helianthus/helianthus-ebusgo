@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
-	"github.com/d3vi1/helianthus-ebusgo/internal/crc"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+	"github.com/Project-Helianthus/helianthus-ebusgo/internal/crc"
 )
 
 const (

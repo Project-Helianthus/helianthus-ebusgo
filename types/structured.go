@@ -3,7 +3,7 @@ package types
 import (
 	"fmt"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
 
 // Field describes a named data type within a structured payload.

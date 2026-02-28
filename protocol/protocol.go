@@ -1,6 +1,6 @@
 package protocol
 
-import "github.com/d3vi1/helianthus-ebusgo/internal/crc"
+import "github.com/Project-Helianthus/helianthus-ebusgo/internal/crc"
 
 const (
 	AddressBroadcast = byte(0xFE)

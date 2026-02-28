@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
-	"github.com/d3vi1/helianthus-ebusgo/transport"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
 )
 
 func TestTCPPlainTransport_ReadByte(t *testing.T) {

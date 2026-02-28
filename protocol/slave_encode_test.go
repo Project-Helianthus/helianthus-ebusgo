@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
 
 func TestEscapeBytes(t *testing.T) {

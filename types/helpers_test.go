@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
-	"github.com/d3vi1/helianthus-ebusgo/types"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+	"github.com/Project-Helianthus/helianthus-ebusgo/types"
 )
 
 func assertValue(t *testing.T, got, want types.Value) {

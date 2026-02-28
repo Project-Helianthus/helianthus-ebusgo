@@ -3,7 +3,7 @@ package protocol_test
 import (
 	"testing"
 
-	"github.com/d3vi1/helianthus-ebusgo/protocol"
+	"github.com/Project-Helianthus/helianthus-ebusgo/protocol"
 )
 
 func TestFrameTypeForTarget(t *testing.T) {

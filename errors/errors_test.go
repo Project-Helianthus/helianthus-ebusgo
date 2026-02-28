@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
 
 func TestClassifiers_NilAndUnknown(t *testing.T) {

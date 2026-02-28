@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/d3vi1/helianthus-ebusgo/transport"
+	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
 )
 
 func TestRawTransport_InterfaceShape(t *testing.T) {

@@ -3,7 +3,7 @@ package types
 import (
 	"encoding/binary"
 
-	ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
 
 const (

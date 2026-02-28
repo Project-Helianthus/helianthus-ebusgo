@@ -1,6 +1,6 @@
 package transport
 
-import ebuserrors "github.com/d3vi1/helianthus-ebusgo/errors"
+import ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 
 // ENHCommand represents an enhanced protocol command or response ID.
 type ENHCommand byte

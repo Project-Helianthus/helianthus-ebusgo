@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/d3vi1/helianthus-ebusgo/transport"
+	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
 )
 
 type fixtureExpectation struct {

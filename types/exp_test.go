@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/d3vi1/helianthus-ebusgo/types"
+	"github.com/Project-Helianthus/helianthus-ebusgo/types"
 )
 
 func TestEXP_Decode(t *testing.T) {
