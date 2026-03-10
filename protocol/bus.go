@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
@@ -20,6 +21,7 @@ type RetryPolicy struct {
 type BusConfig struct {
 	InitiatorTarget    RetryPolicy
 	InitiatorInitiator RetryPolicy
+	Observer           BusObserver
 }
 
 func DefaultBusConfig() BusConfig {
@@ -66,6 +68,9 @@ type Bus struct {
 
 	startMu sync.Mutex
 	started bool
+
+	observerFaultMu sync.Mutex
+	observerFault   ObserverFaultSnapshot
 
 	outCap int
 }
@@ -169,50 +174,63 @@ func (b *Bus) handleRequest(runCtx context.Context, request *busRequest) busResu
 func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Frame, error) {
 	frameType := request.frame.Type()
 	policy := b.retryPolicy(frameType)
+	startedAt := time.Now()
 
 	timeoutAttempts := 0
 	nackAttempts := 0
 	allowUnboundedCollision := isBoundedContext(request.ctx)
+	attemptCount := uint16(0)
 
 	for {
+		attemptCount++
 		if err := b.contextError(runCtx, request.ctx); err != nil {
+			b.emitRequestComplete(request.frame, nil, frameType, attemptCount-1, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 			return nil, err
 		}
 
-		if err := b.startArbitration(request.frame.Source); err != nil {
+		if err := b.startArbitration(request.frame.Source, frameType, attemptCount); err != nil {
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
 				// Arbitration can be lost while another initiator owns the bus.
 				// ebusd waits for subsequent SYN symbols before retrying; do the
 				// same here (bounded by request context deadline).
 				if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 					timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
+					b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 					if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+						b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
 						return nil, b.wrapRetryError(waitErr)
 					}
 					continue
 				}
+				b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 				return nil, b.wrapRetryError(err)
 			}
 			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
+				b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 				continue
 			}
+			b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 			return nil, b.wrapRetryError(err)
 		}
 
-		response, err := b.sendTransaction(runCtx, request.ctx, request.frame)
+		response, err := b.sendTransaction(runCtx, request.ctx, request.frame, attemptCount)
 		if err == nil {
+			b.emitRequestComplete(request.frame, response, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), nil, time.Since(startedAt))
 			return response, nil
 		}
 		if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 			timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
+			b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
 				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+					b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
 					return nil, b.wrapRetryError(waitErr)
 				}
 			}
 			continue
 		}
+		b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 		return nil, b.wrapRetryError(err)
 	}
 }
@@ -228,14 +246,31 @@ func (b *Bus) retryPolicy(frameType FrameType) RetryPolicy {
 	}
 }
 
-func (b *Bus) startArbitration(initiator byte) error {
+func (b *Bus) startArbitration(initiator byte, frameType FrameType, attempt uint16) error {
 	tr, ok := b.transport.(arbitrationTransport)
 	if !ok {
 		return nil
 	}
+	startedAt := time.Now()
 	if err := tr.StartArbitration(initiator); err != nil {
+		b.emitObserverEvent(BusEvent{
+			Kind:           BusEventArbitration,
+			FrameType:      frameType,
+			Outcome:        busOutcomeFromError(err),
+			Initiator:      initiator,
+			Attempt:        attempt,
+			DurationMicros: durationMicros(time.Since(startedAt)),
+		})
 		return fmt.Errorf("bus arbitration failed: %w", err)
 	}
+	b.emitObserverEvent(BusEvent{
+		Kind:           BusEventArbitration,
+		FrameType:      frameType,
+		Outcome:        BusOutcomeSuccess,
+		Initiator:      initiator,
+		Attempt:        attempt,
+		DurationMicros: durationMicros(time.Since(startedAt)),
+	})
 	return nil
 }
 
@@ -300,6 +335,11 @@ func (b *Bus) readByte(runCtx, reqCtx context.Context) (byte, error) {
 	if err != nil {
 		return 0, err
 	}
+	b.emitObserverEvent(BusEvent{
+		Kind:    BusEventRX,
+		Outcome: BusOutcomeSuccess,
+		Byte:    value,
+	})
 	return value, nil
 }
 
@@ -337,11 +377,12 @@ func (d *busDecoder) readSymbol(b *Bus, runCtx, reqCtx context.Context) (byte, e
 	}
 }
 
-func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Frame, error) {
+func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attempt uint16) (*Frame, error) {
 	frameType := frame.Type()
 	if frameType == FrameTypeUnknown {
 		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
 	}
+	startedAt := time.Now()
 
 	// Initiator telegram (unescaped symbols): SRC DST PB SB LEN DATA... CRC
 	telegram := make([]byte, 0, 6+len(frame.Data))
@@ -360,7 +401,8 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 		}
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
+	acked := false
+	for commandAttempt := 0; commandAttempt < 2; commandAttempt++ {
 		if err := b.sendInitiatorTelegram(runCtx, reqCtx, telegram, includeSource); err != nil {
 			return nil, err
 		}
@@ -369,35 +411,68 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 			if err := b.sendEndOfMessage(runCtx, reqCtx); err != nil {
 				return nil, err
 			}
+			b.emitAttemptComplete(frame, nil, frameType, attempt, startedAt)
 			return nil, nil
 		}
 
 		ack, err := decoder.readSymbol(b, runCtx, reqCtx)
 		if err != nil {
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
 		}
 		switch ack {
 		case SymbolAck:
-			attempt = 2
+			b.emitObserverEvent(BusEvent{
+				Kind:       BusEventACK,
+				FrameType:  frameType,
+				Outcome:    BusOutcomeSuccess,
+				Byte:       SymbolAck,
+				Attempt:    attempt,
+				Request:    frame,
+				HasRequest: true,
+			})
+			acked = true
 		case SymbolNack:
-			if attempt == 0 {
+			b.emitObserverEvent(BusEvent{
+				Kind:       BusEventNACK,
+				FrameType:  frameType,
+				Outcome:    BusOutcomeNACK,
+				Byte:       SymbolNack,
+				Attempt:    attempt,
+				Request:    frame,
+				HasRequest: true,
+			})
+			if commandAttempt == 0 {
 				// Repeat command once without arbitration; SRC must be sent explicitly.
 				includeSource = true
 				continue
 			}
 			_ = b.sendEndOfMessage(runCtx, reqCtx)
-			return nil, fmt.Errorf("nack received: %w", ebuserrors.ErrNACK)
+			err := fmt.Errorf("nack received: %w", ebuserrors.ErrNACK)
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
+			return nil, err
 		case SymbolSyn:
-			return nil, fmt.Errorf("syn while waiting for command ack: %w", ebuserrors.ErrTimeout)
+			err := fmt.Errorf("syn while waiting for command ack: %w", ebuserrors.ErrTimeout)
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
+			return nil, err
 		default:
-			return nil, fmt.Errorf("unexpected symbol 0x%02x while waiting for command ack: %w", ack, ebuserrors.ErrTimeout)
+			err := fmt.Errorf("unexpected symbol 0x%02x while waiting for command ack: %w", ack, ebuserrors.ErrTimeout)
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
+			return nil, err
 		}
+		if acked {
+			break
+		}
+	}
+	if !acked {
+		return nil, fmt.Errorf("command ack loop exited without ack: %w", ebuserrors.ErrTimeout)
 	}
 
 	if frameType == FrameTypeInitiatorInitiator {
 		if err := b.sendEndOfMessage(runCtx, reqCtx); err != nil {
 			return nil, err
 		}
+		b.emitAttemptComplete(frame, nil, frameType, attempt, startedAt)
 		return nil, nil
 	}
 	if frameType != FrameTypeInitiatorTarget {
@@ -410,10 +485,13 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 	for respAttempt := 0; respAttempt < 2; respAttempt++ {
 		lengthSym, err := decoder.readSymbol(b, runCtx, reqCtx)
 		if err != nil {
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
 		}
 		if lengthSym == SymbolSyn {
-			return nil, fmt.Errorf("syn while waiting for response length: %w", ebuserrors.ErrTimeout)
+			err := fmt.Errorf("syn while waiting for response length: %w", ebuserrors.ErrTimeout)
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
+			return nil, err
 		}
 
 		length := int(lengthSym)
@@ -421,20 +499,26 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 		for i := 0; i < length; i++ {
 			value, err := decoder.readSymbol(b, runCtx, reqCtx)
 			if err != nil {
+				b.emitOutcomeEvent(frame, frameType, attempt, err)
 				return nil, err
 			}
 			if value == SymbolSyn {
-				return nil, fmt.Errorf("syn while reading response data: %w", ebuserrors.ErrTimeout)
+				err := fmt.Errorf("syn while reading response data: %w", ebuserrors.ErrTimeout)
+				b.emitOutcomeEvent(frame, frameType, attempt, err)
+				return nil, err
 			}
 			data[i] = value
 		}
 
 		crcValue, err := decoder.readSymbol(b, runCtx, reqCtx)
 		if err != nil {
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
 		}
 		if crcValue == SymbolSyn {
-			return nil, fmt.Errorf("syn while waiting for response crc: %w", ebuserrors.ErrTimeout)
+			err := fmt.Errorf("syn while waiting for response crc: %w", ebuserrors.ErrTimeout)
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
+			return nil, err
 		}
 
 		segment := make([]byte, 0, 1+len(data))
@@ -444,30 +528,67 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame) (*Fra
 			if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolNack, true); err != nil {
 				return nil, err
 			}
+			b.emitObserverEvent(BusEvent{
+				Kind:        BusEventNACK,
+				FrameType:   frameType,
+				Outcome:     BusOutcomeCRCMismatch,
+				Byte:        SymbolNack,
+				Attempt:     attempt,
+				Request:     frame,
+				Response:    Frame{Source: frame.Target, Target: frame.Source, Primary: frame.Primary, Secondary: frame.Secondary, Data: data},
+				HasRequest:  true,
+				HasResponse: true,
+			})
 			if respAttempt == 0 {
+				b.emitObserverEvent(BusEvent{
+					Kind:        BusEventCRCMismatch,
+					FrameType:   frameType,
+					Outcome:     BusOutcomeCRCMismatch,
+					Attempt:     attempt,
+					Request:     frame,
+					Response:    Frame{Source: frame.Target, Target: frame.Source, Primary: frame.Primary, Secondary: frame.Secondary, Data: data},
+					HasRequest:  true,
+					HasResponse: true,
+				})
 				continue
 			}
 			_ = b.sendEndOfMessage(runCtx, reqCtx)
-			return nil, fmt.Errorf("crc mismatch: %w", ebuserrors.ErrCRCMismatch)
+			err := fmt.Errorf("crc mismatch: %w", ebuserrors.ErrCRCMismatch)
+			b.emitOutcomeEvent(frame, frameType, attempt, err)
+			return nil, err
 		}
 
 		if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolAck, true); err != nil {
 			return nil, err
 		}
-		if err := b.sendEndOfMessage(runCtx, reqCtx); err != nil {
-			return nil, err
-		}
-
-		return &Frame{
+		response := &Frame{
 			Source:    frame.Target,
 			Target:    frame.Source,
 			Primary:   frame.Primary,
 			Secondary: frame.Secondary,
 			Data:      data,
-		}, nil
+		}
+		b.emitObserverEvent(BusEvent{
+			Kind:        BusEventACK,
+			FrameType:   frameType,
+			Outcome:     BusOutcomeSuccess,
+			Byte:        SymbolAck,
+			Attempt:     attempt,
+			Request:     frame,
+			Response:    *response,
+			HasRequest:  true,
+			HasResponse: true,
+		})
+		if err := b.sendEndOfMessage(runCtx, reqCtx); err != nil {
+			return nil, err
+		}
+		b.emitAttemptComplete(frame, response, frameType, attempt, startedAt)
+		return response, nil
 	}
 
-	return nil, fmt.Errorf("unreachable response loop: %w", ebuserrors.ErrTimeout)
+	err := fmt.Errorf("unreachable response loop: %w", ebuserrors.ErrTimeout)
+	b.emitOutcomeEvent(frame, frameType, attempt, err)
+	return nil, err
 }
 
 func (b *Bus) sendInitiatorTelegram(runCtx, reqCtx context.Context, telegram []byte, includeSource bool) error {
@@ -505,21 +626,39 @@ func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, es
 func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte) error {
 	written, err := b.transport.Write([]byte{raw})
 	if err != nil {
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
 	if written != 1 {
-		return ebuserrors.ErrInvalidPayload
+		err := ebuserrors.ErrInvalidPayload
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+		return err
 	}
+	b.emitObserverEvent(BusEvent{
+		Kind:    BusEventTX,
+		Outcome: BusOutcomeSuccess,
+		Byte:    raw,
+	})
 
 	echo, err := b.readByte(runCtx, reqCtx)
 	if err != nil {
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
 	if echo == SymbolSyn && raw != SymbolSyn {
-		return fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
+		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+		return err
 	}
 	if echo != raw {
-		return fmt.Errorf("echo mismatch (sent 0x%02x, got 0x%02x): %w", raw, echo, ebuserrors.ErrBusCollision)
+		b.emitObserverEvent(BusEvent{
+			Kind:    BusEventEchoMismatch,
+			Outcome: BusOutcomeEchoMismatch,
+			Byte:    echo,
+		})
+		err := fmt.Errorf("echo mismatch (sent 0x%02x, got 0x%02x): %w", raw, echo, ebuserrors.ErrBusCollision)
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+		return err
 	}
 	return nil
 }
@@ -573,4 +712,222 @@ func (b *Bus) markClosed() {
 	b.queueMu.Lock()
 	b.closed = true
 	b.queueMu.Unlock()
+}
+
+// ObserverFaultSnapshot returns the current bounded observer-fault state.
+func (b *Bus) ObserverFaultSnapshot() ObserverFaultSnapshot {
+	b.observerFaultMu.Lock()
+	defer b.observerFaultMu.Unlock()
+	return b.observerFault
+}
+
+func (b *Bus) emitAttemptComplete(request Frame, response *Frame, frameType FrameType, attempt uint16, startedAt time.Time) {
+	event := BusEvent{
+		Kind:           BusEventAttemptComplete,
+		FrameType:      frameType,
+		Outcome:        BusOutcomeSuccess,
+		Attempt:        attempt,
+		DurationMicros: durationMicros(time.Since(startedAt)),
+		Request:        request,
+		HasRequest:     true,
+	}
+	if response != nil {
+		event.Response = *response
+		event.HasResponse = true
+	}
+	b.emitObserverEvent(event)
+}
+
+func (b *Bus) emitRequestComplete(request Frame, response *Frame, frameType FrameType, attempt, timeoutRetries, nackRetries uint16, err error, elapsed time.Duration) {
+	event := BusEvent{
+		Kind:           BusEventRequestComplete,
+		FrameType:      frameType,
+		Outcome:        busOutcomeFromError(err),
+		Attempt:        attempt,
+		TimeoutRetries: timeoutRetries,
+		NACKRetries:    nackRetries,
+		DurationMicros: durationMicros(elapsed),
+		Request:        request,
+		HasRequest:     true,
+	}
+	if response != nil {
+		event.Response = *response
+		event.HasResponse = true
+	}
+	b.emitObserverEvent(event)
+}
+
+func (b *Bus) emitRetryEvent(request Frame, frameType FrameType, attempt, timeoutRetries, nackRetries uint16, err error) {
+	b.emitObserverEvent(BusEvent{
+		Kind:           BusEventRetry,
+		FrameType:      frameType,
+		Outcome:        busOutcomeFromError(err),
+		Retry:          busRetryReasonFromError(err),
+		Attempt:        attempt,
+		TimeoutRetries: timeoutRetries,
+		NACKRetries:    nackRetries,
+		Request:        request,
+		HasRequest:     true,
+	})
+}
+
+func (b *Bus) emitOutcomeEvent(request Frame, frameType FrameType, attempt uint16, err error) {
+	switch busOutcomeFromError(err) {
+	case BusOutcomeTimeout:
+		b.emitObserverEvent(BusEvent{
+			Kind:       BusEventTimeout,
+			FrameType:  frameType,
+			Outcome:    BusOutcomeTimeout,
+			Attempt:    attempt,
+			Request:    request,
+			HasRequest: frameType != FrameTypeUnknown,
+		})
+	case BusOutcomeNACK:
+		b.emitObserverEvent(BusEvent{
+			Kind:       BusEventNACK,
+			FrameType:  frameType,
+			Outcome:    BusOutcomeNACK,
+			Attempt:    attempt,
+			Request:    request,
+			HasRequest: frameType != FrameTypeUnknown,
+		})
+	case BusOutcomeCRCMismatch:
+		b.emitObserverEvent(BusEvent{
+			Kind:       BusEventCRCMismatch,
+			FrameType:  frameType,
+			Outcome:    BusOutcomeCRCMismatch,
+			Attempt:    attempt,
+			Request:    request,
+			HasRequest: frameType != FrameTypeUnknown,
+		})
+	case BusOutcomeEchoMismatch:
+		b.emitObserverEvent(BusEvent{
+			Kind:       BusEventEchoMismatch,
+			FrameType:  frameType,
+			Outcome:    BusOutcomeEchoMismatch,
+			Attempt:    attempt,
+			Request:    request,
+			HasRequest: frameType != FrameTypeUnknown,
+		})
+	}
+}
+
+type observerDispatchResult struct {
+	err      error
+	panicked bool
+}
+
+func (b *Bus) emitObserverEvent(event BusEvent) {
+	observer := b.config.Observer
+	if observer == nil {
+		return
+	}
+
+	result := callObserver(observer, event)
+	if result.err == nil {
+		return
+	}
+
+	b.recordObserverFault(event, result)
+	if event.Kind == BusEventObserverFault {
+		return
+	}
+
+	callObserver(observer, BusEvent{
+		Kind:        BusEventObserverFault,
+		FrameType:   event.FrameType,
+		Outcome:     BusOutcomeObserverFault,
+		Attempt:     event.Attempt,
+		Initiator:   event.Initiator,
+		Request:     event.Request,
+		Response:    event.Response,
+		HasRequest:  event.HasRequest,
+		HasResponse: event.HasResponse,
+	})
+}
+
+func callObserver(observer BusObserver, event BusEvent) (result observerDispatchResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result.err = fmt.Errorf("observer panic: %v", recovered)
+			result.panicked = true
+		}
+	}()
+
+	result.err = observer.OnBusEvent(event)
+	return result
+}
+
+func (b *Bus) recordObserverFault(event BusEvent, result observerDispatchResult) {
+	b.observerFaultMu.Lock()
+	defer b.observerFaultMu.Unlock()
+
+	b.observerFault.Count++
+	b.observerFault.LastKind = event.Kind
+	b.observerFault.LastOutcome = event.Outcome
+	b.observerFault.LastPanic = result.panicked
+	if result.err != nil {
+		b.observerFault.LastError = result.err.Error()
+	} else {
+		b.observerFault.LastError = ""
+	}
+}
+
+func busOutcomeFromError(err error) BusOutcomeClass {
+	switch {
+	case err == nil:
+		return BusOutcomeSuccess
+	case errors.Is(err, ebuserrors.ErrTimeout):
+		return BusOutcomeTimeout
+	case errors.Is(err, ebuserrors.ErrNACK):
+		return BusOutcomeNACK
+	case errors.Is(err, ebuserrors.ErrCRCMismatch):
+		return BusOutcomeCRCMismatch
+	case errors.Is(err, ebuserrors.ErrBusCollision):
+		if containsEchoMismatch(err) {
+			return BusOutcomeEchoMismatch
+		}
+		return BusOutcomeCollision
+	default:
+		return BusOutcomeUnknown
+	}
+}
+
+func busRetryReasonFromError(err error) BusRetryReason {
+	switch busOutcomeFromError(err) {
+	case BusOutcomeTimeout:
+		return BusRetryReasonTimeout
+	case BusOutcomeNACK:
+		return BusRetryReasonNACK
+	case BusOutcomeCRCMismatch:
+		return BusRetryReasonCRCMismatch
+	case BusOutcomeCollision, BusOutcomeEchoMismatch:
+		return BusRetryReasonCollision
+	default:
+		return BusRetryReasonUnknown
+	}
+}
+
+func containsEchoMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	return stringsContains(err.Error(), "echo mismatch")
+}
+
+func stringsContains(value, needle string) bool {
+	return len(needle) > 0 && len(value) >= len(needle) && (value == needle || containsSubstring(value, needle))
+}
+
+func containsSubstring(value, needle string) bool {
+	for i := 0; i+len(needle) <= len(value); i++ {
+		if value[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func durationMicros(duration time.Duration) int64 {
+	return duration.Microseconds()
 }

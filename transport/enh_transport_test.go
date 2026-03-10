@@ -124,6 +124,59 @@ func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
 	}
 }
 
+func TestENHTransport_ReadEventSurfacesResetWithoutCorruptingSubsequentBytes(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		reset := transport.EncodeENH(transport.ENHResResetted, 0x00)
+		payload := []byte{reset[0], reset[1], 0x11, 0x22}
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	reader, ok := interface{}(enh).(transport.StreamEventReader)
+	if !ok {
+		t.Fatal("ENH transport does not implement StreamEventReader")
+	}
+
+	event, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent error = %v", err)
+	}
+	if event.Kind != transport.StreamEventReset {
+		t.Fatalf("ReadEvent kind = %v; want StreamEventReset", event.Kind)
+	}
+
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after reset error = %v", err)
+	}
+	if got != 0x11 {
+		t.Fatalf("ReadByte after reset = 0x%02x; want 0x11", got)
+	}
+
+	got, err = enh.ReadByte()
+	if err != nil {
+		t.Fatalf("second ReadByte after reset error = %v", err)
+	}
+	if got != 0x22 {
+		t.Fatalf("second ReadByte after reset = 0x%02x; want 0x22", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestENHTransport_WriteEncodesFrames(t *testing.T) {
 	t.Parallel()
 
