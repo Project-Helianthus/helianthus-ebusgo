@@ -1,0 +1,231 @@
+{
+  "name": "observer_hook_core_cases_v1",
+  "status": "m0_seed_corpus",
+  "purpose": "Seed corpus for future observer-hook tests. M0 records request/response and failure shapes without claiming observer event semantics or parser/correlation correctness.",
+  "validation_scope": "fixture_presence_and_shape_only",
+  "deferred_validation": {
+    "owners": [
+      "ISSUE-EG-02",
+      "ISSUE-GW-01B",
+      "ISSUE-GW-01C"
+    ],
+    "note": "M1 and later parser/correlation milestones own correctness assertions over this corpus."
+  },
+  "cases": [
+    {
+      "name": "broadcast_no_ack",
+      "source_test": "protocol/bus_test.go:140",
+      "frame_type": "broadcast",
+      "request": {
+        "source_hex": "10",
+        "target_hex": "fe",
+        "primary_hex": "01",
+        "secondary_hex": "02",
+        "data_hex": "03"
+      },
+      "scripted_inbound": [],
+      "expected": {
+        "outcome": "success_no_response"
+      }
+    },
+    {
+      "name": "initiator_initiator_ack_only",
+      "source_test": "protocol/bus_test.go:177",
+      "frame_type": "master_master",
+      "request": {
+        "source_hex": "30",
+        "target_hex": "10",
+        "primary_hex": "01",
+        "secondary_hex": "02",
+        "data_hex": "03"
+      },
+      "scripted_inbound": [
+        {
+          "type": "symbol",
+          "name": "ack"
+        }
+      ],
+      "expected": {
+        "outcome": "success_no_response"
+      }
+    },
+    {
+      "name": "initiator_target_timeout_then_success",
+      "source_test": "protocol/bus_test.go:317",
+      "frame_type": "master_target",
+      "request": {
+        "source_hex": "10",
+        "target_hex": "08",
+        "primary_hex": "01",
+        "secondary_hex": "02",
+        "data_hex": "03"
+      },
+      "scripted_inbound": [
+        {
+          "type": "error",
+          "name": "timeout"
+        },
+        {
+          "type": "symbol",
+          "name": "ack"
+        },
+        {
+          "type": "response",
+          "response_length_hex": "01",
+          "response_data_hex": "10",
+          "crc_status": "valid"
+        }
+      ],
+      "expected": {
+        "outcome": "success_with_retry",
+        "response_data_hex": "10"
+      }
+    },
+    {
+      "name": "initiator_target_nack_then_success",
+      "source_test": "protocol/bus_test.go:374",
+      "frame_type": "master_target",
+      "request": {
+        "source_hex": "10",
+        "target_hex": "08",
+        "primary_hex": "01",
+        "secondary_hex": "02",
+        "data_hex": "03"
+      },
+      "scripted_inbound": [
+        {
+          "type": "symbol",
+          "name": "nack"
+        },
+        {
+          "type": "symbol",
+          "name": "ack"
+        },
+        {
+          "type": "response",
+          "response_length_hex": "01",
+          "response_data_hex": "20",
+          "crc_status": "valid"
+        }
+      ],
+      "expected": {
+        "outcome": "success_with_retry",
+        "response_data_hex": "20"
+      }
+    },
+    {
+      "name": "initiator_target_crc_mismatch_exhausted",
+      "source_test": "protocol/bus_test.go:214",
+      "frame_type": "master_target",
+      "request": {
+        "source_hex": "10",
+        "target_hex": "08",
+        "primary_hex": "01",
+        "secondary_hex": "02",
+        "data_hex": "03"
+      },
+      "scripted_inbound": [
+        {
+          "type": "symbol",
+          "name": "ack"
+        },
+        {
+          "type": "response",
+          "response_length_hex": "01",
+          "response_data_hex": "10",
+          "crc_status": "invalid"
+        },
+        {
+          "type": "response",
+          "response_length_hex": "01",
+          "response_data_hex": "10",
+          "crc_status": "invalid"
+        }
+      ],
+      "expected": {
+        "outcome": "crc_mismatch"
+      }
+    },
+    {
+      "name": "arbitration_collision_retry_then_ack_only_success",
+      "source_test": "protocol/bus_test.go:640",
+      "frame_type": "master_master",
+      "request": {
+        "source_hex": "30",
+        "target_hex": "10",
+        "primary_hex": "01",
+        "secondary_hex": "02",
+        "data_hex": "03"
+      },
+      "scripted_inbound": [
+        {
+          "type": "collision",
+          "phase": "arbitration"
+        },
+        {
+          "type": "symbol",
+          "name": "escape"
+        },
+        {
+          "type": "error",
+          "name": "timeout"
+        },
+        {
+          "type": "symbol",
+          "name": "syn"
+        },
+        {
+          "type": "symbol",
+          "name": "syn"
+        },
+        {
+          "type": "symbol",
+          "name": "ack"
+        }
+      ],
+      "expected": {
+        "outcome": "success_with_retry"
+      }
+    },
+    {
+      "name": "write_echo_collision_retry_then_response_success",
+      "source_test": "protocol/bus_test.go:742",
+      "frame_type": "master_target",
+      "request": {
+        "source_hex": "10",
+        "target_hex": "08",
+        "primary_hex": "07",
+        "secondary_hex": "04",
+        "data_hex": ""
+      },
+      "scripted_inbound": [
+        {
+          "type": "collision",
+          "phase": "write_echo"
+        },
+        {
+          "type": "symbol",
+          "name": "syn"
+        },
+        {
+          "type": "symbol",
+          "name": "syn"
+        },
+        {
+          "type": "symbol",
+          "name": "ack"
+        },
+        {
+          "type": "response",
+          "response_length_hex": "01",
+          "response_data_hex": "10",
+          "crc_status": "valid"
+        }
+      ],
+      "expected": {
+        "outcome": "success_with_retry",
+        "response_data_hex": "10"
+      }
+    }
+  ]
+}

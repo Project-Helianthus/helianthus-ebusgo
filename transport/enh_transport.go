@@ -29,6 +29,7 @@ type ENHTransport struct {
 
 	parser  ENHParser
 	pending []byte
+	resets  int
 	buffer  []byte
 }
 
@@ -151,40 +152,49 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 	defer t.readMu.Unlock()
 
 	for {
+		if t.resets > 0 {
+			t.resets--
+			continue
+		}
+
 		if len(t.pending) > 0 {
 			value := t.pending[0]
 			t.pending = t.pending[1:]
 			return value, nil
 		}
 
-		if err := t.setReadDeadline(); err != nil {
-			return 0, t.mapReadError(err)
-		}
-
-		bytesRead, err := t.conn.Read(t.buffer)
-		if err != nil {
-			return 0, t.mapReadError(err)
-		}
-		if bytesRead == 0 {
-			continue
-		}
-
-		msgs, err := t.parser.Parse(t.buffer[:bytesRead])
-		if err != nil {
+		if err := t.fillPendingLocked(); err != nil {
 			return 0, err
 		}
-		for _, msg := range msgs {
-			switch msg.Kind {
-			case ENHMessageData:
-				t.pending = append(t.pending, msg.Byte)
-			case ENHMessageFrame:
-				switch msg.Command {
-				case ENHResReceived:
-					t.pending = append(t.pending, msg.Data)
-				case ENHResResetted:
-					t.resetStateLocked()
-				}
-			}
+		if t.resets == 0 && len(t.pending) == 0 {
+			continue
+		}
+	}
+}
+
+// ReadEvent surfaces optional reset boundaries to passive consumers while
+// preserving ReadByte compatibility for active callers.
+func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+
+	for {
+		if t.resets > 0 {
+			t.resets--
+			return StreamEvent{Kind: StreamEventReset}, nil
+		}
+
+		if len(t.pending) > 0 {
+			value := t.pending[0]
+			t.pending = t.pending[1:]
+			return StreamEvent{Kind: StreamEventByte, Byte: value}, nil
+		}
+
+		if err := t.fillPendingLocked(); err != nil {
+			return StreamEvent{}, err
+		}
+		if t.resets == 0 && len(t.pending) == 0 {
+			continue
 		}
 	}
 }
@@ -330,6 +340,44 @@ func (t *ENHTransport) resetStateLocked() {
 	t.pending = nil
 }
 
+func (t *ENHTransport) surfaceResetLocked() {
+	t.resetStateLocked()
+	t.resets++
+}
+
+func (t *ENHTransport) fillPendingLocked() error {
+	if err := t.setReadDeadline(); err != nil {
+		return t.mapReadError(err)
+	}
+
+	bytesRead, err := t.conn.Read(t.buffer)
+	if err != nil {
+		return t.mapReadError(err)
+	}
+	if bytesRead == 0 {
+		return nil
+	}
+
+	msgs, err := t.parser.Parse(t.buffer[:bytesRead])
+	if err != nil {
+		return err
+	}
+	for _, msg := range msgs {
+		switch msg.Kind {
+		case ENHMessageData:
+			t.pending = append(t.pending, msg.Byte)
+		case ENHMessageFrame:
+			switch msg.Command {
+			case ENHResReceived:
+				t.pending = append(t.pending, msg.Data)
+			case ENHResResetted:
+				t.surfaceResetLocked()
+			}
+		}
+	}
+	return nil
+}
+
 func (t *ENHTransport) setReadDeadline() error {
 	if t.readTimeout <= 0 {
 		return t.conn.SetReadDeadline(time.Time{})
@@ -386,3 +434,4 @@ func isClosed(err error) bool {
 }
 
 var _ RawTransport = (*ENHTransport)(nil)
+var _ StreamEventReader = (*ENHTransport)(nil)

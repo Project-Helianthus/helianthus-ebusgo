@@ -14,3 +14,26 @@ type RawTransport interface {
 	// Close releases the underlying transport resources.
 	Close() error
 }
+
+// StreamEventKind identifies optional non-byte transport events surfaced to
+// passive consumers that need reset/lifecycle boundaries.
+type StreamEventKind uint8
+
+const (
+	StreamEventByte StreamEventKind = iota + 1
+	StreamEventReset
+)
+
+// StreamEvent is a transport-stream item. Byte is only valid for
+// StreamEventByte.
+type StreamEvent struct {
+	Kind StreamEventKind
+	Byte byte
+}
+
+// StreamEventReader is an optional extension implemented by transports that
+// can surface non-byte stream boundaries, such as adapter RESETTED frames,
+// without changing RawTransport ReadByte compatibility for active callers.
+type StreamEventReader interface {
+	ReadEvent() (StreamEvent, error)
+}
