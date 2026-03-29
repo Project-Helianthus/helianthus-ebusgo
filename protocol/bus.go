@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
@@ -45,8 +46,9 @@ type busRequest struct {
 	// transportOp, when non-nil, marks this as a raw transport operation
 	// rather than a bus frame send. The run loop calls fn(transport) instead
 	// of handleRequest. Used by RawTransportOp for INFO queries.
-	transportOp     func(transport.RawTransport) error
-	transportOpResp chan error
+	transportOp        func(transport.RawTransport) error
+	transportOpResp    chan error
+	transportOpStarted atomic.Bool
 }
 
 type busResult struct {
@@ -170,6 +172,7 @@ func (b *Bus) runLoop(ctx context.Context) {
 				request.transportOpResp <- err
 				continue
 			}
+			request.transportOpStarted.Store(true)
 			err := request.transportOp(b.transport)
 			request.transportOpResp <- err
 			continue
@@ -220,6 +223,9 @@ func (b *Bus) RawTransportOp(ctx context.Context, fn func(transport.RawTransport
 	case err := <-op.transportOpResp:
 		return err
 	case <-ctx.Done():
+		if op.transportOpStarted.Load() {
+			return <-op.transportOpResp
+		}
 		return ctx.Err()
 	}
 }

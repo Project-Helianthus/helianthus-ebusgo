@@ -245,6 +245,90 @@ func TestENHTransport_RequestInfoKeepsTrailingResetInSameBatch(t *testing.T) {
 	}
 }
 
+func TestENHTransport_RequestInfoResetsParserStateAfterTimeoutAndContinues(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInfo, byte(transport.AdapterInfoVersion))
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected first info request")
+			return
+		}
+
+		partial := transport.EncodeENH(transport.ENHResInfo, 0x02)
+		if _, err := server.Write(partial[:1]); err != nil {
+			serverErr <- err
+			return
+		}
+
+		time.Sleep(300 * time.Millisecond)
+		if _, err := server.Write([]byte{0x55}); err != nil {
+			serverErr <- err
+			return
+		}
+
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected second info request")
+			return
+		}
+
+		length := transport.EncodeENH(transport.ENHResInfo, 0x02)
+		first := transport.EncodeENH(transport.ENHResInfo, 0x23)
+		second := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		response := append(append(length[:], first[:]...), second[:]...)
+		_, err := server.Write(response)
+		serverErr <- err
+	}()
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("RequestInfo error = %v; want ErrTimeout", err)
+	}
+	if got != nil {
+		t.Fatalf("RequestInfo payload = %v; want nil on timeout", got)
+	}
+
+	gotByte, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after RequestInfo timeout error = %v", err)
+	}
+	if gotByte != 0x55 {
+		t.Fatalf("ReadByte after RequestInfo timeout = 0x%02x; want 0x55", gotByte)
+	}
+
+	got, err = enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("second RequestInfo error = %v", err)
+	}
+	if len(got) != 2 || got[0] != 0x23 || got[1] != 0x01 {
+		t.Fatalf("second RequestInfo payload = %v; want [0x23 0x01]", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
 	t.Parallel()
 

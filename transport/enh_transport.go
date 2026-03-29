@@ -341,20 +341,31 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
+	var err error
+	defer func() {
+		if err != nil {
+			t.parser.Reset()
+			t.pending = nil
+		}
+	}()
+
 	// Send the INFO request.
 	t.writeMu.Lock()
 	seq := EncodeENH(ENHReqInfo, byte(id))
 	written := 0
 	for written < len(seq) {
-		if err := t.setWriteDeadline(); err != nil {
+		if err = t.setWriteDeadline(); err != nil {
 			t.writeMu.Unlock()
-			return nil, t.mapWriteError(err)
+			err = t.mapWriteError(err)
+			return nil, err
 		}
-		n, err := t.conn.Write(seq[written:])
+		var n int
+		n, err = t.conn.Write(seq[written:])
 		written += n
 		if err != nil {
 			t.writeMu.Unlock()
-			return nil, t.mapWriteError(err)
+			err = t.mapWriteError(err)
+			return nil, err
 		}
 		if n == 0 {
 			break
@@ -362,7 +373,8 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	}
 	t.writeMu.Unlock()
 	if written != len(seq) {
-		return nil, fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
+		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
+		return nil, err
 	}
 
 	// Read response: first INFO frame has length, then N data frames.
@@ -372,13 +384,16 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	resetBeforeCompletion := false
 
 	for {
-		if err := t.setReadDeadline(); err != nil {
-			return nil, t.mapReadError(err)
+		if err = t.setReadDeadline(); err != nil {
+			err = t.mapReadError(err)
+			return nil, err
 		}
 
-		n, err := t.conn.Read(t.buffer)
+		var n int
+		n, err = t.conn.Read(t.buffer)
 		if err != nil {
-			return nil, t.mapReadError(err)
+			err = t.mapReadError(err)
+			return nil, err
 		}
 		if n == 0 {
 			continue
@@ -386,7 +401,8 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 
 		msgs, parseErr := t.parser.Parse(t.buffer[:n])
 		if parseErr != nil {
-			return nil, parseErr
+			err = parseErr
+			return nil, err
 		}
 
 		for _, msg := range msgs {
@@ -432,7 +448,8 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		}
 
 		if resetBeforeCompletion {
-			return nil, fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrTransportClosed)
+			err = fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrTransportClosed)
+			return nil, err
 		}
 		if payloadComplete {
 			return payload, nil

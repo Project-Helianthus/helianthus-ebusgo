@@ -575,6 +575,63 @@ func TestBus_RawTransportOpSkipsCanceledRequestContext(t *testing.T) {
 	}
 }
 
+func TestBus_RawTransportOpWaitsForStartedOperationDespiteContextCancel(t *testing.T) {
+	tr := newGatingTransport()
+	config := protocol.BusConfig{
+		InitiatorTarget: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		InitiatorInitiator: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	opCtx, opCancel := context.WithCancel(context.Background())
+	defer opCancel()
+	opDone := make(chan error, 1)
+	go func() {
+		opDone <- bus.RawTransportOp(opCtx, func(transport.RawTransport) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for RawTransportOp to start")
+	}
+
+	opCancel()
+
+	select {
+	case err := <-opDone:
+		t.Fatalf("RawTransportOp returned before completion after cancellation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case err := <-opDone:
+		if err != nil {
+			t.Fatalf("RawTransportOp error = %v; want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for RawTransportOp to return")
+	}
+}
+
 func TestBus_RawTransportOpRejectsNilCallbackWhileBusy(t *testing.T) {
 	tr := newGatingTransport()
 	config := protocol.BusConfig{
