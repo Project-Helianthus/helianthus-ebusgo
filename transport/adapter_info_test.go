@@ -1,7 +1,11 @@
 package transport
 
 import (
+	"errors"
+	"fmt"
 	"testing"
+
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
 
 func TestParseAdapterVersion_2Byte(t *testing.T) {
@@ -79,10 +83,21 @@ func TestParseAdapterVersion_8Byte(t *testing.T) {
 	}
 }
 
-func TestParseAdapterVersion_TooShort(t *testing.T) {
-	_, err := ParseAdapterVersion([]byte{0x23})
-	if err == nil {
-		t.Fatal("expected error for 1-byte response")
+func TestParseAdapterVersion_InvalidLengths(t *testing.T) {
+	t.Parallel()
+
+	for _, length := range []int{0, 1, 3, 4, 6, 7, 9} {
+		length := length
+		t.Run(fmt.Sprintf("len_%d", length), func(t *testing.T) {
+			data := make([]byte, length)
+			if length > 0 {
+				data[0] = 0x23
+			}
+			_, err := ParseAdapterVersion(data)
+			if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+				t.Fatalf("ParseAdapterVersion(len=%d) error = %v; want ErrInvalidPayload", length, err)
+			}
+		})
 	}
 }
 
@@ -166,12 +181,12 @@ func TestSupportsInfoID_VersionGating(t *testing.T) {
 
 func TestParseAdapterResetInfo(t *testing.T) {
 	tests := []struct {
-		name       string
-		data       []byte
-		wantCause  string
-		wantCode   byte
-		wantCount  byte
-		wantErr    bool
+		name      string
+		data      []byte
+		wantCause string
+		wantCode  byte
+		wantCount byte
+		wantErr   bool
 	}{
 		{
 			name:      "power on",

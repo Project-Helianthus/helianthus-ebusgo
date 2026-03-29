@@ -91,8 +91,10 @@ func (v AdapterVersion) SupportsInfoID(id AdapterInfoID) bool {
 // ParseAdapterVersion parses an INFO ID 0x00 response.
 // Accepts 2, 5, or 8 byte payloads.
 func ParseAdapterVersion(data []byte) (AdapterVersion, error) {
-	if len(data) < 2 {
-		return AdapterVersion{}, fmt.Errorf("adapter version response too short (%d bytes): %w", len(data), ebuserrors.ErrInvalidPayload)
+	switch len(data) {
+	case 2, 5, 8:
+	default:
+		return AdapterVersion{}, fmt.Errorf("adapter version response has invalid length (%d bytes): %w", len(data), ebuserrors.ErrInvalidPayload)
 	}
 
 	v := AdapterVersion{
@@ -101,7 +103,13 @@ func ParseAdapterVersion(data []byte) (AdapterVersion, error) {
 	}
 	v.SupportsInfo = v.Features&0x01 != 0
 
-	if len(data) >= 5 {
+	switch len(data) {
+	case 8:
+		v.HasBootloader = true
+		v.BootloaderVersion = data[5]
+		v.BootloaderChecksum = binary.BigEndian.Uint16(data[6:8])
+		fallthrough
+	case 5:
 		v.HasChecksum = true
 		v.Checksum = binary.BigEndian.Uint16(data[2:4])
 		v.Jumpers = data[4]
@@ -109,12 +117,6 @@ func ParseAdapterVersion(data []byte) (AdapterVersion, error) {
 		v.IsEthernet = v.Jumpers&0x04 != 0
 		v.IsHighSpeed = v.Jumpers&0x02 != 0
 		v.IsV31 = v.Jumpers&0x10 != 0
-	}
-
-	if len(data) >= 8 {
-		v.HasBootloader = true
-		v.BootloaderVersion = data[5]
-		v.BootloaderChecksum = binary.BigEndian.Uint16(data[6:8])
 	}
 
 	return v, nil

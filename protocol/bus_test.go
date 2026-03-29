@@ -137,6 +137,41 @@ func (t *collisionOnceTransport) Close() error {
 	return nil
 }
 
+type gatingTransport struct {
+	mu sync.Mutex
+
+	writes       [][]byte
+	writeStarted chan struct{}
+	releaseRead  chan struct{}
+	writeOnce    sync.Once
+}
+
+func newGatingTransport() *gatingTransport {
+	return &gatingTransport{
+		writeStarted: make(chan struct{}),
+		releaseRead:  make(chan struct{}),
+	}
+}
+
+func (t *gatingTransport) ReadByte() (byte, error) {
+	<-t.releaseRead
+	return 0, ebuserrors.ErrTimeout
+}
+
+func (t *gatingTransport) Write(payload []byte) (int, error) {
+	t.mu.Lock()
+	t.writes = append(t.writes, append([]byte(nil), payload...))
+	t.mu.Unlock()
+	t.writeOnce.Do(func() {
+		close(t.writeStarted)
+	})
+	return len(payload), nil
+}
+
+func (t *gatingTransport) Close() error {
+	return nil
+}
+
 func TestBus_BroadcastDoesNotReadAck(t *testing.T) {
 	t.Parallel()
 
@@ -463,6 +498,80 @@ func TestBus_NACKExhaustedWrapsSentinel(t *testing.T) {
 	_, err := bus.Send(ctx, frame)
 	if !errors.Is(err, ebuserrors.ErrNACK) {
 		t.Fatalf("Send error = %v; want ErrNACK", err)
+	}
+}
+
+func TestBus_RawTransportOpSkipsCanceledRequestContext(t *testing.T) {
+	tr := newGatingTransport()
+	config := protocol.BusConfig{
+		InitiatorTarget: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		InitiatorInitiator: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), time.Second)
+	defer sendCancel()
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := bus.Send(sendCtx, protocol.Frame{
+			Source:    0x10,
+			Target:    0x08,
+			Primary:   0x01,
+			Secondary: 0x02,
+			Data:      []byte{0x03},
+		})
+		sendDone <- err
+	}()
+
+	<-tr.writeStarted
+
+	opCtx, opCancel := context.WithCancel(context.Background())
+	opDone := make(chan error, 1)
+	rawExecuted := make(chan struct{}, 1)
+	go func() {
+		opDone <- bus.RawTransportOp(opCtx, func(transport.RawTransport) error {
+			rawExecuted <- struct{}{}
+			return nil
+		})
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	opCancel()
+
+	select {
+	case err := <-opDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RawTransportOp error = %v; want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for RawTransportOp to return")
+	}
+
+	close(tr.releaseRead)
+
+	select {
+	case err := <-sendDone:
+		if err == nil {
+			t.Fatal("Send error = nil; want timeout after release")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for Send to return")
+	}
+
+	select {
+	case <-rawExecuted:
+		t.Fatal("raw transport op executed after cancellation")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

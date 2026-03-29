@@ -166,6 +166,10 @@ func (b *Bus) runLoop(ctx context.Context) {
 		if request.transportOp != nil {
 			// Raw transport operation (e.g. INFO query) — execute directly,
 			// serialized with bus transactions since runLoop is single-threaded.
+			if err := b.contextError(ctx, request.ctx); err != nil {
+				request.transportOpResp <- err
+				continue
+			}
 			err := request.transportOp(b.transport)
 			request.transportOpResp <- err
 			continue
