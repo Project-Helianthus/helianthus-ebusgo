@@ -343,9 +343,6 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 
 	var err error
 	readDeadline := time.Time{}
-	if t.readTimeout > 0 {
-		readDeadline = time.Now().Add(t.readTimeout)
-	}
 	defer func() {
 		if err != nil {
 			t.parser.Reset()
@@ -379,6 +376,9 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	if written != len(seq) {
 		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
 		return nil, err
+	}
+	if t.readTimeout > 0 {
+		readDeadline = time.Now().Add(t.readTimeout)
 	}
 
 	// Read response: first INFO frame has length, then N data frames.

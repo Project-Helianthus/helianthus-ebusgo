@@ -192,6 +192,54 @@ func TestENHTransport_RequestInfoTimesOutUnderContinuousReceivedChatter(t *testi
 	}
 }
 
+func TestENHTransport_RequestInfoStartsTimeoutAfterRequestWriteCompletes(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENSTransport(client, 100*time.Millisecond, time.Second)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		time.Sleep(200 * time.Millisecond)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInfo, byte(transport.AdapterInfoVersion))
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected info request")
+			return
+		}
+
+		length := transport.EncodeENH(transport.ENHResInfo, 0x02)
+		first := transport.EncodeENH(transport.ENHResInfo, 0x23)
+		second := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		response := append(append(length[:], first[:]...), second[:]...)
+		_, err := server.Write(response)
+		serverErr <- err
+	}()
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v; want success after delayed write", err)
+	}
+	if len(got) != 2 || got[0] != 0x23 || got[1] != 0x01 {
+		t.Fatalf("RequestInfo payload = %v; want [0x23 0x01]", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestENHTransport_RequestInfoKeepsTrailingReceivedByteInSameBatch(t *testing.T) {
 	t.Parallel()
 
