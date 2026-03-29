@@ -346,7 +346,12 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	defer func() {
 		if err != nil {
 			t.parser.Reset()
-			t.pending = nil
+			// Preserve buffered bus bytes on timeout/error so they are not
+			// silently dropped. Only clear pending on fatal transport errors
+			// where the parser state is unrecoverable.
+			if errors.Is(err, ebuserrors.ErrTransportClosed) {
+				t.pending = nil
+			}
 		}
 	}()
 
