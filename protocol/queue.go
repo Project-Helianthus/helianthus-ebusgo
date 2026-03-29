@@ -53,9 +53,15 @@ func (q *priorityQueue) Pop() any {
 }
 
 func (q *priorityQueue) push(request *busRequest) {
+	pri := request.frame.Source
+	if request.transportOp != nil {
+		// Raw transport ops (e.g. INFO queries) use lowest priority so they
+		// don't preempt already-queued bus frame sends.
+		pri = 0xFF
+	}
 	item := &queueItem{
 		request:  request,
-		priority: request.frame.Source,
+		priority: pri,
 		seq:      q.seq,
 	}
 	q.seq++
