@@ -26,7 +26,7 @@ func EscapeBytes(raw []byte) []byte {
 // Data must be 0–255 bytes (NN is a single byte).
 func EncodeSlaveResponse(data []byte) ([]byte, error) {
 	if len(data) > 255 {
-		return nil, fmt.Errorf("slave response data length %d exceeds 255: %w", len(data), ebuserrors.ErrInvalidPayload)
+		return nil, fmt.Errorf("target response data length %d exceeds 255: %w", len(data), ebuserrors.ErrInvalidPayload)
 	}
 	segment := make([]byte, 0, len(data)+2)
 	segment = append(segment, byte(len(data)))

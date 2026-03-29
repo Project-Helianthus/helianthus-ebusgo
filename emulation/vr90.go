@@ -32,7 +32,7 @@ var (
 )
 
 type VR90Profile struct {
-	// Address is the eBUS slave address for this device. Required — must be
+	// Address is the eBUS target address for this device. Required - must be
 	// set explicitly. Address is installation-specific; there is no safe default.
 	Address             byte
 	Manufacturer        byte

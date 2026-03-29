@@ -547,7 +547,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
 	}
 
-	// eBUS slave response: NN DB1..DBn CRC (no header — QQ/ZZ/PB/SB are
+	// eBUS target response: NN DB1..DBn CRC (no header - QQ/ZZ/PB/SB are
 	// inferred from the initiator telegram).
 	var data []byte
 	for respAttempt := 0; respAttempt < 2; respAttempt++ {

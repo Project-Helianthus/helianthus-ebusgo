@@ -342,6 +342,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	defer t.readMu.Unlock()
 
 	var err error
+	readDeadline := time.Time{}
 	defer func() {
 		if err != nil {
 			t.parser.Reset()
@@ -376,6 +377,9 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
 		return nil, err
 	}
+	if t.readTimeout > 0 {
+		readDeadline = time.Now().Add(t.readTimeout)
+	}
 
 	// Read response: first INFO frame has length, then N data frames.
 	payloadLen := -1
@@ -384,7 +388,16 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	resetBeforeCompletion := false
 
 	for {
-		if err = t.setReadDeadline(); err != nil {
+		if !readDeadline.IsZero() && time.Now().After(readDeadline) {
+			err = fmt.Errorf("enh info exchange deadline exceeded: %w", ebuserrors.ErrTimeout)
+			return nil, err
+		}
+		if readDeadline.IsZero() {
+			err = t.conn.SetReadDeadline(time.Time{})
+		} else {
+			err = t.conn.SetReadDeadline(readDeadline)
+		}
+		if err != nil {
 			err = t.mapReadError(err)
 			return nil, err
 		}

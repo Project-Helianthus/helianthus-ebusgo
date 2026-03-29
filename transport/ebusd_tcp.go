@@ -155,7 +155,7 @@ func (t *EbusdTCPTransport) Write(payload []byte) (int, error) {
 			continue
 		}
 
-		// Slave response on the wire: NN DB1..DBn CRC (no header —
+		// Target response on the wire: NN DB1..DBn CRC (no header -
 		// QQ/ZZ/PB/SB are inferred by the bus layer from the request).
 		response := make([]byte, 0, 2+len(respPayload))
 		response = append(response, byte(len(respPayload)))

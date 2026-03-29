@@ -70,7 +70,7 @@ func isValidAddress(addr byte) bool {
 }
 
 // IsInitiatorCapableAddress reports whether addr is a valid eBUS initiator
-// (master) address according to the eBUS address table.
+// (initiator) address according to the eBUS address table.
 func IsInitiatorCapableAddress(addr byte) bool {
 	return initiatorPartIndex(addr&0x0F) > 0 && initiatorPartIndex((addr&0xF0)>>4) > 0
 }

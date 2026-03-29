@@ -130,6 +130,116 @@ func TestENHTransport_RequestInfo(t *testing.T) {
 	}
 }
 
+func TestENHTransport_RequestInfoTimesOutUnderContinuousReceivedChatter(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENSTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInfo, byte(transport.AdapterInfoVersion))
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected info request")
+			return
+		}
+
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+
+		received := transport.EncodeENH(transport.ENHResReceived, 0x55)
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			<-ticker.C
+			if _, err := server.Write(received[:]); err != nil {
+				if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+					serverErr <- nil
+					return
+				}
+				serverErr <- err
+				return
+			}
+		}
+		serverErr <- nil
+	}()
+
+	start := time.Now()
+	_, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err == nil {
+		t.Fatal("RequestInfo error = nil; want timeout")
+	}
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("RequestInfo error = %v; want ErrTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 450*time.Millisecond {
+		t.Fatalf("RequestInfo elapsed = %s; want bounded timeout before 450ms", elapsed)
+	}
+	_ = client.Close()
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_RequestInfoStartsTimeoutAfterRequestWriteCompletes(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENSTransport(client, 100*time.Millisecond, time.Second)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		time.Sleep(200 * time.Millisecond)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInfo, byte(transport.AdapterInfoVersion))
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected info request")
+			return
+		}
+
+		length := transport.EncodeENH(transport.ENHResInfo, 0x02)
+		first := transport.EncodeENH(transport.ENHResInfo, 0x23)
+		second := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		response := append(append(length[:], first[:]...), second[:]...)
+		_, err := server.Write(response)
+		serverErr <- err
+	}()
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v; want success after delayed write", err)
+	}
+	if len(got) != 2 || got[0] != 0x23 || got[1] != 0x01 {
+		t.Fatalf("RequestInfo payload = %v; want [0x23 0x01]", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestENHTransport_RequestInfoKeepsTrailingReceivedByteInSameBatch(t *testing.T) {
 	t.Parallel()
 
