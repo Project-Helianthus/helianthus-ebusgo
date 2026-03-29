@@ -81,10 +81,6 @@ type Bus struct {
 	observerFault   ObserverFaultSnapshot
 
 	outCap int
-
-	// inTransportOp guards against re-entrant RawTransportOp calls from
-	// within a transport op callback (which would deadlock the run loop).
-	inTransportOp atomic.Bool
 }
 
 // NewBus initializes a Bus with transport, config, and optional queue capacity.
@@ -172,14 +168,13 @@ func (b *Bus) runLoop(ctx context.Context) {
 		if request.transportOp != nil {
 			// Raw transport operation (e.g. INFO query) — execute directly,
 			// serialized with bus transactions since runLoop is single-threaded.
+			// The callback must not call Bus.Send or RawTransportOp (deadlock).
 			if err := b.contextError(ctx, request.ctx); err != nil {
 				request.transportOpResp <- err
 				continue
 			}
-			b.inTransportOp.Store(true)
 			request.transportOpStarted.Store(true)
 			err := request.transportOp(b.transport)
-			b.inTransportOp.Store(false)
 			request.transportOpResp <- err
 			continue
 		}
@@ -205,9 +200,6 @@ func (b *Bus) RawTransportOp(ctx context.Context, fn func(transport.RawTransport
 	}
 	if fn == nil {
 		return fmt.Errorf("ebus: raw transport op function is nil")
-	}
-	if b.inTransportOp.Load() {
-		return fmt.Errorf("ebus: re-entrant RawTransportOp call from within a transport op callback")
 	}
 
 	b.queueMu.Lock()
