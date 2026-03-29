@@ -342,6 +342,10 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	defer t.readMu.Unlock()
 
 	var err error
+	readDeadline := time.Time{}
+	if t.readTimeout > 0 {
+		readDeadline = time.Now().Add(t.readTimeout)
+	}
 	defer func() {
 		if err != nil {
 			t.parser.Reset()
@@ -384,7 +388,16 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	resetBeforeCompletion := false
 
 	for {
-		if err = t.setReadDeadline(); err != nil {
+		if !readDeadline.IsZero() && time.Now().After(readDeadline) {
+			err = fmt.Errorf("enh info exchange deadline exceeded: %w", ebuserrors.ErrTimeout)
+			return nil, err
+		}
+		if readDeadline.IsZero() {
+			err = t.conn.SetReadDeadline(time.Time{})
+		} else {
+			err = t.conn.SetReadDeadline(readDeadline)
+		}
+		if err != nil {
 			err = t.mapReadError(err)
 			return nil, err
 		}
