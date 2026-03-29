@@ -401,8 +401,9 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						// First INFO response: length byte.
 						payloadLen = int(msg.Data)
 						if payloadLen == 0 {
-							payload = []byte{}
 							payloadComplete = true
+							payload = []byte{}
+							continue
 						}
 						payload = make([]byte, 0, payloadLen)
 					} else {

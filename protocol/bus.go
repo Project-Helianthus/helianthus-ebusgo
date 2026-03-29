@@ -194,6 +194,9 @@ func (b *Bus) RawTransportOp(ctx context.Context, fn func(transport.RawTransport
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if fn == nil {
+		return fmt.Errorf("ebus: raw transport op function is nil")
+	}
 
 	b.queueMu.Lock()
 	if b.closed {

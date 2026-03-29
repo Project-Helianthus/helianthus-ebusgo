@@ -575,6 +575,62 @@ func TestBus_RawTransportOpSkipsCanceledRequestContext(t *testing.T) {
 	}
 }
 
+func TestBus_RawTransportOpRejectsNilCallbackWhileBusy(t *testing.T) {
+	tr := newGatingTransport()
+	config := protocol.BusConfig{
+		InitiatorTarget: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		InitiatorInitiator: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+	}
+	bus := protocol.NewBus(tr, config, 8)
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), time.Second)
+	defer sendCancel()
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := bus.Send(sendCtx, protocol.Frame{
+			Source:    0x10,
+			Target:    0x08,
+			Primary:   0x01,
+			Secondary: 0x02,
+			Data:      []byte{0x03},
+		})
+		sendDone <- err
+	}()
+
+	<-tr.writeStarted
+
+	opCtx, opCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer opCancel()
+	err := bus.RawTransportOp(opCtx, nil)
+	if err == nil {
+		t.Fatal("RawTransportOp error = nil; want nil callback rejection")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RawTransportOp error = %v; want immediate nil callback rejection", err)
+	}
+
+	close(tr.releaseRead)
+
+	select {
+	case err := <-sendDone:
+		if err == nil {
+			t.Fatal("Send error = nil; want timeout after read release")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for Send to return")
+	}
+}
+
 type arbitratingScriptedTransport struct {
 	mu sync.Mutex
 
