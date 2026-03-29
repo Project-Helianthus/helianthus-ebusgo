@@ -130,6 +130,121 @@ func TestENHTransport_RequestInfo(t *testing.T) {
 	}
 }
 
+func TestENHTransport_RequestInfoKeepsTrailingReceivedByteInSameBatch(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInfo, byte(transport.AdapterInfoVersion))
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected info request")
+			return
+		}
+
+		length := transport.EncodeENH(transport.ENHResInfo, 0x02)
+		first := transport.EncodeENH(transport.ENHResInfo, 0x23)
+		second := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		trailing := transport.EncodeENH(transport.ENHResReceived, 0x99)
+		response := append(append(append(length[:], first[:]...), second[:]...), trailing[:]...)
+		_, err := server.Write(response)
+		serverErr <- err
+	}()
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v", err)
+	}
+	if len(got) != 2 || got[0] != 0x23 || got[1] != 0x01 {
+		t.Fatalf("RequestInfo payload = %v; want [0x23 0x01]", got)
+	}
+
+	gotByte, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after RequestInfo error = %v", err)
+	}
+	if gotByte != 0x99 {
+		t.Fatalf("ReadByte after RequestInfo = 0x%02x; want 0x99", gotByte)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_RequestInfoKeepsTrailingResetInSameBatch(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInfo, byte(transport.AdapterInfoVersion))
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected info request")
+			return
+		}
+
+		length := transport.EncodeENH(transport.ENHResInfo, 0x02)
+		first := transport.EncodeENH(transport.ENHResInfo, 0x23)
+		second := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		trailingReset := transport.EncodeENH(transport.ENHResResetted, 0x00)
+		response := append(append(append(length[:], first[:]...), second[:]...), trailingReset[:]...)
+		_, err := server.Write(response)
+		serverErr <- err
+	}()
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v", err)
+	}
+	if len(got) != 2 || got[0] != 0x23 || got[1] != 0x01 {
+		t.Fatalf("RequestInfo payload = %v; want [0x23 0x01]", got)
+	}
+
+	reader, ok := interface{}(enh).(transport.StreamEventReader)
+	if !ok {
+		t.Fatal("ENH transport does not implement StreamEventReader")
+	}
+
+	event, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent after RequestInfo error = %v", err)
+	}
+	if event.Kind != transport.StreamEventReset {
+		t.Fatalf("ReadEvent after RequestInfo kind = %v; want StreamEventReset", event.Kind)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
 	t.Parallel()
 

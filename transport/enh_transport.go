@@ -368,6 +368,8 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	// Read response: first INFO frame has length, then N data frames.
 	payloadLen := -1
 	var payload []byte
+	payloadComplete := false
+	resetBeforeCompletion := false
 
 	for {
 		if err := t.setReadDeadline(); err != nil {
@@ -399,14 +401,17 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						// First INFO response: length byte.
 						payloadLen = int(msg.Data)
 						if payloadLen == 0 {
-							return []byte{}, nil
+							payload = []byte{}
+							payloadComplete = true
 						}
 						payload = make([]byte, 0, payloadLen)
 					} else {
 						// Subsequent INFO responses: data bytes.
-						payload = append(payload, msg.Data)
-						if len(payload) >= payloadLen {
-							return payload, nil
+						if len(payload) < payloadLen {
+							payload = append(payload, msg.Data)
+							if len(payload) >= payloadLen {
+								payloadComplete = true
+							}
 						}
 					}
 				case ENHResReceived:
@@ -414,13 +419,22 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					t.pending = append(t.pending, msg.Data)
 				case ENHResResetted:
 					t.surfaceResetLocked()
-					return nil, fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrTransportClosed)
+					if !payloadComplete {
+						resetBeforeCompletion = true
+					}
 				case ENHResErrorEBUS:
 					return nil, fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 				case ENHResErrorHost:
 					return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 				}
 			}
+		}
+
+		if resetBeforeCompletion {
+			return nil, fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrTransportClosed)
+		}
+		if payloadComplete {
+			return payload, nil
 		}
 	}
 }
