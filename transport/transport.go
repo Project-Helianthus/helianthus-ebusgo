@@ -37,3 +37,10 @@ type StreamEvent struct {
 type StreamEventReader interface {
 	ReadEvent() (StreamEvent, error)
 }
+
+// InfoRequester is an optional extension implemented by transports that support
+// enhanced protocol INFO queries for adapter hardware telemetry and identity.
+// Plain TCP and UDP transports do not implement this interface.
+type InfoRequester interface {
+	RequestInfo(id AdapterInfoID) ([]byte, error)
+}

@@ -331,6 +331,132 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 	}
 }
 
+// RequestInfo sends an INFO request for the given ID and returns the raw
+// response payload. The exchange is transport-exclusive: both readMu and writeMu
+// are held for the duration to prevent interleaving with bus operations.
+//
+// Returns ErrTimeout if the response does not arrive within readTimeout.
+// Returns ErrTransportClosed if a RESETTED frame is received mid-exchange.
+func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+
+	var err error
+	defer func() {
+		if err != nil {
+			t.parser.Reset()
+			t.pending = nil
+		}
+	}()
+
+	// Send the INFO request.
+	t.writeMu.Lock()
+	seq := EncodeENH(ENHReqInfo, byte(id))
+	written := 0
+	for written < len(seq) {
+		if err = t.setWriteDeadline(); err != nil {
+			t.writeMu.Unlock()
+			err = t.mapWriteError(err)
+			return nil, err
+		}
+		var n int
+		n, err = t.conn.Write(seq[written:])
+		written += n
+		if err != nil {
+			t.writeMu.Unlock()
+			err = t.mapWriteError(err)
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	t.writeMu.Unlock()
+	if written != len(seq) {
+		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
+		return nil, err
+	}
+
+	// Read response: first INFO frame has length, then N data frames.
+	payloadLen := -1
+	var payload []byte
+	payloadComplete := false
+	resetBeforeCompletion := false
+
+	for {
+		if err = t.setReadDeadline(); err != nil {
+			err = t.mapReadError(err)
+			return nil, err
+		}
+
+		var n int
+		n, err = t.conn.Read(t.buffer)
+		if err != nil {
+			err = t.mapReadError(err)
+			return nil, err
+		}
+		if n == 0 {
+			continue
+		}
+
+		msgs, parseErr := t.parser.Parse(t.buffer[:n])
+		if parseErr != nil {
+			err = parseErr
+			return nil, err
+		}
+
+		for _, msg := range msgs {
+			switch msg.Kind {
+			case ENHMessageData:
+				// Bus byte received during INFO exchange — queue it.
+				t.pending = append(t.pending, msg.Byte)
+			case ENHMessageFrame:
+				switch msg.Command {
+				case ENHResInfo:
+					if payloadLen < 0 {
+						// First INFO response: length byte.
+						payloadLen = int(msg.Data)
+						if payloadLen == 0 {
+							payloadComplete = true
+							payload = []byte{}
+							continue
+						}
+						payload = make([]byte, 0, payloadLen)
+					} else {
+						// Subsequent INFO responses: data bytes.
+						if len(payload) < payloadLen {
+							payload = append(payload, msg.Data)
+							if len(payload) >= payloadLen {
+								payloadComplete = true
+							}
+						}
+					}
+				case ENHResReceived:
+					// Bus byte received during INFO — queue it.
+					t.pending = append(t.pending, msg.Data)
+				case ENHResResetted:
+					t.surfaceResetLocked()
+					if !payloadComplete {
+						resetBeforeCompletion = true
+					}
+				case ENHResErrorEBUS:
+					return nil, fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				case ENHResErrorHost:
+					return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				}
+			}
+		}
+
+		if resetBeforeCompletion {
+			err = fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrTransportClosed)
+			return nil, err
+		}
+		if payloadComplete {
+			return payload, nil
+		}
+	}
+}
+
 func (t *ENHTransport) Close() error {
 	return t.conn.Close()
 }
@@ -435,3 +561,4 @@ func isClosed(err error) bool {
 
 var _ RawTransport = (*ENHTransport)(nil)
 var _ StreamEventReader = (*ENHTransport)(nil)
+var _ InfoRequester = (*ENHTransport)(nil)

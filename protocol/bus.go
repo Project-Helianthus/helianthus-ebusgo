@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
@@ -41,6 +42,13 @@ type busRequest struct {
 	frame Frame
 	ctx   context.Context
 	resp  chan busResult
+
+	// transportOp, when non-nil, marks this as a raw transport operation
+	// rather than a bus frame send. The run loop calls fn(transport) instead
+	// of handleRequest. Used by RawTransportOp for INFO queries.
+	transportOp        func(transport.RawTransport) error
+	transportOpResp    chan error
+	transportOpStarted atomic.Bool
 }
 
 type busResult struct {
@@ -157,8 +165,68 @@ func (b *Bus) runLoop(ctx context.Context) {
 			}
 		}
 
+		if request.transportOp != nil {
+			// Raw transport operation (e.g. INFO query) — execute directly,
+			// serialized with bus transactions since runLoop is single-threaded.
+			if err := b.contextError(ctx, request.ctx); err != nil {
+				request.transportOpResp <- err
+				continue
+			}
+			request.transportOpStarted.Store(true)
+			err := request.transportOp(b.transport)
+			request.transportOpResp <- err
+			continue
+		}
+
 		result := b.handleRequest(ctx, request)
 		request.resp <- result
+	}
+}
+
+// RawTransportOp enqueues a function to execute directly on the raw transport,
+// serialized with bus frame transactions. Use this for transport-level operations
+// (e.g., ENH INFO queries) that bypass bus arbitration but must not interleave
+// with active bus I/O.
+//
+// The function receives the Bus's transport and runs on the bus run loop goroutine.
+// It must not call Bus.Send or other Bus methods (deadlock).
+func (b *Bus) RawTransportOp(ctx context.Context, fn func(transport.RawTransport) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if fn == nil {
+		return fmt.Errorf("ebus: raw transport op function is nil")
+	}
+
+	b.queueMu.Lock()
+	if b.closed {
+		b.queueMu.Unlock()
+		return ebuserrors.ErrTransportClosed
+	}
+	op := &busRequest{
+		ctx:             ctx,
+		transportOp:     fn,
+		transportOpResp: make(chan error, 1),
+	}
+	b.queue.push(op)
+	b.queueMu.Unlock()
+
+	select {
+	case b.notify <- struct{}{}:
+	default:
+	}
+
+	select {
+	case err := <-op.transportOpResp:
+		return err
+	case <-ctx.Done():
+		if op.transportOpStarted.Load() {
+			return <-op.transportOpResp
+		}
+		return ctx.Err()
 	}
 }
 
