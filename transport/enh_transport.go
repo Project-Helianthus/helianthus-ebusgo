@@ -154,7 +154,7 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 	for {
 		if t.resets > 0 {
 			t.resets--
-			continue
+			return 0, ebuserrors.ErrAdapterReset
 		}
 
 		if len(t.pending) > 0 {
@@ -299,6 +299,8 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 					// state machine will resync after arbitration completes.
 				case ENHResResetted:
 					t.resetStateLocked()
+					arbitrationDone = true
+					arbitrationErr = fmt.Errorf("enh adapter reset during arbitration (features 0x%02x): %w", msg.Data, ebuserrors.ErrAdapterReset)
 				case ENHResStarted:
 					if msg.Data == initiator {
 						arbitrationDone = true
@@ -336,7 +338,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 // are held for the duration to prevent interleaving with bus operations.
 //
 // Returns ErrTimeout if the response does not arrive within readTimeout.
-// Returns ErrTransportClosed if a RESETTED frame is received mid-exchange.
+// Returns ErrAdapterReset if a RESETTED frame is received mid-exchange.
 func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -466,7 +468,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		}
 
 		if resetBeforeCompletion {
-			err = fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrTransportClosed)
+			err = fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrAdapterReset)
 			return nil, err
 		}
 		if payloadComplete {

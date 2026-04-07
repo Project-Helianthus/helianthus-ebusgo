@@ -439,7 +439,7 @@ func TestENHTransport_RequestInfoResetsParserStateAfterTimeoutAndContinues(t *te
 	}
 }
 
-func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
+func TestENHTransport_ReadByteReturnsErrAdapterResetOnResetBoundary(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -467,13 +467,60 @@ func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
 	if _, err := enh.Write([]byte{0x11}); err != nil {
 		t.Fatalf("Write error = %v", err)
 	}
+
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("ReadByte error = %v; want ErrAdapterReset", err)
+	}
+
 	got, err := enh.ReadByte()
 	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
+		t.Fatalf("ReadByte after reset error = %v", err)
 	}
 	if got != 0x11 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x11", got)
+		t.Fatalf("ReadByte after reset = 0x%02x; want 0x11", got)
 	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_StartArbitrationResettedReturnsErrAdapterReset(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+
+		resetted := transport.EncodeENH(transport.ENHResResetted, 0x01)
+		_, err := server.Write(resetted[:])
+		serverErr <- err
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("StartArbitration error = %v; want ErrAdapterReset", err)
+	}
+
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
 	}
