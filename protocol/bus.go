@@ -277,6 +277,12 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 				b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
+				if errors.Is(err, ebuserrors.ErrAdapterReset) {
+					if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+						b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
+						return nil, b.wrapRetryError(waitErr)
+					}
+				}
 				continue
 			}
 			b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))

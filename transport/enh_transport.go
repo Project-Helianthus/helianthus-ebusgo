@@ -349,9 +349,10 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		if err != nil {
 			t.parser.Reset()
 			// Preserve buffered bus bytes on timeout/error so they are not
-			// silently dropped. Only clear pending on fatal transport errors
-			// where the parser state is unrecoverable.
-			if errors.Is(err, ebuserrors.ErrTransportClosed) {
+			// silently dropped. Clear pending on fatal transport errors and
+			// adapter resets where the parser state is unrecoverable or bytes
+			// from the same TCP segment after RESETTED would be stale.
+			if errors.Is(err, ebuserrors.ErrTransportClosed) || errors.Is(err, ebuserrors.ErrAdapterReset) {
 				t.pending = nil
 			}
 		}
