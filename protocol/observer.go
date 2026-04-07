@@ -38,6 +38,7 @@ const (
 	BusOutcomeCRCMismatch
 	BusOutcomeEchoMismatch
 	BusOutcomeCollision
+	BusOutcomeAdapterReset
 	BusOutcomeObserverFault
 )
 
@@ -50,6 +51,7 @@ const (
 	BusRetryReasonNACK
 	BusRetryReasonCRCMismatch
 	BusRetryReasonCollision
+	BusRetryReasonAdapterReset
 )
 
 // BusEvent is the stable, TinyGo-safe observer payload used by later observe-

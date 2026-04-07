@@ -354,6 +354,12 @@ func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts in
 		}
 		return false, timeoutAttempts, nackAttempts
 	}
+	if errors.Is(err, ebuserrors.ErrAdapterReset) {
+		if timeoutAttempts < policy.TimeoutRetries {
+			return true, timeoutAttempts + 1, nackAttempts
+		}
+		return false, timeoutAttempts, nackAttempts
+	}
 	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		if timeoutAttempts < policy.TimeoutRetries {
 			return true, timeoutAttempts + 1, nackAttempts
@@ -389,6 +395,9 @@ func (b *Bus) wrapRetryError(err error) error {
 	}
 	if errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		return fmt.Errorf("bus send crc mismatch: %w", err)
+	}
+	if errors.Is(err, ebuserrors.ErrAdapterReset) {
+		return fmt.Errorf("bus send adapter reset: %w", err)
 	}
 	if errors.Is(err, ebuserrors.ErrTransportClosed) {
 		return fmt.Errorf("bus transport closed: %w", err)
@@ -957,6 +966,8 @@ func busOutcomeFromError(err error) BusOutcomeClass {
 			return BusOutcomeEchoMismatch
 		}
 		return BusOutcomeCollision
+	case errors.Is(err, ebuserrors.ErrAdapterReset):
+		return BusOutcomeAdapterReset
 	default:
 		return BusOutcomeUnknown
 	}
@@ -972,6 +983,8 @@ func busRetryReasonFromError(err error) BusRetryReason {
 		return BusRetryReasonCRCMismatch
 	case BusOutcomeCollision, BusOutcomeEchoMismatch:
 		return BusRetryReasonCollision
+	case BusOutcomeAdapterReset:
+		return BusRetryReasonAdapterReset
 	default:
 		return BusRetryReasonUnknown
 	}
