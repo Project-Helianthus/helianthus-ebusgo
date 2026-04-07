@@ -38,8 +38,8 @@ const (
 	BusOutcomeCRCMismatch
 	BusOutcomeEchoMismatch
 	BusOutcomeCollision
-	BusOutcomeAdapterReset
 	BusOutcomeObserverFault
+	BusOutcomeAdapterReset
 )
 
 // BusRetryReason identifies why the bus is retrying a logical request.
