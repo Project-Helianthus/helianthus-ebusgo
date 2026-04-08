@@ -15,6 +15,7 @@ var (
 	ErrRetryExhausted  = stderrors.New("ebus: retries exhausted")
 	ErrInvalidPayload  = stderrors.New("ebus: payload does not match expected schema")
 	ErrTransportClosed = stderrors.New("ebus: transport connection closed")
+	ErrAdapterReset    = stderrors.New("ebus: adapter reset during operation")
 )
 
 type Code string
@@ -29,6 +30,7 @@ const (
 	CodeRetryExhausted  Code = "RETRY_EXHAUSTED"
 	CodeCRCMismatch     Code = "CRC_MISMATCH"
 	CodeTransportClosed Code = "TRANSPORT_CLOSED"
+	CodeAdapterReset   Code = "ADAPTER_RESET"
 )
 
 type Category string
@@ -75,6 +77,8 @@ func NormalizeErrorCode(err error) Code {
 		return CodeCRCMismatch
 	case stderrors.Is(err, ErrTransportClosed):
 		return CodeTransportClosed
+	case stderrors.Is(err, ErrAdapterReset):
+		return CodeAdapterReset
 	default:
 		return CodeUnknown
 	}
@@ -120,7 +124,7 @@ func categoryForCode(code Code) Category {
 		return CategoryInvalid
 	case CodeNoSuchDevice, CodeNACK:
 		return CategoryDefinitive
-	case CodeTimeout, CodeBusCollision, CodeRetryExhausted, CodeCRCMismatch:
+	case CodeTimeout, CodeBusCollision, CodeRetryExhausted, CodeCRCMismatch, CodeAdapterReset:
 		return CategoryTransient
 	case CodeTransportClosed:
 		return CategoryFatal
@@ -133,7 +137,8 @@ func IsTransient(err error) bool {
 	return stderrors.Is(err, ErrBusCollision) ||
 		stderrors.Is(err, ErrTimeout) ||
 		stderrors.Is(err, ErrCRCMismatch) ||
-		stderrors.Is(err, ErrRetryExhausted)
+		stderrors.Is(err, ErrRetryExhausted) ||
+		stderrors.Is(err, ErrAdapterReset)
 }
 
 func IsDefinitive(err error) bool {

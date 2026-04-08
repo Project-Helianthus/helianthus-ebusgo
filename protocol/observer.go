@@ -24,6 +24,7 @@ const (
 	BusEventAttemptComplete
 	BusEventRequestComplete
 	BusEventObserverFault
+	BusEventAdapterReset
 )
 
 // BusOutcomeClass is the bounded transaction outcome vocabulary exposed to
@@ -39,6 +40,7 @@ const (
 	BusOutcomeEchoMismatch
 	BusOutcomeCollision
 	BusOutcomeObserverFault
+	BusOutcomeAdapterReset
 )
 
 // BusRetryReason identifies why the bus is retrying a logical request.
@@ -50,6 +52,7 @@ const (
 	BusRetryReasonNACK
 	BusRetryReasonCRCMismatch
 	BusRetryReasonCollision
+	BusRetryReasonAdapterReset
 )
 
 // BusEvent is the stable, TinyGo-safe observer payload used by later observe-

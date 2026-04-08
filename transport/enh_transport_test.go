@@ -439,7 +439,7 @@ func TestENHTransport_RequestInfoResetsParserStateAfterTimeoutAndContinues(t *te
 	}
 }
 
-func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
+func TestENHTransport_ReadByteReturnsErrAdapterResetOnResetBoundary(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -467,13 +467,60 @@ func TestENHTransport_ResetClearsEchoSuppression(t *testing.T) {
 	if _, err := enh.Write([]byte{0x11}); err != nil {
 		t.Fatalf("Write error = %v", err)
 	}
+
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("ReadByte error = %v; want ErrAdapterReset", err)
+	}
+
 	got, err := enh.ReadByte()
 	if err != nil {
-		t.Fatalf("ReadByte error = %v", err)
+		t.Fatalf("ReadByte after reset error = %v", err)
 	}
 	if got != 0x11 {
-		t.Fatalf("ReadByte = 0x%02x; want 0x11", got)
+		t.Fatalf("ReadByte after reset = 0x%02x; want 0x11", got)
 	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_StartArbitrationResettedReturnsErrAdapterReset(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+
+		resetted := transport.EncodeENH(transport.ENHResResetted, 0x01)
+		_, err := server.Write(resetted[:])
+		serverErr <- err
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("StartArbitration error = %v; want ErrAdapterReset", err)
+	}
+
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
 	}
@@ -835,5 +882,189 @@ func TestENSTransport_ArbitrationSourceInjectionFlag(t *testing.T) {
 	ens := transport.NewENSTransport(clientEns, 200*time.Millisecond, 200*time.Millisecond)
 	if !ens.ArbitrationSendsSource() {
 		t.Fatalf("ENS transport ArbitrationSendsSource = false; want true")
+	}
+}
+
+// --- Reconnection tests (FIX 1, 2) ---
+
+// enhMockDialer creates a mock dialer that returns new net.Pipe connections.
+// It also returns a channel of server-side pipe ends for test coordination.
+func enhMockDialer() (func() (net.Conn, error), chan net.Conn) {
+	servers := make(chan net.Conn, 8)
+	dial := func() (net.Conn, error) {
+		client, server := net.Pipe()
+		servers <- server
+		return client, nil
+	}
+	return dial, servers
+}
+
+// enhHandleINIT reads an INIT request from server and responds with RESETTED.
+func enhHandleINIT(t *testing.T, server net.Conn) {
+	t.Helper()
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(server, buf); err != nil {
+		t.Fatalf("INIT read error: %v", err)
+	}
+	want := transport.EncodeENH(transport.ENHReqInit, 0x01)
+	if buf[0] != want[0] || buf[1] != want[1] {
+		t.Fatalf("expected INIT request, got %02x %02x", buf[0], buf[1])
+	}
+	resp := transport.EncodeENH(transport.ENHResResetted, 0x01)
+	if _, err := server.Write(resp[:]); err != nil {
+		t.Fatalf("INIT response write error: %v", err)
+	}
+}
+
+func TestENHTransport_StartArbitrationResettedReconnects(t *testing.T) {
+	t.Parallel()
+
+	// Set up initial connection.
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+
+	dialFunc, newServers := enhMockDialer()
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond,
+		transport.WithDialFunc(dialFunc))
+
+	initiator := byte(0x15)
+
+	// Server goroutine: respond to START with RESETTED on the old connection.
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			done <- err
+			return
+		}
+		resetted := transport.EncodeENH(transport.ENHResResetted, 0x01)
+		if _, err := server.Write(resetted[:]); err != nil {
+			done <- err
+			return
+		}
+	}()
+
+	// Concurrently handle INIT on the new connection from reconnect.
+	go func() {
+		newServer := <-newServers
+		defer func() { _ = newServer.Close() }()
+		enhHandleINIT(t, newServer)
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("StartArbitration error = %v; want ErrAdapterReset", err)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_ReadByteResettedReconnects(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+
+	dialFunc, newServers := enhMockDialer()
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond,
+		transport.WithDialFunc(dialFunc))
+
+	// Concurrently handle INIT on the new connection from reconnect,
+	// then send a bus byte on the new connection.
+	go func() {
+		newServer := <-newServers
+		defer func() { _ = newServer.Close() }()
+		enhHandleINIT(t, newServer)
+		// Send a bus byte on the fresh connection.
+		if _, err := newServer.Write([]byte{0x42}); err != nil {
+			t.Errorf("new server write error: %v", err)
+		}
+	}()
+
+	// Send RESETTED on old connection in a goroutine — net.Pipe writes
+	// are synchronous and block until the reader (ReadByte) is ready.
+	go func() {
+		resetted := transport.EncodeENH(transport.ENHResResetted, 0x00)
+		_, _ = server.Write(resetted[:])
+	}()
+
+	// ReadByte should see ErrAdapterReset first (reconnect happened internally).
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("ReadByte error = %v; want ErrAdapterReset", err)
+	}
+
+	// Next ReadByte should succeed on the fresh connection.
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after reconnect error = %v", err)
+	}
+	if got != 0x42 {
+		t.Fatalf("ReadByte after reconnect = 0x%02x; want 0x42", got)
+	}
+}
+
+func TestENHTransport_ReconnectFallsBackWithoutDialFunc(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	// No WithDialFunc — backward-compatible parser-only reset.
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	resetted := transport.EncodeENH(transport.ENHResResetted, 0x00)
+	postReset := []byte{0x77}
+	payload := append(resetted[:], postReset...)
+	go func() {
+		_, _ = server.Write(payload)
+	}()
+
+	// Should still get ErrAdapterReset (parser reset path).
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("ReadByte error = %v; want ErrAdapterReset", err)
+	}
+
+	// Without reconnect, bytes after RESETTED on the SAME connection
+	// are still available (parser reset only, same TCP stream).
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after parser-only reset error = %v", err)
+	}
+	if got != 0x77 {
+		t.Fatalf("ReadByte after parser-only reset = 0x%02x; want 0x77", got)
+	}
+}
+
+func TestENHTransport_ReconnectImplementsReconnectable(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+
+	dialFunc, newServers := enhMockDialer()
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond,
+		transport.WithDialFunc(dialFunc))
+
+	// Verify the interface is implemented.
+	reconn, ok := interface{}(enh).(transport.Reconnectable)
+	if !ok {
+		t.Fatal("ENHTransport does not implement Reconnectable")
+	}
+
+	// Handle INIT on new connection.
+	go func() {
+		newServer := <-newServers
+		defer func() { _ = newServer.Close() }()
+		enhHandleINIT(t, newServer)
+	}()
+
+	if err := reconn.Reconnect(); err != nil {
+		t.Fatalf("Reconnect error = %v", err)
 	}
 }

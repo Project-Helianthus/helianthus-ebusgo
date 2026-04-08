@@ -44,3 +44,15 @@ type StreamEventReader interface {
 type InfoRequester interface {
 	RequestInfo(id AdapterInfoID) ([]byte, error)
 }
+
+// Reconnectable is an optional extension implemented by transports that can
+// tear down and re-establish their underlying connection mid-session. This is
+// used by the protocol layer to recover from dead TCP connections (timeout
+// exhaustion) without restarting the entire bus lifecycle.
+//
+// Reconnect closes the current connection, dials a new one, and performs any
+// required handshake (e.g. ENH INIT). It returns ErrTransportClosed (wrapped)
+// if reconnection fails.
+type Reconnectable interface {
+	Reconnect() error
+}
