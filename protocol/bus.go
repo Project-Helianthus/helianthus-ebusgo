@@ -19,6 +19,13 @@ const defaultQueueCapacity = 64
 // guarantee bus traffic will resume, so we use a fixed delay.
 const adapterResetRetryDelay = 200 * time.Millisecond
 
+// collisionBackoffFloor is the minimum delay between an arbitration FAILED
+// and the next START request. The PIC16F firmware has a race in
+// protocol_state_dispatch where rapid START floods bypass the 60-tick scan
+// deadline and cause transient eBUS signal loss. 50ms lets the firmware
+// flush its FAILED response, apply the deadline, and reset the UART state.
+const collisionBackoffFloor = 50 * time.Millisecond
+
 type RetryPolicy struct {
 	TimeoutRetries int
 	NACKRetries    int
@@ -28,6 +35,15 @@ type BusConfig struct {
 	InitiatorTarget    RetryPolicy
 	InitiatorInitiator RetryPolicy
 	Observer           BusObserver
+
+	// ReconnectRetries is the maximum number of transport reconnection
+	// attempts when timeout retries are exhausted. Each successful reconnect
+	// resets the per-request timeout retry budget. Set to 0 to disable
+	// reconnection (default: 3).
+	ReconnectRetries int
+	// ReconnectDelay is the stabilization delay before each reconnect
+	// attempt, giving the adapter time to finish rebooting (default: 2s).
+	ReconnectDelay time.Duration
 }
 
 func DefaultBusConfig() BusConfig {
@@ -40,6 +56,8 @@ func DefaultBusConfig() BusConfig {
 			TimeoutRetries: 2,
 			NACKRetries:    1,
 		},
+		ReconnectRetries: 3,
+		ReconnectDelay:   2 * time.Second,
 	}
 }
 
@@ -252,6 +270,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 
 	timeoutAttempts := 0
 	nackAttempts := 0
+	reconnectAttempts := 0
 	allowUnboundedCollision := isBoundedContext(request.ctx)
 	attemptCount := uint16(0)
 
@@ -270,6 +289,16 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 					timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 					b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
+					// 50ms backoff floor for PIC16F firmware race: the firmware
+					// needs time to flush FAILED, apply its scan deadline, and
+					// reset UART state before accepting a new START.
+					select {
+					case <-time.After(collisionBackoffFloor):
+					case <-runCtx.Done():
+						return nil, b.wrapRetryError(runCtx.Err())
+					case <-request.ctx.Done():
+						return nil, b.wrapRetryError(request.ctx.Err())
+					}
 					if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
 						b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
 						return nil, b.wrapRetryError(waitErr)
@@ -296,6 +325,11 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				}
 				continue
 			}
+			// Retry budget exhausted — try transport reconnect for
+			// timeout-class errors before giving up.
+			if b.tryTransportReconnect(runCtx, request, err, &timeoutAttempts, &reconnectAttempts) {
+				continue
+			}
 			b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 			return nil, b.wrapRetryError(err)
 		}
@@ -309,6 +343,14 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 			b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
+				// 50ms backoff floor for PIC16F firmware race (post-transaction).
+				select {
+				case <-time.After(collisionBackoffFloor):
+				case <-runCtx.Done():
+					return nil, b.wrapRetryError(runCtx.Err())
+				case <-request.ctx.Done():
+					return nil, b.wrapRetryError(request.ctx.Err())
+				}
 				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
 					b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
 					return nil, b.wrapRetryError(waitErr)
@@ -325,9 +367,54 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			}
 			continue
 		}
+		// Retry budget exhausted — try transport reconnect for
+		// timeout-class errors before giving up.
+		if b.tryTransportReconnect(runCtx, request, err, &timeoutAttempts, &reconnectAttempts) {
+			continue
+		}
 		b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 		return nil, b.wrapRetryError(err)
 	}
+}
+
+// tryTransportReconnect attempts a transport-level reconnect when timeout
+// retries are exhausted. Returns true if reconnect was attempted and the
+// caller should continue the retry loop.
+//
+// Python equivalent: _send_with_policy reconnect_retries tier.
+func (b *Bus) tryTransportReconnect(runCtx context.Context, request *busRequest, err error, timeoutAttempts, reconnectAttempts *int) bool {
+	if b.config.ReconnectRetries <= 0 {
+		return false
+	}
+	// Only reconnect for timeout-class errors, not NACK or collision.
+	if !errors.Is(err, ebuserrors.ErrTimeout) &&
+		!errors.Is(err, ebuserrors.ErrAdapterReset) &&
+		!errors.Is(err, ebuserrors.ErrCRCMismatch) {
+		return false
+	}
+	reconn, ok := b.transport.(transport.Reconnectable)
+	if !ok {
+		return false
+	}
+	if *reconnectAttempts >= b.config.ReconnectRetries {
+		return false
+	}
+	*reconnectAttempts++
+
+	// Wait before reconnecting — gives the adapter time to finish rebooting.
+	select {
+	case <-time.After(b.config.ReconnectDelay):
+	case <-runCtx.Done():
+		return false
+	case <-request.ctx.Done():
+		return false
+	}
+
+	// Reconnect failure is not fatal here: the next iteration will fail
+	// with a timeout, which will trigger another reconnect attempt.
+	_ = reconn.Reconnect()
+	*timeoutAttempts = 0 // reset timeout budget for the fresh session
+	return true
 }
 
 func (b *Bus) retryPolicy(frameType FrameType) RetryPolicy {
@@ -779,7 +866,8 @@ func (b *Bus) waitForSyn(runCtx, reqCtx context.Context, count int) error {
 		}
 		value, err := decoder.readSymbol(b, runCtx, reqCtx)
 		if err != nil {
-			if errors.Is(err, ebuserrors.ErrTimeout) {
+			if errors.Is(err, ebuserrors.ErrTimeout) ||
+				errors.Is(err, ebuserrors.ErrAdapterReset) {
 				continue
 			}
 			return err

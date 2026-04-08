@@ -15,6 +15,17 @@ import (
 	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
 
+// ENHTransportOption configures optional ENHTransport behavior.
+type ENHTransportOption func(*ENHTransport)
+
+// WithDialFunc provides a dialer callback for mid-session reconnection.
+// When set, RESETTED events trigger a full TCP teardown and re-dial+re-INIT
+// instead of a parser-only reset. Without it, the transport falls back to
+// parser-only reset (backward-compatible).
+func WithDialFunc(fn func() (net.Conn, error)) ENHTransportOption {
+	return func(t *ENHTransport) { t.dialFunc = fn }
+}
+
 // ENHTransport wraps a net.Conn and exposes the RawTransport interface using ENH framing.
 type ENHTransport struct {
 	conn         net.Conn
@@ -23,6 +34,10 @@ type ENHTransport struct {
 	// true for ENH mode: START arbitration already transmits source symbol on wire.
 	// false for ENS mode: source symbol must still be written in telegram payload.
 	arbitrationSendsSource bool
+
+	// dialFunc, when non-nil, enables mid-session reconnection on RESETTED.
+	// The function should return a fresh net.Conn to the adapter.
+	dialFunc func() (net.Conn, error)
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
@@ -34,14 +49,27 @@ type ENHTransport struct {
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
-func NewENHTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *ENHTransport {
-	return &ENHTransport{
+//
+// If conn is a *net.TCPConn, TCP_NODELAY is enabled to avoid Nagle-induced
+// latency on the 2-byte ENH frames (~40ms per operation without it).
+//
+// Optional ENHTransportOption values configure reconnection behavior; see
+// WithDialFunc.
+func NewENHTransport(conn net.Conn, readTimeout, writeTimeout time.Duration, opts ...ENHTransportOption) *ENHTransport {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+	}
+	t := &ENHTransport{
 		conn:                   conn,
 		readTimeout:            readTimeout,
 		writeTimeout:           writeTimeout,
 		buffer:                 make([]byte, 256),
 		arbitrationSendsSource: true,
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // NewENSTransport creates an ENS transport over ENH framing.
@@ -49,8 +77,8 @@ func NewENHTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *EN
 // ENS uses START arbitration and the adapter transmits the source byte on the
 // wire during arbitration, same as ENH. Callers must NOT include the source
 // byte in the outgoing telegram payload.
-func NewENSTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *ENHTransport {
-	return NewENHTransport(conn, readTimeout, writeTimeout)
+func NewENSTransport(conn net.Conn, readTimeout, writeTimeout time.Duration, opts ...ENHTransportOption) *ENHTransport {
+	return NewENHTransport(conn, readTimeout, writeTimeout, opts...)
 }
 
 // ArbitrationSendsSource reports whether START arbitration already placed the
@@ -66,7 +94,11 @@ func (t *ENHTransport) ArbitrationSendsSource() bool {
 func (t *ENHTransport) Init(features byte) error {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
+	return t.initLocked(features)
+}
 
+// initLocked performs the INIT handshake. Caller must hold readMu.
+func (t *ENHTransport) initLocked(features byte) error {
 	t.writeMu.Lock()
 	seq := EncodeENH(ENHReqInit, features)
 	written := 0
@@ -145,6 +177,43 @@ func (t *ENHTransport) Init(features byte) error {
 			}
 		}
 	}
+}
+
+// reconnectLocked tears down the current TCP connection, dials a fresh one
+// via dialFunc, sets TCP_NODELAY, resets the parser, and performs an INIT
+// handshake on the new connection. Caller must hold readMu.
+//
+// If dialFunc is nil (no reconnect capability), falls back to parser-only
+// reset for backward compatibility.
+func (t *ENHTransport) reconnectLocked() error {
+	if t.dialFunc == nil {
+		t.resetStateLocked()
+		return nil
+	}
+	_ = t.conn.Close()
+	newConn, err := t.dialFunc()
+	if err != nil {
+		return fmt.Errorf("enh reconnect dial: %v: %w", err, ebuserrors.ErrTransportClosed)
+	}
+	if tcpConn, ok := newConn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+	}
+	t.conn = newConn
+	t.resetStateLocked()
+	if err := t.initLocked(0x01); err != nil {
+		_ = t.conn.Close()
+		return fmt.Errorf("enh reconnect init: %v: %w", err, ebuserrors.ErrTransportClosed)
+	}
+	return nil
+}
+
+// Reconnect tears down and re-establishes the underlying TCP connection.
+// This is the Reconnectable interface implementation used by the protocol
+// layer to recover from dead TCP connections (timeout exhaustion).
+func (t *ENHTransport) Reconnect() error {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+	return t.reconnectLocked()
 }
 
 func (t *ENHTransport) ReadByte() (byte, error) {
@@ -298,9 +367,13 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 					// While waiting for STARTED/FAILED, ignore received bus bytes. The protocol
 					// state machine will resync after arbitration completes.
 				case ENHResResetted:
-					t.resetStateLocked()
-					arbitrationDone = true
-					arbitrationErr = fmt.Errorf("enh adapter reset during arbitration (features 0x%02x): %w", msg.Data, ebuserrors.ErrAdapterReset)
+					if reconnErr := t.reconnectLocked(); reconnErr != nil {
+						arbitrationDone = true
+						arbitrationErr = fmt.Errorf("enh adapter reset during arbitration, reconnect failed: %w", ebuserrors.ErrTransportClosed)
+					} else {
+						arbitrationDone = true
+						arbitrationErr = fmt.Errorf("enh adapter reset during arbitration (features 0x%02x): %w", msg.Data, ebuserrors.ErrAdapterReset)
+					}
 				case ENHResStarted:
 					if msg.Data == initiator {
 						arbitrationDone = true
@@ -518,7 +591,10 @@ func (t *ENHTransport) fillPendingLocked() error {
 			case ENHResReceived:
 				t.pending = append(t.pending, msg.Data)
 			case ENHResResetted:
-				t.surfaceResetLocked()
+				if reconnErr := t.reconnectLocked(); reconnErr != nil {
+					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
+				}
+				t.resets++ // signal ErrAdapterReset to ReadByte caller
 			}
 		}
 	}
@@ -583,3 +659,4 @@ func isClosed(err error) bool {
 var _ RawTransport = (*ENHTransport)(nil)
 var _ StreamEventReader = (*ENHTransport)(nil)
 var _ InfoRequester = (*ENHTransport)(nil)
+var _ Reconnectable = (*ENHTransport)(nil)
