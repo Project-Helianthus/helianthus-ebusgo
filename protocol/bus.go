@@ -14,6 +14,11 @@ import (
 
 const defaultQueueCapacity = 64
 
+// adapterResetRetryDelay is the stabilization delay before retrying after
+// ErrAdapterReset. Unlike collision (waitForSyn), adapter reset does not
+// guarantee bus traffic will resume, so we use a fixed delay.
+const adapterResetRetryDelay = 200 * time.Millisecond
+
 type RetryPolicy struct {
 	TimeoutRetries int
 	NACKRetries    int
@@ -278,9 +283,15 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 				b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 				if errors.Is(err, ebuserrors.ErrAdapterReset) {
-					if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
-						b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
-						return nil, b.wrapRetryError(waitErr)
+					// Short stabilization delay — unlike collision, adapter
+					// reset does not guarantee bus traffic so waitForSyn
+					// could hang on a silent bus.
+					select {
+					case <-time.After(adapterResetRetryDelay):
+					case <-runCtx.Done():
+						return nil, b.wrapRetryError(runCtx.Err())
+					case <-request.ctx.Done():
+						return nil, b.wrapRetryError(request.ctx.Err())
 					}
 				}
 				continue
@@ -297,10 +308,19 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 		if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
 			timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 			b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
-			if errors.Is(err, ebuserrors.ErrBusCollision) || errors.Is(err, ebuserrors.ErrAdapterReset) {
+			if errors.Is(err, ebuserrors.ErrBusCollision) {
 				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
 					b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
 					return nil, b.wrapRetryError(waitErr)
+				}
+			}
+			if errors.Is(err, ebuserrors.ErrAdapterReset) {
+				select {
+				case <-time.After(adapterResetRetryDelay):
+				case <-runCtx.Done():
+					return nil, b.wrapRetryError(runCtx.Err())
+				case <-request.ctx.Done():
+					return nil, b.wrapRetryError(request.ctx.Err())
 				}
 			}
 			continue
@@ -889,6 +909,15 @@ func (b *Bus) emitOutcomeEvent(request Frame, frameType FrameType, attempt uint1
 			Kind:       BusEventEchoMismatch,
 			FrameType:  frameType,
 			Outcome:    BusOutcomeEchoMismatch,
+			Attempt:    attempt,
+			Request:    request,
+			HasRequest: frameType != FrameTypeUnknown,
+		})
+	case BusOutcomeAdapterReset:
+		b.emitObserverEvent(BusEvent{
+			Kind:       BusEventAdapterReset,
+			FrameType:  frameType,
+			Outcome:    BusOutcomeAdapterReset,
 			Attempt:    attempt,
 			Request:    request,
 			HasRequest: frameType != FrameTypeUnknown,

@@ -24,6 +24,7 @@ const (
 	BusEventAttemptComplete
 	BusEventRequestComplete
 	BusEventObserverFault
+	BusEventAdapterReset
 )
 
 // BusOutcomeClass is the bounded transaction outcome vocabulary exposed to
