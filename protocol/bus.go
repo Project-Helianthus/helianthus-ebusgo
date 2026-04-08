@@ -410,9 +410,12 @@ func (b *Bus) tryTransportReconnect(runCtx context.Context, request *busRequest,
 		return false
 	}
 
-	// Reconnect failure is not fatal here: the next iteration will fail
-	// with a timeout, which will trigger another reconnect attempt.
-	_ = reconn.Reconnect()
+	if err := reconn.Reconnect(); err != nil {
+		// Reconnect failed — don't reset timeout budget. The caller
+		// will re-enter tryTransportReconnect on the next timeout-class
+		// error and use the next reconnect attempt.
+		return true
+	}
 	*timeoutAttempts = 0 // reset timeout budget for the fresh session
 	return true
 }

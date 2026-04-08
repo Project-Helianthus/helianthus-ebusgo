@@ -595,6 +595,13 @@ func (t *ENHTransport) fillPendingLocked() error {
 					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
 				}
 				t.resets++ // signal ErrAdapterReset to ReadByte caller
+				if t.dialFunc != nil {
+					// Reconnected to fresh TCP — remaining msgs were
+					// parsed from the old stream and are stale.
+					return nil
+				}
+				// Parser-only reset (no dialFunc): continue processing
+				// remaining msgs from the same TCP stream.
 			}
 		}
 	}
