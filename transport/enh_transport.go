@@ -190,11 +190,14 @@ func (t *ENHTransport) reconnectLocked() error {
 		t.resetStateLocked()
 		return nil
 	}
-	_ = t.conn.Close()
+	// Dial new connection BEFORE closing the old one. If dial fails,
+	// the old conn stays in place so subsequent operations produce
+	// timeout errors (retryable) rather than ErrTransportClosed (fatal).
 	newConn, err := t.dialFunc()
 	if err != nil {
 		return fmt.Errorf("enh reconnect dial: %v: %w", err, ebuserrors.ErrTransportClosed)
 	}
+	_ = t.conn.Close()
 	if tcpConn, ok := newConn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 	}
@@ -210,9 +213,14 @@ func (t *ENHTransport) reconnectLocked() error {
 // Reconnect tears down and re-establishes the underlying TCP connection.
 // This is the Reconnectable interface implementation used by the protocol
 // layer to recover from dead TCP connections (timeout exhaustion).
+//
+// Returns ErrTransportClosed if no DialFunc was configured.
 func (t *ENHTransport) Reconnect() error {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
+	if t.dialFunc == nil {
+		return fmt.Errorf("enh transport reconnect: no dial function configured: %w", ebuserrors.ErrTransportClosed)
+	}
 	return t.reconnectLocked()
 }
 
