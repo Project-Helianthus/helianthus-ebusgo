@@ -76,8 +76,55 @@ func TestENHTransport_InitHandshake(t *testing.T) {
 		serverErr <- err
 	}()
 
-	if err := enh.Init(0x00); err != nil {
+	features, err := enh.Init(0x00)
+	if err != nil {
 		t.Fatalf("Init error = %v", err)
+	}
+	if features != 0x00 {
+		t.Fatalf("Init features = 0x%02x; want 0x00", features)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_InitReturnsAdapterFeatures(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		want := transport.EncodeENH(transport.ENHReqInit, 0x01)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected init bytes")
+			return
+		}
+
+		// Adapter confirms with different features byte (e.g. 0x03).
+		resp := transport.EncodeENH(transport.ENHResResetted, 0x03)
+		_, err := server.Write(resp[:])
+		serverErr <- err
+	}()
+
+	features, err := enh.Init(0x01)
+	if err != nil {
+		t.Fatalf("Init error = %v", err)
+	}
+	if features != 0x03 {
+		t.Fatalf("Init features = 0x%02x; want 0x03", features)
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)

@@ -90,28 +90,30 @@ func (t *ENHTransport) ArbitrationSendsSource() bool {
 // Init performs an ENH initialization handshake by sending ENHReqInit(features)
 // and waiting for ENHResResetted(features).
 //
+// Returns the adapter's confirmed features byte from the RESETTED response.
 // Any RESETTED frames observed later will reset the local parser and echo state.
-func (t *ENHTransport) Init(features byte) error {
+func (t *ENHTransport) Init(features byte) (byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 	return t.initLocked(features)
 }
 
 // initLocked performs the INIT handshake. Caller must hold readMu.
-func (t *ENHTransport) initLocked(features byte) error {
+// Returns the features byte from the adapter's RESETTED response.
+func (t *ENHTransport) initLocked(features byte) (byte, error) {
 	t.writeMu.Lock()
 	seq := EncodeENH(ENHReqInit, features)
 	written := 0
 	for written < len(seq) {
 		if err := t.setWriteDeadline(); err != nil {
 			t.writeMu.Unlock()
-			return t.mapWriteError(err)
+			return 0, t.mapWriteError(err)
 		}
 		n, err := t.conn.Write(seq[written:])
 		written += n
 		if err != nil {
 			t.writeMu.Unlock()
-			return t.mapWriteError(err)
+			return 0, t.mapWriteError(err)
 		}
 		if n == 0 {
 			break
@@ -119,7 +121,7 @@ func (t *ENHTransport) initLocked(features byte) error {
 	}
 	t.writeMu.Unlock()
 	if written != len(seq) {
-		return ebuserrors.ErrInvalidPayload
+		return 0, ebuserrors.ErrInvalidPayload
 	}
 
 	maxWait := t.readTimeout
@@ -131,22 +133,22 @@ func (t *ENHTransport) initLocked(features byte) error {
 	for {
 		remaining := maxWait - time.Since(start)
 		if remaining <= 0 {
-			return nil
+			return 0, nil
 		}
 		if t.readTimeout <= 0 || remaining < t.readTimeout {
 			if err := t.conn.SetReadDeadline(time.Now().Add(remaining)); err != nil {
-				return t.mapReadError(err)
+				return 0, t.mapReadError(err)
 			}
 		} else if err := t.setReadDeadline(); err != nil {
-			return t.mapReadError(err)
+			return 0, t.mapReadError(err)
 		}
 
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
 			if isTimeout(err) {
-				return nil
+				return 0, nil
 			}
-			return t.mapReadError(err)
+			return 0, t.mapReadError(err)
 		}
 		if n == 0 {
 			continue
@@ -154,7 +156,7 @@ func (t *ENHTransport) initLocked(features byte) error {
 
 		msgs, err := t.parser.Parse(t.buffer[:n])
 		if err != nil {
-			return err
+			return 0, err
 		}
 		for _, msg := range msgs {
 			switch msg.Kind {
@@ -166,13 +168,13 @@ func (t *ENHTransport) initLocked(features byte) error {
 					t.pending = append(t.pending, msg.Data)
 				case ENHResResetted:
 					t.resetStateLocked()
-					return nil
+					return msg.Data, nil
 				case ENHResInfo:
 					// Ignore info responses for now; leave any received bytes queued.
 				case ENHResErrorEBUS:
-					return fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+					return 0, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 				case ENHResErrorHost:
-					return fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+					return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 				}
 			}
 		}
@@ -203,7 +205,7 @@ func (t *ENHTransport) reconnectLocked() error {
 	}
 	t.conn = newConn
 	t.resetStateLocked()
-	if err := t.initLocked(0x01); err != nil {
+	if _, err := t.initLocked(0x01); err != nil {
 		_ = t.conn.Close()
 		return fmt.Errorf("enh reconnect init: %v: %w", err, ebuserrors.ErrTransportClosed)
 	}
