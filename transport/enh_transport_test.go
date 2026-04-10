@@ -1115,3 +1115,164 @@ func TestENHTransport_ReconnectImplementsReconnectable(t *testing.T) {
 		t.Fatalf("Reconnect error = %v", err)
 	}
 }
+
+func TestENHTransport_RequestStartSurfacesStarted(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		// Read the START request from the client.
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected start request")
+			return
+		}
+
+		// Respond with STARTED.
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		_, err := server.Write(started[:])
+		serverErr <- err
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	reader, ok := interface{}(enh).(transport.StreamEventReader)
+	if !ok {
+		t.Fatal("ENH transport does not implement StreamEventReader")
+	}
+
+	event, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent error = %v", err)
+	}
+	if event.Kind != transport.StreamEventStarted {
+		t.Fatalf("ReadEvent kind = %v; want StreamEventStarted", event.Kind)
+	}
+	if event.Data != initiator {
+		t.Fatalf("ReadEvent data = 0x%02x; want 0x%02x", event.Data, initiator)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_RequestStartSurfacesFailed(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+	winner := byte(0x30)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected start request")
+			return
+		}
+
+		// Respond with FAILED.
+		failed := transport.EncodeENH(transport.ENHResFailed, winner)
+		_, err := server.Write(failed[:])
+		serverErr <- err
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	reader, ok := interface{}(enh).(transport.StreamEventReader)
+	if !ok {
+		t.Fatal("ENH transport does not implement StreamEventReader")
+	}
+
+	event, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent error = %v", err)
+	}
+	if event.Kind != transport.StreamEventFailed {
+		t.Fatalf("ReadEvent kind = %v; want StreamEventFailed", event.Kind)
+	}
+	if event.Data != winner {
+		t.Fatalf("ReadEvent data = 0x%02x; want 0x%02x", event.Data, winner)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_ReadByteIgnoresStartedFailed(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		// Read the START request.
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		// Send STARTED then a RECEIVED byte. ReadByte must skip STARTED
+		// and return only the RECEIVED byte.
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		received := transport.EncodeENH(transport.ENHResReceived, 0x42)
+		payload := append(started[:], received[:]...)
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if got != 0x42 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x42 (should skip STARTED)", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
