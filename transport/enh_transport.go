@@ -437,7 +437,7 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	seq := EncodeENH(ENHReqStart, initiator)
-	if err := t.conn.SetWriteDeadline(time.Now().Add(t.writeTimeout)); err != nil {
+	if err := t.setWriteDeadline(); err != nil {
 		return t.mapWriteError(err)
 	}
 	_, err := t.conn.Write(seq[:])
