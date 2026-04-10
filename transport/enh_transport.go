@@ -42,10 +42,10 @@ type ENHTransport struct {
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 
-	parser  ENHParser
-	pending []byte
-	resets  int
-	buffer  []byte
+	parser        ENHParser
+	pendingEvents []StreamEvent
+	resets        int
+	buffer        []byte
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -161,11 +161,11 @@ func (t *ENHTransport) initLocked(features byte) (byte, error) {
 		for _, msg := range msgs {
 			switch msg.Kind {
 			case ENHMessageData:
-				t.pending = append(t.pending, msg.Byte)
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
 			case ENHMessageFrame:
 				switch msg.Command {
 				case ENHResReceived:
-					t.pending = append(t.pending, msg.Data)
+					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 				case ENHResResetted:
 					t.resetStateLocked()
 					return msg.Data, nil
@@ -236,23 +236,30 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			return 0, ebuserrors.ErrAdapterReset
 		}
 
-		if len(t.pending) > 0 {
-			value := t.pending[0]
-			t.pending = t.pending[1:]
-			return value, nil
+		// Drain pendingEvents, returning only Byte events. Non-byte events
+		// (STARTED, FAILED) are silently skipped so ReadByte callers never
+		// see them.
+		for len(t.pendingEvents) > 0 {
+			ev := t.pendingEvents[0]
+			t.pendingEvents = t.pendingEvents[1:]
+			if ev.Kind == StreamEventByte {
+				return ev.Byte, nil
+			}
+			// Skip non-byte events (StreamEventStarted, StreamEventFailed).
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
 			return 0, err
 		}
-		if t.resets == 0 && len(t.pending) == 0 {
+		if t.resets == 0 && len(t.pendingEvents) == 0 {
 			continue
 		}
 	}
 }
 
-// ReadEvent surfaces optional reset boundaries to passive consumers while
-// preserving ReadByte compatibility for active callers.
+// ReadEvent surfaces non-byte transport events (reset, arbitration
+// started/failed) to passive consumers while preserving ReadByte
+// compatibility for active callers.
 func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -263,16 +270,16 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 			return StreamEvent{Kind: StreamEventReset}, nil
 		}
 
-		if len(t.pending) > 0 {
-			value := t.pending[0]
-			t.pending = t.pending[1:]
-			return StreamEvent{Kind: StreamEventByte, Byte: value}, nil
+		if len(t.pendingEvents) > 0 {
+			ev := t.pendingEvents[0]
+			t.pendingEvents = t.pendingEvents[1:]
+			return ev, nil
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
 			return StreamEvent{}, err
 		}
-		if t.resets == 0 && len(t.pending) == 0 {
+		if t.resets == 0 && len(t.pendingEvents) == 0 {
 			continue
 		}
 	}
@@ -370,7 +377,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		for _, msg := range msgs {
 			switch msg.Kind {
 			case ENHMessageData:
-				t.pending = append(t.pending, msg.Byte)
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
 			case ENHMessageFrame:
 				switch msg.Command {
 				case ENHResReceived:
@@ -410,10 +417,34 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			// RECEIVED echo to produce a wrong value, causing
 			// sendSymbolWithEcho to detect an echo mismatch.
 			t.parser.Reset()
-			t.pending = t.pending[:0]
+			t.pendingEvents = t.pendingEvents[:0]
 			return arbitrationErr
 		}
 	}
+}
+
+// RequestStart sends a non-blocking START arbitration request for the given
+// initiator address. It writes the ENH START frame and returns immediately
+// without waiting for the adapter response.
+//
+// The adapter's STARTED or FAILED response will arrive asynchronously and
+// can be consumed via ReadEvent (as StreamEventStarted or StreamEventFailed).
+// ReadByte automatically skips these events.
+//
+// Only writeMu is held; readMu is NOT acquired so a concurrent ReadEvent
+// loop can consume the response without deadlock.
+func (t *ENHTransport) RequestStart(initiator byte) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	seq := EncodeENH(ENHReqStart, initiator)
+	if err := t.conn.SetWriteDeadline(time.Now().Add(t.writeTimeout)); err != nil {
+		return t.mapWriteError(err)
+	}
+	_, err := t.conn.Write(seq[:])
+	if err != nil {
+		return t.mapWriteError(err)
+	}
+	return nil
 }
 
 // RequestInfo sends an INFO request for the given ID and returns the raw
@@ -431,12 +462,12 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	defer func() {
 		if err != nil {
 			t.parser.Reset()
-			// Preserve buffered bus bytes on timeout/error so they are not
+			// Preserve buffered events on timeout/error so they are not
 			// silently dropped. Clear pending on fatal transport errors and
-			// adapter resets where the parser state is unrecoverable or bytes
+			// adapter resets where the parser state is unrecoverable or events
 			// from the same TCP segment after RESETTED would be stale.
 			if errors.Is(err, ebuserrors.ErrTransportClosed) || errors.Is(err, ebuserrors.ErrAdapterReset) {
-				t.pending = nil
+				t.pendingEvents = nil
 			}
 		}
 	}()
@@ -513,7 +544,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 			switch msg.Kind {
 			case ENHMessageData:
 				// Bus byte received during INFO exchange — queue it.
-				t.pending = append(t.pending, msg.Byte)
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
 			case ENHMessageFrame:
 				switch msg.Command {
 				case ENHResInfo:
@@ -537,7 +568,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					}
 				case ENHResReceived:
 					// Bus byte received during INFO — queue it.
-					t.pending = append(t.pending, msg.Data)
+					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 				case ENHResResetted:
 					t.surfaceResetLocked()
 					if !payloadComplete {
@@ -567,7 +598,7 @@ func (t *ENHTransport) Close() error {
 
 func (t *ENHTransport) resetStateLocked() {
 	t.parser.Reset()
-	t.pending = nil
+	t.pendingEvents = nil
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -595,11 +626,15 @@ func (t *ENHTransport) fillPendingLocked() error {
 	for _, msg := range msgs {
 		switch msg.Kind {
 		case ENHMessageData:
-			t.pending = append(t.pending, msg.Byte)
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
 		case ENHMessageFrame:
 			switch msg.Command {
 			case ENHResReceived:
-				t.pending = append(t.pending, msg.Data)
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+			case ENHResStarted:
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			case ENHResFailed:
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)

@@ -20,15 +20,19 @@ type RawTransport interface {
 type StreamEventKind uint8
 
 const (
-	StreamEventByte StreamEventKind = iota + 1
+	StreamEventByte    StreamEventKind = iota + 1
 	StreamEventReset
+	StreamEventStarted // adapter confirmed START arbitration
+	StreamEventFailed  // adapter rejected START arbitration
 )
 
-// StreamEvent is a transport-stream item. Byte is only valid for
-// StreamEventByte.
+// StreamEvent is a transport-stream item. Byte is valid for
+// StreamEventByte. Data is valid for StreamEventStarted (confirmed
+// initiator address) and StreamEventFailed (winner address).
 type StreamEvent struct {
 	Kind StreamEventKind
-	Byte byte
+	Byte byte // valid for StreamEventByte
+	Data byte // valid for StreamEventStarted, StreamEventFailed
 }
 
 // StreamEventReader is an optional extension implemented by transports that
