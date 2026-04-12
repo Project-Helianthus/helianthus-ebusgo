@@ -349,7 +349,7 @@ func TestBus_RetryOnCRCMismatch(t *testing.T) {
 	}
 }
 
-func TestBus_RetryOnTimeout(t *testing.T) {
+func TestBus_NoRetryOnTimeout(t *testing.T) {
 	t.Parallel()
 
 	frame := protocol.Frame{
@@ -359,26 +359,21 @@ func TestBus_RetryOnTimeout(t *testing.T) {
 		Secondary: 0x02,
 		Data:      []byte{0x03},
 	}
-	data := byte(0x10)
-	responseSegment := []byte{0x01, data}
-	respCRC := protocol.CRC(responseSegment)
 
 	tr := &scriptedTransport{
 		inbound: []readEvent{
 			{err: ebuserrors.ErrTimeout},
-			{value: protocol.SymbolAck},
-			{value: 0x01},
-			{value: data},
-			{value: respCRC},
 		},
 	}
+	// Even with TimeoutRetries > 0, ErrTimeout is never retried —
+	// timeout is deterministic on eBUS (no device responded).
 	config := protocol.BusConfig{
 		InitiatorTarget: protocol.RetryPolicy{
-			TimeoutRetries: 1,
+			TimeoutRetries: 3,
 			NACKRetries:    0,
 		},
 		InitiatorInitiator: protocol.RetryPolicy{
-			TimeoutRetries: 1,
+			TimeoutRetries: 3,
 			NACKRetries:    0,
 		},
 	}
@@ -387,22 +382,16 @@ func TestBus_RetryOnTimeout(t *testing.T) {
 	defer cancel()
 	bus.Run(ctx)
 
-	resp, err := bus.Send(ctx, frame)
-	if err != nil {
-		t.Fatalf("Send error = %v", err)
-	}
-	if resp == nil || len(resp.Data) != 1 || resp.Data[0] != 0x10 {
-		t.Fatalf("response = %+v; want data [0x10]", resp)
+	_, err := bus.Send(ctx, frame)
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("Send error = %v; want ErrTimeout", err)
 	}
 
+	// Only one command should have been written — no retry.
 	command := []byte{frame.Source, frame.Target, frame.Primary, frame.Secondary, 0x01, 0x03}
 	command = append(command, protocol.CRC(command))
-	want := make([]byte, 0, len(command)*2+2)
-	want = append(want, command...)
-	want = append(want, command...)
-	want = append(want, protocol.SymbolAck, protocol.SymbolSyn)
-	if got := tr.writesFlattened(); string(got) != string(want) {
-		t.Fatalf("writes = %v; want %v", got, want)
+	if got := tr.writesFlattened(); string(got) != string(command) {
+		t.Fatalf("writes = %v; want single command %v (no retry)", got, command)
 	}
 }
 
