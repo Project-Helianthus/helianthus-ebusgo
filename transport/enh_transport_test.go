@@ -1276,3 +1276,105 @@ func TestENHTransport_ReadByteIgnoresStartedFailed(t *testing.T) {
 		t.Fatalf("server error = %v", err)
 	}
 }
+
+func TestENHTransport_ReadEventRecoverFromParserDesync(t *testing.T) {
+	// Send an orphan byte2 (0x85, in range 0x80-0xBF) without a preceding
+	// byte1. This triggers ErrInvalidPayload in the parser. The transport
+	// should recover by resetting the parser, not propagate a fatal error.
+	// Subsequent bytes should be readable.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// First write: orphan byte2 (triggers desync)
+		_, err := server.Write([]byte{0x85})
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		// Second write: valid raw data byte (should be readable after recovery)
+		_, err = server.Write([]byte{0x42})
+		serverErr <- err
+	}()
+
+	reader, ok := interface{}(enh).(transport.StreamEventReader)
+	if !ok {
+		t.Fatal("ENH transport does not implement StreamEventReader")
+	}
+
+	// First ReadEvent: the orphan byte should be absorbed by recovery,
+	// not returned as an error.
+	event, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent after orphan byte error = %v; want recovery (no error)", err)
+	}
+	// The recovered read should deliver the 0x42 byte.
+	if event.Kind != transport.StreamEventByte || event.Byte != 0x42 {
+		t.Fatalf("ReadEvent after recovery = %+v; want StreamEventByte(0x42)", event)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_ResetPreservesParserStateForTrailingFrame(t *testing.T) {
+	// Send [RESETTED, RECEIVED(0x33)] in one TCP segment. The RESETTED
+	// handler must NOT destroy parser state for the trailing RECEIVED frame.
+	// Before the fix, reconnectLocked() → parser.Reset() would clear pending
+	// byte1 state, making RECEIVED's byte2 appear as an orphan.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		reset := transport.EncodeENH(transport.ENHResResetted, 0x00)
+		received := transport.EncodeENH(transport.ENHResReceived, 0x33)
+		// Single TCP write: RESETTED followed immediately by RECEIVED
+		payload := append(reset[:], received[:]...)
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	reader, ok := interface{}(enh).(transport.StreamEventReader)
+	if !ok {
+		t.Fatal("ENH transport does not implement StreamEventReader")
+	}
+
+	// First event: RESETTED → StreamEventReset
+	event, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent error = %v", err)
+	}
+	if event.Kind != transport.StreamEventReset {
+		t.Fatalf("ReadEvent kind = %v; want StreamEventReset", event.Kind)
+	}
+
+	// Second event: RECEIVED(0x33) → StreamEventByte(0x33)
+	// This must work — the parser state for the RECEIVED frame must survive
+	// the RESETTED handler.
+	event, err = reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent after RESETTED error = %v; want 0x33", err)
+	}
+	if event.Kind != transport.StreamEventByte || event.Byte != 0x33 {
+		t.Fatalf("ReadEvent after RESETTED = %+v; want StreamEventByte(0x33)", event)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
