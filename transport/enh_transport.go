@@ -621,6 +621,16 @@ func (t *ENHTransport) fillPendingLocked() error {
 
 	msgs, err := t.parser.Parse(t.buffer[:bytesRead])
 	if err != nil {
+		if errors.Is(err, ebuserrors.ErrInvalidPayload) {
+			// Parser desync: orphan byte2 or missing byte2, typically caused
+			// by RESETTED handler destroying pending state mid-iteration, or
+			// by TCP fragmentation delivering partial ENH frames. Reset the
+			// parser to re-synchronize on the next valid byte1 (>= 0xC0).
+			// Any messages parsed before the desync point are lost — this is
+			// acceptable vs the alternative of a full TCP reconnect.
+			t.parser.Reset()
+			return nil
+		}
 		return err
 	}
 	for _, msg := range msgs {
@@ -636,17 +646,22 @@ func (t *ENHTransport) fillPendingLocked() error {
 			case ENHResFailed:
 				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
-				if reconnErr := t.reconnectLocked(); reconnErr != nil {
-					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
-				}
-				t.resets++ // signal ErrAdapterReset to ReadByte caller
 				if t.dialFunc != nil {
+					if reconnErr := t.reconnectLocked(); reconnErr != nil {
+						return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
+					}
+					t.resets++
 					// Reconnected to fresh TCP — remaining msgs were
 					// parsed from the old stream and are stale.
 					return nil
 				}
-				// Parser-only reset (no dialFunc): continue processing
-				// remaining msgs from the same TCP stream.
+				// Adapter-direct mode (no dialFunc): do NOT call
+				// reconnectLocked/resetStateLocked here — parser.Reset()
+				// would destroy pending state for bytes that Parse()
+				// already consumed from the TCP buffer past the RESETTED
+				// frame. Just clear the event queue and signal the reset.
+				t.pendingEvents = nil
+				t.resets++
 			}
 		}
 	}
