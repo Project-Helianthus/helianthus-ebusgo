@@ -160,14 +160,25 @@ func TestBus_AttemptAndRequestCompleteDurationsAcrossRetry(t *testing.T) {
 		Secondary: 0x02,
 		Data:      []byte{0x03},
 	}
+	data := byte(0x10)
+	responseSegment := []byte{0x01, data}
+	goodCRC := protocol.CRC(responseSegment)
+	badCRC := goodCRC ^ 0xFF
+
 	observer := &recordingObserver{}
+	// Use CRC mismatch (retryable) instead of timeout (not retryable) to
+	// exercise the retry→success observer event path. Two consecutive bad
+	// CRCs exhaust the internal response retry loop (respAttempt 0 and 1),
+	// causing sendTransaction to return ErrCRCMismatch to the outer retry.
 	tr := &scriptedTransport{
 		inbound: []readEvent{
-			{err: ebuserrors.ErrTimeout},
+			// Attempt 1: ACK, then two bad CRC responses → ErrCRCMismatch
 			{value: protocol.SymbolAck},
-			{value: 0x01},
-			{value: 0x10},
-			{value: protocol.CRC([]byte{0x01, 0x10})},
+			{value: 0x01}, {value: data}, {value: badCRC},
+			{value: 0x01}, {value: data}, {value: badCRC},
+			// Attempt 2 (outer retry): ACK, good CRC → success
+			{value: protocol.SymbolAck},
+			{value: 0x01}, {value: data}, {value: goodCRC},
 		},
 	}
 	cfg := protocol.BusConfig{
@@ -190,7 +201,7 @@ func TestBus_AttemptAndRequestCompleteDurationsAcrossRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send error = %v", err)
 	}
-	if resp == nil || resp.Data[0] != 0x10 {
+	if resp == nil || resp.Data[0] != data {
 		t.Fatalf("response = %+v; want data [0x10]", resp)
 	}
 
@@ -216,8 +227,8 @@ func TestBus_AttemptAndRequestCompleteDurationsAcrossRetry(t *testing.T) {
 	if requestEvent.TimeoutRetries != 1 {
 		t.Fatalf("request-complete TimeoutRetries = %d; want 1", requestEvent.TimeoutRetries)
 	}
-	if retryEvent.Retry != protocol.BusRetryReasonTimeout {
-		t.Fatalf("retry reason = %v; want %v", retryEvent.Retry, protocol.BusRetryReasonTimeout)
+	if retryEvent.Retry != protocol.BusRetryReasonCRCMismatch {
+		t.Fatalf("retry reason = %v; want %v", retryEvent.Retry, protocol.BusRetryReasonCRCMismatch)
 	}
 	if requestEvent.DurationMicros < attemptEvent.DurationMicros {
 		t.Fatalf("request-complete duration = %d; want >= attempt-complete duration %d", requestEvent.DurationMicros, attemptEvent.DurationMicros)

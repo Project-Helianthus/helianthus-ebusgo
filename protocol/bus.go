@@ -49,11 +49,11 @@ type BusConfig struct {
 func DefaultBusConfig() BusConfig {
 	return BusConfig{
 		InitiatorTarget: RetryPolicy{
-			TimeoutRetries: 2,
+			TimeoutRetries: 0,
 			NACKRetries:    1,
 		},
 		InitiatorInitiator: RetryPolicy{
-			TimeoutRetries: 2,
+			TimeoutRetries: 0,
 			NACKRetries:    1,
 		},
 		ReconnectRetries: 3,
@@ -476,7 +476,12 @@ func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts in
 		}
 		return false, timeoutAttempts, nackAttempts
 	}
-	if errors.Is(err, ebuserrors.ErrTimeout) || errors.Is(err, ebuserrors.ErrCRCMismatch) {
+	// Timeout is deterministic on eBUS — no device answered, retrying is
+	// pointless. Fall through to return false.
+	if errors.Is(err, ebuserrors.ErrTimeout) {
+		return false, timeoutAttempts, nackAttempts
+	}
+	if errors.Is(err, ebuserrors.ErrCRCMismatch) {
 		if timeoutAttempts < policy.TimeoutRetries {
 			return true, timeoutAttempts + 1, nackAttempts
 		}
