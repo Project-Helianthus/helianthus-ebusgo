@@ -655,13 +655,13 @@ func (t *ENHTransport) fillPendingLocked() error {
 					// parsed from the old stream and are stale.
 					return nil
 				}
-				// Adapter-direct mode (no dialFunc): do NOT call
-				// reconnectLocked/resetStateLocked here — parser.Reset()
-				// would destroy pending state for bytes that Parse()
-				// already consumed from the TCP buffer past the RESETTED
-				// frame. Just clear the event queue and signal the reset.
-				t.pendingEvents = nil
-				t.resets++
+				// Adapter-direct mode (no dialFunc): the adapter periodically
+				// sends RESETTED as a bus-level event. Do NOT signal this as
+				// ErrAdapterReset — that causes handleReset() which drains the
+				// active channel, cancels pending arbitrations, and disrupts
+				// the mux state machine. In adapter-direct mode the mux owns
+				// the TCP connection lifecycle and RESETTED is informational
+				// only — continue processing remaining msgs from the same batch.
 			}
 		}
 	}

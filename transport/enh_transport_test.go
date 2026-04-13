@@ -486,7 +486,10 @@ func TestENHTransport_RequestInfoResetsParserStateAfterTimeoutAndContinues(t *te
 	}
 }
 
-func TestENHTransport_ReadByteReturnsErrAdapterResetOnResetBoundary(t *testing.T) {
+func TestENHTransport_ReadByteIgnoresResettedWithoutDialFunc(t *testing.T) {
+	// Without dialFunc (adapter-direct mode), RESETTED is informational
+	// and must NOT surface as ErrAdapterReset. Subsequent bytes are
+	// delivered transparently.
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -515,17 +518,21 @@ func TestENHTransport_ReadByteReturnsErrAdapterResetOnResetBoundary(t *testing.T
 		t.Fatalf("Write error = %v", err)
 	}
 
-	_, err := enh.ReadByte()
-	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
-		t.Fatalf("ReadByte error = %v; want ErrAdapterReset", err)
-	}
-
+	// RESETTED is silently absorbed; first ReadByte returns 0x11.
 	got, err := enh.ReadByte()
 	if err != nil {
-		t.Fatalf("ReadByte after reset error = %v", err)
+		t.Fatalf("ReadByte error = %v; want 0x11 (RESETTED absorbed)", err)
 	}
 	if got != 0x11 {
-		t.Fatalf("ReadByte after reset = 0x%02x; want 0x11", got)
+		t.Fatalf("ReadByte = 0x%02x; want 0x11", got)
+	}
+
+	got, err = enh.ReadByte()
+	if err != nil {
+		t.Fatalf("second ReadByte error = %v", err)
+	}
+	if got != 0x22 {
+		t.Fatalf("second ReadByte = 0x%02x; want 0x22", got)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -573,7 +580,9 @@ func TestENHTransport_StartArbitrationResettedReturnsErrAdapterReset(t *testing.
 	}
 }
 
-func TestENHTransport_ReadEventSurfacesResetWithoutCorruptingSubsequentBytes(t *testing.T) {
+func TestENHTransport_ReadEventAbsorbsResettedWithoutCorruptingSubsequentBytes(t *testing.T) {
+	// Without dialFunc, RESETTED is silently absorbed. Subsequent bytes
+	// (0x11, 0x22) are delivered as normal StreamEventByte events.
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -597,28 +606,21 @@ func TestENHTransport_ReadEventSurfacesResetWithoutCorruptingSubsequentBytes(t *
 		t.Fatal("ENH transport does not implement StreamEventReader")
 	}
 
+	// RESETTED absorbed; first event is 0x11.
 	event, err := reader.ReadEvent()
 	if err != nil {
 		t.Fatalf("ReadEvent error = %v", err)
 	}
-	if event.Kind != transport.StreamEventReset {
-		t.Fatalf("ReadEvent kind = %v; want StreamEventReset", event.Kind)
+	if event.Kind != transport.StreamEventByte || event.Byte != 0x11 {
+		t.Fatalf("ReadEvent = %+v; want StreamEventByte(0x11)", event)
 	}
 
 	got, err := enh.ReadByte()
 	if err != nil {
-		t.Fatalf("ReadByte after reset error = %v", err)
-	}
-	if got != 0x11 {
-		t.Fatalf("ReadByte after reset = 0x%02x; want 0x11", got)
-	}
-
-	got, err = enh.ReadByte()
-	if err != nil {
-		t.Fatalf("second ReadByte after reset error = %v", err)
+		t.Fatalf("ReadByte error = %v", err)
 	}
 	if got != 0x22 {
-		t.Fatalf("second ReadByte after reset = 0x%02x; want 0x22", got)
+		t.Fatalf("ReadByte = 0x%02x; want 0x22", got)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -1054,14 +1056,16 @@ func TestENHTransport_ReadByteResettedReconnects(t *testing.T) {
 	}
 }
 
-func TestENHTransport_ReconnectFallsBackWithoutDialFunc(t *testing.T) {
+func TestENHTransport_ResettedTransparentWithoutDialFunc(t *testing.T) {
+	// Without dialFunc (adapter-direct mode), RESETTED is silently
+	// absorbed — no ErrAdapterReset, no parser reset, no state disruption.
+	// Post-RESETTED bytes are delivered directly.
 	t.Parallel()
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
-	// No WithDialFunc — backward-compatible parser-only reset.
 	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
 	resetted := transport.EncodeENH(transport.ENHResResetted, 0x00)
@@ -1071,20 +1075,13 @@ func TestENHTransport_ReconnectFallsBackWithoutDialFunc(t *testing.T) {
 		_, _ = server.Write(payload)
 	}()
 
-	// Should still get ErrAdapterReset (parser reset path).
-	_, err := enh.ReadByte()
-	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
-		t.Fatalf("ReadByte error = %v; want ErrAdapterReset", err)
-	}
-
-	// Without reconnect, bytes after RESETTED on the SAME connection
-	// are still available (parser reset only, same TCP stream).
+	// RESETTED absorbed; ReadByte delivers 0x77 directly.
 	got, err := enh.ReadByte()
 	if err != nil {
-		t.Fatalf("ReadByte after parser-only reset error = %v", err)
+		t.Fatalf("ReadByte error = %v; want 0x77 (RESETTED absorbed)", err)
 	}
 	if got != 0x77 {
-		t.Fatalf("ReadByte after parser-only reset = 0x%02x; want 0x77", got)
+		t.Fatalf("ReadByte = 0x%02x; want 0x77", got)
 	}
 }
 
@@ -1325,11 +1322,10 @@ func TestENHTransport_ReadEventRecoverFromParserDesync(t *testing.T) {
 	}
 }
 
-func TestENHTransport_ResetPreservesParserStateForTrailingFrame(t *testing.T) {
-	// Send [RESETTED, RECEIVED(0x33)] in one TCP segment. The RESETTED
-	// handler must NOT destroy parser state for the trailing RECEIVED frame.
-	// Before the fix, reconnectLocked() → parser.Reset() would clear pending
-	// byte1 state, making RECEIVED's byte2 appear as an orphan.
+func TestENHTransport_ResettedTransparentInReadEvent(t *testing.T) {
+	// Send [RESETTED, RECEIVED(0x33)] in one TCP segment. Without dialFunc
+	// (adapter-direct mode), RESETTED is silently absorbed. The trailing
+	// RECEIVED(0x33) must be delivered as the first event.
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -1343,7 +1339,6 @@ func TestENHTransport_ResetPreservesParserStateForTrailingFrame(t *testing.T) {
 		defer close(serverErr)
 		reset := transport.EncodeENH(transport.ENHResResetted, 0x00)
 		received := transport.EncodeENH(transport.ENHResReceived, 0x33)
-		// Single TCP write: RESETTED followed immediately by RECEIVED
 		payload := append(reset[:], received[:]...)
 		_, err := server.Write(payload)
 		serverErr <- err
@@ -1354,24 +1349,13 @@ func TestENHTransport_ResetPreservesParserStateForTrailingFrame(t *testing.T) {
 		t.Fatal("ENH transport does not implement StreamEventReader")
 	}
 
-	// First event: RESETTED → StreamEventReset
+	// RESETTED absorbed; first event is RECEIVED(0x33) → StreamEventByte(0x33).
 	event, err := reader.ReadEvent()
 	if err != nil {
-		t.Fatalf("ReadEvent error = %v", err)
-	}
-	if event.Kind != transport.StreamEventReset {
-		t.Fatalf("ReadEvent kind = %v; want StreamEventReset", event.Kind)
-	}
-
-	// Second event: RECEIVED(0x33) → StreamEventByte(0x33)
-	// This must work — the parser state for the RECEIVED frame must survive
-	// the RESETTED handler.
-	event, err = reader.ReadEvent()
-	if err != nil {
-		t.Fatalf("ReadEvent after RESETTED error = %v; want 0x33", err)
+		t.Fatalf("ReadEvent error = %v; want StreamEventByte(0x33)", err)
 	}
 	if event.Kind != transport.StreamEventByte || event.Byte != 0x33 {
-		t.Fatalf("ReadEvent after RESETTED = %+v; want StreamEventByte(0x33)", event)
+		t.Fatalf("ReadEvent = %+v; want StreamEventByte(0x33)", event)
 	}
 
 	if err := <-serverErr; err != nil {
