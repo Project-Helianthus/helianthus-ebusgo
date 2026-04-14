@@ -1568,3 +1568,44 @@ func TestENHTransport_AdapterDirectResettedNoError(t *testing.T) {
 		t.Fatalf("server error = %v", err)
 	}
 }
+
+// TestENHTransport_Race_WriteAndReconnect exercises the data-race fix for
+// EG48/EG32: concurrent Write and Reconnect must not race on t.conn.
+// Run with -race to verify.
+func TestENHTransport_Race_WriteAndReconnect(t *testing.T) {
+	t.Parallel()
+
+	client, _ := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	// dialFunc returns a fresh net.Pipe each time.
+	dialFunc := func() (net.Conn, error) {
+		c, s := net.Pipe()
+		// Feed a RESETTED response so initLocked succeeds.
+		go func() {
+			resp := transport.EncodeENH(transport.ENHResResetted, 0x01)
+			_, _ = s.Write(resp[:])
+			// Keep server side open; closed when pipe partner closes.
+		}()
+		return c, nil
+	}
+
+	enh := transport.NewENHTransport(client, 100*time.Millisecond, 100*time.Millisecond,
+		transport.WithDialFunc(dialFunc))
+
+	done := make(chan struct{})
+	// Writer goroutine: hammer Write concurrently with Reconnect.
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_, _ = enh.Write([]byte{0x42})
+		}
+	}()
+
+	// Reconnect goroutine: runs alongside Write.
+	for i := 0; i < 10; i++ {
+		_ = enh.Reconnect()
+	}
+
+	<-done
+}

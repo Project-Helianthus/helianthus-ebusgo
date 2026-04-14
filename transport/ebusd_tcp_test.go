@@ -835,3 +835,31 @@ func TestEbusdTCPTransport_Write_SerializesConcurrentHexCommands(t *testing.T) {
 		t.Fatalf("server error = %v", err)
 	}
 }
+
+// TestEbusdTCPTransport_Race_SendHexCommandAndClose exercises the data-race
+// fix for EG30: concurrent sendHexCommand and Close must not race on t.closed.
+// Run with -race to verify.
+func TestEbusdTCPTransport_Race_SendHexCommandAndClose(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 100*time.Millisecond, 100*time.Millisecond)
+
+	done := make(chan struct{})
+	// Goroutine: hammer sendHexCommand concurrently with Close.
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_, _ = tr.sendHexCommand(0x71, []byte{0x08, 0xB5, 0x24})
+		}
+	}()
+
+	// Close concurrently.
+	for i := 0; i < 10; i++ {
+		_ = tr.Close()
+	}
+
+	<-done
+}

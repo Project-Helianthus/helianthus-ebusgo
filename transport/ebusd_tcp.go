@@ -274,7 +274,10 @@ func (t *EbusdTCPTransport) maybeDispatchTelegram() (*ebusdHexDispatch, error) {
 }
 
 func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, error) {
-	if t.closed {
+	t.mu.Lock()
+	closed := t.closed
+	t.mu.Unlock()
+	if closed {
 		return nil, ebuserrors.ErrTransportClosed
 	}
 

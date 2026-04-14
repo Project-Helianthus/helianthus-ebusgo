@@ -27,6 +27,8 @@ func WithDialFunc(fn func() (net.Conn, error)) ENHTransportOption {
 }
 
 // ENHTransport wraps a net.Conn and exposes the RawTransport interface using ENH framing.
+//
+// Lock ordering: readMu before writeMu. Both must be held when replacing t.conn.
 type ENHTransport struct {
 	conn         net.Conn
 	readTimeout  time.Duration
@@ -194,14 +196,21 @@ func (t *ENHTransport) reconnectLocked() error {
 	if err != nil {
 		return fmt.Errorf("enh reconnect dial: %v: %w", err, ebuserrors.ErrTransportClosed)
 	}
-	_ = t.conn.Close()
 	if tcpConn, ok := newConn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 	}
+	// Acquire writeMu to prevent Write() from reading t.conn during swap.
+	// Lock ordering: readMu (held by caller) before writeMu.
+	t.writeMu.Lock()
+	_ = t.conn.Close()
 	t.conn = newConn
+	t.writeMu.Unlock()
 	t.resetStateLocked()
 	if _, err := t.initLocked(0x01); err != nil {
+		// Init failed — close the new connection to prevent TCP leaks (EG52).
+		t.writeMu.Lock()
 		_ = t.conn.Close()
+		t.writeMu.Unlock()
 		return fmt.Errorf("enh reconnect init: %v: %w", err, ebuserrors.ErrTransportClosed)
 	}
 	return nil
