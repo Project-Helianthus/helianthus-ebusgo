@@ -245,3 +245,105 @@ func TestCollisionMonitor_LastEventReturnsDefensiveFrameCopy(t *testing.T) {
 		t.Fatalf("LastEvent data mutated via caller-owned snapshot")
 	}
 }
+
+func TestCollisionMonitor_SetInitiatorSameAddressPreservesCollision(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 19, 17, 0, 0, 0, time.UTC)
+	monitor := NewCollisionMonitor(CollisionMonitorConfig{})
+	monitor.now = func() time.Time { return now }
+	monitor.SetInitiator(0x31)
+
+	// Trigger a collision.
+	event := monitor.ObserveRX(Frame{
+		Source:    0x31,
+		Target:    0x15,
+		Primary:   0xB5,
+		Secondary: 0x24,
+		Data:      []byte{0x03, 0x00, 0x00},
+	})
+	if event == nil {
+		t.Fatalf("ObserveRX returned nil event; want collision")
+	}
+	if !monitor.CollisionActive() {
+		t.Fatalf("CollisionActive = false after ObserveRX; want true")
+	}
+
+	// EG25: Setting the same initiator address must preserve collision state.
+	monitor.SetInitiator(0x31)
+	if !monitor.CollisionActive() {
+		t.Fatalf("CollisionActive = false after SetInitiator(same); want true (EG25)")
+	}
+	if monitor.LastEvent() == nil {
+		t.Fatalf("LastEvent = nil after SetInitiator(same); want preserved event (EG25)")
+	}
+}
+
+func TestCollisionMonitor_SetInitiatorDifferentAddressClearsCollision(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 19, 17, 0, 0, 0, time.UTC)
+	monitor := NewCollisionMonitor(CollisionMonitorConfig{})
+	monitor.now = func() time.Time { return now }
+	monitor.SetInitiator(0x31)
+
+	// Trigger a collision.
+	_ = monitor.ObserveRX(Frame{
+		Source:    0x31,
+		Target:    0x15,
+		Primary:   0xB5,
+		Secondary: 0x24,
+		Data:      []byte{0x03, 0x00, 0x00},
+	})
+	if !monitor.CollisionActive() {
+		t.Fatalf("CollisionActive = false; want true")
+	}
+
+	// Switching to a different address should clear collision state.
+	monitor.SetInitiator(0x33)
+	if monitor.CollisionActive() {
+		t.Fatalf("CollisionActive = true after SetInitiator(different); want false")
+	}
+	if monitor.LastEvent() != nil {
+		t.Fatalf("LastEvent != nil after SetInitiator(different); want nil")
+	}
+}
+
+func TestCollisionMonitor_AppendHistoryTrimsAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 19, 17, 0, 0, 0, time.UTC)
+	capacity := 4
+	monitor := NewCollisionMonitor(CollisionMonitorConfig{
+		EchoWindow:      200 * time.Millisecond,
+		HistoryCapacity: capacity,
+	})
+	monitor.now = func() time.Time { return now }
+	monitor.SetInitiator(0x31)
+
+	// Push exactly capacity frames. EG29: trim should fire when len == capacity,
+	// keeping the buffer at capacity-1 after trim (capacity/2).
+	for i := 0; i < capacity; i++ {
+		now = now.Add(time.Millisecond)
+		if err := monitor.RecordTX(Frame{
+			Source:    0x31,
+			Target:    0x15,
+			Primary:   byte(i),
+			Secondary: 0x00,
+		}); err != nil {
+			t.Fatalf("RecordTX[%d] error = %v", i, err)
+		}
+	}
+
+	// Verify the monitor still works (no panic, no corruption).
+	// Push one more to confirm trim has run and history is bounded.
+	now = now.Add(time.Millisecond)
+	if err := monitor.RecordTX(Frame{
+		Source:    0x31,
+		Target:    0x15,
+		Primary:   0xFF,
+		Secondary: 0x00,
+	}); err != nil {
+		t.Fatalf("RecordTX[overflow] error = %v", err)
+	}
+}

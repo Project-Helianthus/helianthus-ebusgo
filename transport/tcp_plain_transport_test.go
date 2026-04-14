@@ -140,3 +140,62 @@ func TestTCPPlainTransport_Close(t *testing.T) {
 		t.Fatalf("ReadByte error = %v; want ErrTransportClosed", err)
 	}
 }
+
+func TestTCPPlainTransport_ReadByteAfterCloseReturnsClosed(t *testing.T) {
+	t.Parallel()
+
+	// EG46: After Close(), ReadByte must return ErrTransportClosed even if
+	// the bufio.Reader still holds buffered bytes from before Close.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	serverAccepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := listener.Accept()
+		serverAccepted <- conn
+	}()
+
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-serverAccepted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Accept timed out")
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	tr := transport.NewTCPPlainTransport(clientConn, 200*time.Millisecond, 200*time.Millisecond)
+
+	// Send data so the bufio.Reader has buffered bytes.
+	if _, err := serverConn.Write([]byte{0x10, 0x20, 0x30, 0x40}); err != nil {
+		t.Fatalf("server write error = %v", err)
+	}
+
+	// Read one byte to confirm data is available.
+	b, err := tr.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if b != 0x10 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x10", b)
+	}
+
+	// Close the transport while buffered bytes remain.
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+
+	// Subsequent ReadByte must return ErrTransportClosed, not buffered data.
+	_, err = tr.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("ReadByte after Close error = %v; want ErrTransportClosed (EG46)", err)
+	}
+}

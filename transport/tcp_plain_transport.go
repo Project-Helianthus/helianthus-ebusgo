@@ -43,6 +43,9 @@ func (t *TCPPlainTransport) ReadByte() (byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
+	// Check closed state before attempting any read, including from the
+	// buffered reader. After Close(), callers must see ErrTransportClosed
+	// immediately rather than draining stale buffered bytes (EG46).
 	if t.isClosed() {
 		return 0, ebuserrors.ErrTransportClosed
 	}
@@ -52,6 +55,11 @@ func (t *TCPPlainTransport) ReadByte() (byte, error) {
 
 	value, err := t.reader.ReadByte()
 	if err != nil {
+		// Re-check closed: the read may have blocked and Close() was
+		// called concurrently.
+		if t.isClosed() {
+			return 0, ebuserrors.ErrTransportClosed
+		}
 		return 0, t.mapReadError(err)
 	}
 	return value, nil
