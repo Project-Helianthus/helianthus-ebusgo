@@ -26,6 +26,13 @@ const adapterResetRetryDelay = 200 * time.Millisecond
 // flush its FAILED response, apply the deadline, and reset the UART state.
 const collisionBackoffFloor = 50 * time.Millisecond
 
+// Pre-allocated hot-path errors avoid fmt.Errorf allocations on every call.
+// Only errors without dynamic data (hex values, addresses) are pre-allocated.
+var (
+	errUnknownFrameType        = fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
+	errCommandAckLoopExhausted = fmt.Errorf("command ack loop exited without ack: %w", ebuserrors.ErrTimeout)
+)
+
 type RetryPolicy struct {
 	TimeoutRetries int
 	NACKRetries    int
@@ -460,6 +467,10 @@ func (b *Bus) startArbitration(initiator byte, frameType FrameType, attempt uint
 }
 
 func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int, allowUnboundedCollision bool) (bool, int, int) {
+	// HOST errors are non-retryable protocol violations — never retry.
+	if errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		return false, timeoutAttempts, nackAttempts
+	}
 	// Collisions are transient bus-ownership events; retry until ctx deadline/cancel.
 	if errors.Is(err, ebuserrors.ErrBusCollision) {
 		if allowUnboundedCollision {
@@ -579,7 +590,7 @@ func (d *busDecoder) readSymbol(b *Bus, runCtx, reqCtx context.Context) (byte, e
 func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attempt uint16) (*Frame, error) {
 	frameType := frame.Type()
 	if frameType == FrameTypeUnknown {
-		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
+		return nil, errUnknownFrameType
 	}
 	startedAt := time.Now()
 
@@ -664,7 +675,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		}
 	}
 	if !acked {
-		return nil, fmt.Errorf("command ack loop exited without ack: %w", ebuserrors.ErrTimeout)
+		return nil, errCommandAckLoopExhausted
 	}
 
 	if frameType == FrameTypeInitiatorInitiator {
@@ -675,7 +686,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		return nil, nil
 	}
 	if frameType != FrameTypeInitiatorTarget {
-		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
+		return nil, errUnknownFrameType
 	}
 
 	// eBUS target response: NN DB1..DBn CRC (no header - QQ/ZZ/PB/SB are

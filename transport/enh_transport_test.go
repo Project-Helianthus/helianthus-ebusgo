@@ -840,7 +840,7 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 	}
 }
 
-func TestENHTransport_StartArbitrationHostErrorReturnsCollision(t *testing.T) {
+func TestENHTransport_StartArbitrationHostErrorReturnsAdapterHostError(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -868,8 +868,8 @@ func TestENHTransport_StartArbitrationHostErrorReturnsCollision(t *testing.T) {
 	}()
 
 	err := enh.StartArbitration(initiator)
-	if !errors.Is(err, ebuserrors.ErrBusCollision) {
-		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
+	if !errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		t.Fatalf("StartArbitration error = %v; want ErrAdapterHostError", err)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -1360,5 +1360,87 @@ func TestENHTransport_ResettedTransparentInReadEvent(t *testing.T) {
 
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_StartArbitration_HostErrorWrapsAdapterHostError(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the START request (2 bytes).
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Respond with ERROR_HOST(0x03).
+		resp := transport.EncodeENH(transport.ENHResErrorHost, 0x03)
+		_, writeErr := server.Write(resp[:])
+		serverErr <- writeErr
+	}()
+
+	err := enh.StartArbitration(0x71)
+	if err == nil {
+		t.Fatal("StartArbitration returned nil; want error wrapping ErrAdapterHostError")
+	}
+	if !errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		t.Fatalf("StartArbitration error = %v; want wrapping ErrAdapterHostError", err)
+	}
+	// Must NOT wrap ErrBusCollision (the old, buggy behavior).
+	if errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatal("StartArbitration error wraps ErrBusCollision; should wrap ErrAdapterHostError instead")
+	}
+
+	if sErr := <-serverErr; sErr != nil {
+		t.Fatalf("server error = %v", sErr)
+	}
+}
+
+func TestENHTransport_Init_HostErrorWrapsAdapterHostError(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the INIT request (2 bytes).
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Respond with ERROR_HOST(0x05).
+		resp := transport.EncodeENH(transport.ENHResErrorHost, 0x05)
+		_, writeErr := server.Write(resp[:])
+		serverErr <- writeErr
+	}()
+
+	_, err := enh.Init(0x01)
+	if err == nil {
+		t.Fatal("Init returned nil error; want error wrapping ErrAdapterHostError")
+	}
+	if !errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		t.Fatalf("Init error = %v; want wrapping ErrAdapterHostError", err)
+	}
+	// Must NOT wrap ErrInvalidPayload (the old, buggy behavior).
+	if errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatal("Init error wraps ErrInvalidPayload; should wrap ErrAdapterHostError instead")
+	}
+
+	if sErr := <-serverErr; sErr != nil {
+		t.Fatalf("server error = %v", sErr)
 	}
 }

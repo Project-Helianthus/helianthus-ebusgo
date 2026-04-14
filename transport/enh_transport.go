@@ -174,7 +174,7 @@ func (t *ENHTransport) initLocked(features byte) (byte, error) {
 				case ENHResErrorEBUS:
 					return 0, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 				case ENHResErrorHost:
-					return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+					return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 				}
 			}
 		}
@@ -403,7 +403,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 					arbitrationErr = fmt.Errorf("enh arbitration ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrBusCollision)
 				case ENHResErrorHost:
 					arbitrationDone = true
-					arbitrationErr = fmt.Errorf("enh arbitration host error 0x%02x: %w", msg.Data, ebuserrors.ErrBusCollision)
+					arbitrationErr = fmt.Errorf("enh arbitration host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 				}
 			}
 		}
@@ -577,7 +577,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				case ENHResErrorEBUS:
 					return nil, fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 				case ENHResErrorHost:
-					return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+					return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 				}
 			}
 		}
