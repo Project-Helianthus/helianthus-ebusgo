@@ -84,9 +84,9 @@ func TestClassifiers_CoverAllSentinels(t *testing.T) {
 			fatal: true,
 		},
 		{
-			name:  "ErrInvalidPayload",
-			err:   ebuserrors.ErrInvalidPayload,
-			fatal: true,
+			name:       "ErrInvalidPayload",
+			err:        ebuserrors.ErrInvalidPayload,
+			definitive: true,
 		},
 	}
 

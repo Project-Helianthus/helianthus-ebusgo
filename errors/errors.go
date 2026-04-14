@@ -152,10 +152,10 @@ func IsTransient(err error) bool {
 func IsDefinitive(err error) bool {
 	return stderrors.Is(err, ErrNoSuchDevice) ||
 		stderrors.Is(err, ErrNACK) ||
-		stderrors.Is(err, ErrAdapterHostError)
+		stderrors.Is(err, ErrAdapterHostError) ||
+		stderrors.Is(err, ErrInvalidPayload)
 }
 
 func IsFatal(err error) bool {
-	return stderrors.Is(err, ErrTransportClosed) ||
-		stderrors.Is(err, ErrInvalidPayload)
+	return stderrors.Is(err, ErrTransportClosed)
 }

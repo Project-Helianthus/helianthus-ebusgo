@@ -204,6 +204,11 @@ func (b *Bus) runLoop(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				b.markClosed()
+				// Note: a tiny race window exists between markClosed and
+				// drainQueue where a Send goroutine already past the closed
+				// check could push one more item. That goroutine will unblock
+				// via its own ctx.Done(). Use deadline-bounded contexts for
+				// Send to guarantee eventual unblock.
 				b.drainQueue()
 				return
 			case <-b.notify:
