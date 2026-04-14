@@ -2,8 +2,10 @@ package transport_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -750,7 +752,7 @@ func TestENHTransport_ForwardsEchoedBytes(t *testing.T) {
 		t.Fatalf("server error = %v", err)
 	}
 }
-func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T) {
+func TestENHTransport_StartArbitrationStartedPreservesReceivedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -774,6 +776,7 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 			return
 		}
 
+		// Send RECEIVED(0x11), STARTED(initiator), RECEIVED(0x22).
 		started := transport.EncodeENH(transport.ENHResStarted, initiator)
 		payload := []byte{0x11, started[0], started[1], 0x22}
 		_, err := server.Write(payload)
@@ -784,9 +787,15 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 		t.Fatalf("StartArbitration error = %v", err)
 	}
 
-	_, err := enh.ReadByte()
-	if !errors.Is(err, ebuserrors.ErrTimeout) {
-		t.Fatalf("ReadByte error = %v; want ErrTimeout", err)
+	// EG31/EG43: RECEIVED bytes during arbitration are preserved.
+	for _, want := range []byte{0x11, 0x22} {
+		got, err := enh.ReadByte()
+		if err != nil {
+			t.Fatalf("ReadByte error = %v; want 0x%02x", err, want)
+		}
+		if got != want {
+			t.Fatalf("ReadByte = 0x%02x; want 0x%02x", got, want)
+		}
 	}
 
 	if err := <-serverErr; err != nil {
@@ -794,7 +803,7 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 	}
 }
 
-func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) {
+func TestENHTransport_StartArbitrationFailedPreservesReceivedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -819,6 +828,7 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 			return
 		}
 
+		// Send RECEIVED(0x33), FAILED(winner), RECEIVED(0x44).
 		failed := transport.EncodeENH(transport.ENHResFailed, winner)
 		payload := []byte{0x33, failed[0], failed[1], 0x44}
 		_, err := server.Write(payload)
@@ -830,9 +840,15 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
 	}
 
-	_, err = enh.ReadByte()
-	if !errors.Is(err, ebuserrors.ErrTimeout) {
-		t.Fatalf("ReadByte error = %v; want ErrTimeout", err)
+	// EG31/EG43: RECEIVED bytes during arbitration are preserved even on failure.
+	for _, want := range []byte{0x33, 0x44} {
+		got, readErr := enh.ReadByte()
+		if readErr != nil {
+			t.Fatalf("ReadByte error = %v; want 0x%02x", readErr, want)
+		}
+		if got != want {
+			t.Fatalf("ReadByte = 0x%02x; want 0x%02x", got, want)
+		}
 	}
 
 	if err := <-serverErr; err != nil {
@@ -1608,4 +1624,126 @@ func TestENHTransport_Race_WriteAndReconnect(t *testing.T) {
 	}
 
 	<-done
+}
+
+// EG14/EG39: StartArbitration aborts after 3 wrong-address STARTED responses.
+func TestENHTransport_StartArbitrationWrongAddressAborts(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+	wrongAddr := byte(0x50)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+
+		// Send 3 STARTED responses with the wrong address.
+		wrongStarted := transport.EncodeENH(transport.ENHResStarted, wrongAddr)
+		var payload []byte
+		for i := 0; i < 3; i++ {
+			payload = append(payload, wrongStarted[0], wrongStarted[1])
+		}
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if err == nil {
+		t.Fatal("StartArbitration error = nil; want error after 3 mismatches")
+	}
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("StartArbitration error = %v; want ErrInvalidPayload", err)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// EG14/EG39: StartArbitration succeeds if correct address arrives before 3 mismatches.
+func TestENHTransport_StartArbitrationWrongThenCorrectSucceeds(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+	wrongAddr := byte(0x50)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		// Send 2 wrong STARTEDs then the correct one.
+		wrongStarted := transport.EncodeENH(transport.ENHResStarted, wrongAddr)
+		correctStarted := transport.EncodeENH(transport.ENHResStarted, initiator)
+		var payload []byte
+		payload = append(payload, wrongStarted[0], wrongStarted[1])
+		payload = append(payload, wrongStarted[0], wrongStarted[1])
+		payload = append(payload, correctStarted[0], correctStarted[1])
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	if err := enh.StartArbitration(initiator); err != nil {
+		t.Fatalf("StartArbitration error = %v; want nil", err)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// EG40: isClosed uses errors.Is/errors.As, not substring matching.
+func TestIsClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"io.EOF", io.EOF, true},
+		{"net.ErrClosed", net.ErrClosed, true},
+		{"io.ErrClosedPipe", io.ErrClosedPipe, true},
+		{"os.ErrClosed", os.ErrClosed, true},
+		{"wrapped io.EOF", fmt.Errorf("read: %w", io.EOF), true},
+		{"wrapped net.ErrClosed", fmt.Errorf("conn: %w", net.ErrClosed), true},
+		// The old bug: substring match on "closed" caused false positives.
+		{"unrelated closed string", fmt.Errorf("operation closed by user"), false},
+		{"random error", fmt.Errorf("something went wrong"), false},
+		// net.OpError wrapping os.ErrClosed.
+		{"OpError wrapping os.ErrClosed", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrClosed}, true},
+		{"OpError wrapping random error", &net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("timeout")}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transport.IsClosed(tc.err)
+			if got != tc.want {
+				t.Errorf("IsClosed(%v) = %v; want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }

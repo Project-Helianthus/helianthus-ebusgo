@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -250,6 +249,9 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 				return ev.Byte, nil
 			}
 			// Skip non-byte events (StreamEventStarted, StreamEventFailed).
+			// These are intentionally dropped in ReadByte — event-aware
+			// consumers should use ReadEvent instead, which returns all
+			// event types.
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
@@ -289,6 +291,10 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 	}
 }
 
+// Write sends payload bytes over the ENH transport. Each payload byte is
+// encoded as a 2-byte ENH pair. The full encoded buffer is written in a
+// single conn.Write call for atomicity — TCP may fragment, but the retry
+// loop ensures the complete buffer is delivered.
 func (t *ENHTransport) Write(payload []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
@@ -358,6 +364,8 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		return ebuserrors.ErrInvalidPayload
 	}
 
+	mismatchCount := 0
+
 	for {
 		if err := t.setReadDeadline(); err != nil {
 			return t.mapReadError(err)
@@ -381,8 +389,9 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		for _, msg := range msgs {
 			switch msg.Command {
 			case ENHResReceived:
-				// While waiting for STARTED/FAILED, ignore received bus bytes. The protocol
-				// state machine will resync after arbitration completes.
+				// Buffer received bus bytes during arbitration — these are
+				// valid bus data needed by the protocol layer for echo matching.
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 			case ENHResResetted:
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					arbitrationDone = true
@@ -394,6 +403,13 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			case ENHResStarted:
 				if msg.Data == initiator {
 					arbitrationDone = true
+				} else {
+					mismatchCount++
+					if mismatchCount >= 3 {
+						arbitrationDone = true
+						arbitrationErr = fmt.Errorf("enh arbitration started with wrong address 0x%02x (expected 0x%02x, %d mismatches): %w",
+							msg.Data, initiator, mismatchCount, ebuserrors.ErrInvalidPayload)
+					}
 				}
 			case ENHResFailed:
 				arbitrationDone = true
@@ -408,15 +424,17 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		}
 
 		if arbitrationDone {
-			// Reset parser and pending queue so that ReadByte starts with a
-			// clean state. TCP fragmentation can leave the parser with a
-			// pending byte1 from a partially-received frame that arrived
-			// alongside the STARTED/FAILED response. Without this reset,
-			// the stale byte1 combines with the first byte of the next
-			// RECEIVED echo to produce a wrong value, causing
-			// sendSymbolWithEcho to detect an echo mismatch.
+			// Reset parser so that ReadByte starts with clean parse state.
+			// TCP fragmentation can leave the parser with a pending byte1
+			// from a partially-received frame that arrived alongside the
+			// STARTED/FAILED response. Without this reset, the stale byte1
+			// combines with the first byte of the next RECEIVED echo to
+			// produce a wrong value, causing sendSymbolWithEcho to detect
+			// an echo mismatch.
+			//
+			// Don't clear pendingEvents — RECEIVED bytes during arbitration
+			// are valid bus data needed by the protocol layer for echo matching.
 			t.parser.Reset()
-			t.pendingEvents = t.pendingEvents[:0]
 			return arbitrationErr
 		}
 	}
@@ -705,13 +723,18 @@ func isClosed(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, io.EOF) ||
+	if errors.Is(err, io.EOF) ||
 		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, io.ErrClosedPipe) ||
-		errors.Is(err, os.ErrClosed) ||
-		strings.Contains(err.Error(), "closed pipe") ||
-		strings.Contains(err.Error(), "closed network connection") ||
-		strings.Contains(strings.ToLower(err.Error()), "closed")
+		errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	// Check wrapped net.OpError for closed-connection indicators.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return isClosed(opErr.Err)
+	}
+	return false
 }
 
 // BytesAreUnescaped reports that ENH transport delivers pre-unescaped bytes.
