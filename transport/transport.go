@@ -20,7 +20,7 @@ type RawTransport interface {
 type StreamEventKind uint8
 
 const (
-	StreamEventByte    StreamEventKind = iota + 1
+	StreamEventByte StreamEventKind = iota + 1
 	StreamEventReset
 	StreamEventStarted // adapter confirmed START arbitration
 	StreamEventFailed  // adapter rejected START arbitration

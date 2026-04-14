@@ -12,29 +12,29 @@ var (
 	ErrNACK         = stderrors.New("ebus: target returned NACK")
 	ErrNoSuchDevice = stderrors.New("ebus: no device responded at address")
 
-	ErrRetryExhausted    = stderrors.New("ebus: retries exhausted")
-	ErrInvalidPayload    = stderrors.New("ebus: payload does not match expected schema")
-	ErrTransportClosed   = stderrors.New("ebus: transport connection closed")
-	ErrAdapterReset      = stderrors.New("ebus: adapter reset during operation")
-	ErrAdapterHostError  = stderrors.New("ebus: adapter host-side protocol error")
-	ErrQueueFull         = stderrors.New("ebus: send queue at capacity")
+	ErrRetryExhausted   = stderrors.New("ebus: retries exhausted")
+	ErrInvalidPayload   = stderrors.New("ebus: payload does not match expected schema")
+	ErrTransportClosed  = stderrors.New("ebus: transport connection closed")
+	ErrAdapterReset     = stderrors.New("ebus: adapter reset during operation")
+	ErrAdapterHostError = stderrors.New("ebus: adapter host-side protocol error")
+	ErrQueueFull        = stderrors.New("ebus: send queue at capacity")
 )
 
 type Code string
 
 const (
-	CodeUnknown         Code = "UNKNOWN"
-	CodeInvalidPayload  Code = "INVALID_PAYLOAD"
-	CodeNoSuchDevice    Code = "NO_SUCH_DEVICE"
-	CodeNACK            Code = "NACK"
-	CodeTimeout         Code = "TIMEOUT"
-	CodeBusCollision    Code = "BUS_COLLISION"
-	CodeRetryExhausted  Code = "RETRY_EXHAUSTED"
-	CodeCRCMismatch     Code = "CRC_MISMATCH"
-	CodeTransportClosed   Code = "TRANSPORT_CLOSED"
-	CodeAdapterReset      Code = "ADAPTER_RESET"
-	CodeAdapterHostError  Code = "ADAPTER_HOST_ERROR"
-	CodeQueueFull         Code = "QUEUE_FULL"
+	CodeUnknown          Code = "UNKNOWN"
+	CodeInvalidPayload   Code = "INVALID_PAYLOAD"
+	CodeNoSuchDevice     Code = "NO_SUCH_DEVICE"
+	CodeNACK             Code = "NACK"
+	CodeTimeout          Code = "TIMEOUT"
+	CodeBusCollision     Code = "BUS_COLLISION"
+	CodeRetryExhausted   Code = "RETRY_EXHAUSTED"
+	CodeCRCMismatch      Code = "CRC_MISMATCH"
+	CodeTransportClosed  Code = "TRANSPORT_CLOSED"
+	CodeAdapterReset     Code = "ADAPTER_RESET"
+	CodeAdapterHostError Code = "ADAPTER_HOST_ERROR"
+	CodeQueueFull        Code = "QUEUE_FULL"
 )
 
 type Category string

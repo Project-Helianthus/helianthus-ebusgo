@@ -32,7 +32,7 @@ func (t *synTestTransport) ReadByte() (byte, error) {
 
 func (t *synTestTransport) Write(p []byte) (int, error) { return len(p), nil }
 func (t *synTestTransport) Close() error                { return nil }
-func (t *synTestTransport) BytesAreUnescaped() bool      { return t.unescaped }
+func (t *synTestTransport) BytesAreUnescaped() bool     { return t.unescaped }
 
 var _ transport.RawTransport = (*synTestTransport)(nil)
 var _ transport.EscapeAware = (*synTestTransport)(nil)
@@ -44,9 +44,9 @@ func TestWaitForSyn_UnescapedTransport_CountsRawSyn(t *testing.T) {
 		unescaped: true,
 		events: []synTestEvent{
 			{value: 0x42},
-			{value: SymbolSyn},  // SYN #1
+			{value: SymbolSyn}, // SYN #1
 			{value: 0x10},
-			{value: SymbolSyn},  // SYN #2
+			{value: SymbolSyn}, // SYN #2
 		},
 	}
 
@@ -74,8 +74,8 @@ func TestWaitForSyn_PlainTransport_DoesNotCountEscapedSyn(t *testing.T) {
 		unescaped: false,
 		events: []synTestEvent{
 			{value: SymbolEscape}, // escape prefix
-			{value: 0x01},        // -> decoded as data 0xAA, NOT a SYN boundary
-			{value: SymbolSyn},   // real SYN #1
+			{value: 0x01},         // -> decoded as data 0xAA, NOT a SYN boundary
+			{value: SymbolSyn},    // real SYN #1
 		},
 	}
 
