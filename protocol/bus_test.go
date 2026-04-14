@@ -1216,7 +1216,7 @@ func TestBus_QueueFull(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bus.Send(ctx, frame)
+		_, _ = bus.Send(ctx, frame)
 	}()
 	// Wait for the first request to start writing.
 	<-tr.writeStarted
@@ -1226,7 +1226,7 @@ func TestBus_QueueFull(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			bus.Send(ctx, frame)
+			_, _ = bus.Send(ctx, frame)
 		}()
 	}
 
@@ -1331,7 +1331,7 @@ func TestBus_RawTransportOpQueueFull(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bus.Send(ctx, protocol.Frame{
+		_, _ = bus.Send(ctx, protocol.Frame{
 			Source:    0x10,
 			Target:    protocol.AddressBroadcast,
 			Primary:   0x01,
@@ -1345,7 +1345,7 @@ func TestBus_RawTransportOpQueueFull(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bus.Send(ctx, protocol.Frame{
+		_, _ = bus.Send(ctx, protocol.Frame{
 			Source:    0x10,
 			Target:    protocol.AddressBroadcast,
 			Primary:   0x01,
