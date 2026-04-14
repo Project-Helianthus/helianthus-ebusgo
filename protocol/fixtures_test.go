@@ -72,13 +72,8 @@ func TestProtocol_FixtureReplay(t *testing.T) {
 
 			var got []byte
 			for _, msg := range msgs {
-				switch msg.Kind {
-				case transport.ENHMessageData:
-					got = append(got, msg.Byte)
-				case transport.ENHMessageFrame:
-					if msg.Command == transport.ENHResReceived {
-						got = append(got, msg.Data)
-					}
+				if msg.Command == transport.ENHResReceived {
+					got = append(got, msg.Data)
 				}
 			}
 

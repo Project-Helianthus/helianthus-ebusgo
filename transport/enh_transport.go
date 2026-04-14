@@ -159,23 +159,18 @@ func (t *ENHTransport) initLocked(features byte) (byte, error) {
 			return 0, err
 		}
 		for _, msg := range msgs {
-			switch msg.Kind {
-			case ENHMessageData:
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
-			case ENHMessageFrame:
-				switch msg.Command {
-				case ENHResReceived:
-					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
-				case ENHResResetted:
-					t.resetStateLocked()
-					return msg.Data, nil
-				case ENHResInfo:
-					// Ignore info responses for now; leave any received bytes queued.
-				case ENHResErrorEBUS:
-					return 0, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
-				case ENHResErrorHost:
-					return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
-				}
+			switch msg.Command {
+			case ENHResReceived:
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+			case ENHResResetted:
+				t.resetStateLocked()
+				return msg.Data, nil
+			case ENHResInfo:
+				// Ignore info responses for now; leave any received bytes queued.
+			case ENHResErrorEBUS:
+				return 0, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+			case ENHResErrorHost:
+				return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 			}
 		}
 	}
@@ -375,36 +370,31 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		var arbitrationDone bool
 		var arbitrationErr error
 		for _, msg := range msgs {
-			switch msg.Kind {
-			case ENHMessageData:
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
-			case ENHMessageFrame:
-				switch msg.Command {
-				case ENHResReceived:
-					// While waiting for STARTED/FAILED, ignore received bus bytes. The protocol
-					// state machine will resync after arbitration completes.
-				case ENHResResetted:
-					if reconnErr := t.reconnectLocked(); reconnErr != nil {
-						arbitrationDone = true
-						arbitrationErr = fmt.Errorf("enh adapter reset during arbitration, reconnect failed: %w", ebuserrors.ErrTransportClosed)
-					} else {
-						arbitrationDone = true
-						arbitrationErr = fmt.Errorf("enh adapter reset during arbitration (features 0x%02x): %w", msg.Data, ebuserrors.ErrAdapterReset)
-					}
-				case ENHResStarted:
-					if msg.Data == initiator {
-						arbitrationDone = true
-					}
-				case ENHResFailed:
+			switch msg.Command {
+			case ENHResReceived:
+				// While waiting for STARTED/FAILED, ignore received bus bytes. The protocol
+				// state machine will resync after arbitration completes.
+			case ENHResResetted:
+				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					arbitrationDone = true
-					arbitrationErr = fmt.Errorf("enh arbitration failed (initiator 0x%02x, winner 0x%02x): %w", initiator, msg.Data, ebuserrors.ErrBusCollision)
-				case ENHResErrorEBUS:
+					arbitrationErr = fmt.Errorf("enh adapter reset during arbitration, reconnect failed: %w", ebuserrors.ErrTransportClosed)
+				} else {
 					arbitrationDone = true
-					arbitrationErr = fmt.Errorf("enh arbitration ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrBusCollision)
-				case ENHResErrorHost:
-					arbitrationDone = true
-					arbitrationErr = fmt.Errorf("enh arbitration host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
+					arbitrationErr = fmt.Errorf("enh adapter reset during arbitration (features 0x%02x): %w", msg.Data, ebuserrors.ErrAdapterReset)
 				}
+			case ENHResStarted:
+				if msg.Data == initiator {
+					arbitrationDone = true
+				}
+			case ENHResFailed:
+				arbitrationDone = true
+				arbitrationErr = fmt.Errorf("enh arbitration failed (initiator 0x%02x, winner 0x%02x): %w", initiator, msg.Data, ebuserrors.ErrBusCollision)
+			case ENHResErrorEBUS:
+				arbitrationDone = true
+				arbitrationErr = fmt.Errorf("enh arbitration ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrBusCollision)
+			case ENHResErrorHost:
+				arbitrationDone = true
+				arbitrationErr = fmt.Errorf("enh arbitration host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 			}
 		}
 
@@ -541,44 +531,38 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		}
 
 		for _, msg := range msgs {
-			switch msg.Kind {
-			case ENHMessageData:
-				// Bus byte received during INFO exchange — queue it.
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
-			case ENHMessageFrame:
-				switch msg.Command {
-				case ENHResInfo:
-					if payloadLen < 0 {
-						// First INFO response: length byte.
-						payloadLen = int(msg.Data)
-						if payloadLen == 0 {
+			switch msg.Command {
+			case ENHResInfo:
+				if payloadLen < 0 {
+					// First INFO response: length byte.
+					payloadLen = int(msg.Data)
+					if payloadLen == 0 {
+						payloadComplete = true
+						payload = []byte{}
+						continue
+					}
+					payload = make([]byte, 0, payloadLen)
+				} else {
+					// Subsequent INFO responses: data bytes.
+					if len(payload) < payloadLen {
+						payload = append(payload, msg.Data)
+						if len(payload) >= payloadLen {
 							payloadComplete = true
-							payload = []byte{}
-							continue
-						}
-						payload = make([]byte, 0, payloadLen)
-					} else {
-						// Subsequent INFO responses: data bytes.
-						if len(payload) < payloadLen {
-							payload = append(payload, msg.Data)
-							if len(payload) >= payloadLen {
-								payloadComplete = true
-							}
 						}
 					}
-				case ENHResReceived:
-					// Bus byte received during INFO — queue it.
-					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
-				case ENHResResetted:
-					t.surfaceResetLocked()
-					if !payloadComplete {
-						resetBeforeCompletion = true
-					}
-				case ENHResErrorEBUS:
-					return nil, fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
-				case ENHResErrorHost:
-					return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 				}
+			case ENHResReceived:
+				// Bus byte received during INFO — queue it.
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+			case ENHResResetted:
+				t.surfaceResetLocked()
+				if !payloadComplete {
+					resetBeforeCompletion = true
+				}
+			case ENHResErrorEBUS:
+				return nil, fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+			case ENHResErrorHost:
+				return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 			}
 		}
 
@@ -613,57 +597,55 @@ func (t *ENHTransport) fillPendingLocked() error {
 
 	bytesRead, err := t.conn.Read(t.buffer)
 	if err != nil {
+		if isTimeout(err) {
+			t.parser.Reset() // EG9: clear any pending byte1 from partial frame
+		}
 		return t.mapReadError(err)
 	}
 	if bytesRead == 0 {
 		return nil
 	}
 
-	msgs, err := t.parser.Parse(t.buffer[:bytesRead])
-	if err != nil {
-		if errors.Is(err, ebuserrors.ErrInvalidPayload) {
-			// Parser desync: orphan byte2 or missing byte2, typically caused
-			// by RESETTED handler destroying pending state mid-iteration, or
-			// by TCP fragmentation delivering partial ENH frames. Reset the
-			// parser to re-synchronize on the next valid byte1 (>= 0xC0).
-			// Any messages parsed before the desync point are lost — this is
-			// acceptable vs the alternative of a full TCP reconnect.
+	// EG8/EG34: Parse now returns valid messages alongside the first error.
+	// Process all returned messages BEFORE checking the error so that valid
+	// bytes parsed before a corrupt byte are not lost.
+	msgs, parseErr := t.parser.Parse(t.buffer[:bytesRead])
+	for _, msg := range msgs {
+		switch msg.Command {
+		case ENHResReceived:
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+		case ENHResStarted:
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+		case ENHResFailed:
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+		case ENHResResetted:
+			if t.dialFunc != nil {
+				if reconnErr := t.reconnectLocked(); reconnErr != nil {
+					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
+				}
+				t.resets++
+				// Reconnected to fresh TCP — remaining msgs were
+				// parsed from the old stream and are stale.
+				return nil
+			}
+			// Adapter-direct mode (no dialFunc): the adapter periodically
+			// sends RESETTED as a bus-level event. Do NOT signal this as
+			// ErrAdapterReset — that causes handleReset() which drains the
+			// active channel, cancels pending arbitrations, and disrupts
+			// the mux state machine. In adapter-direct mode the mux owns
+			// the TCP connection lifecycle and RESETTED is informational
+			// only — continue processing remaining msgs from the same batch.
+		}
+	}
+	if parseErr != nil {
+		if errors.Is(parseErr, ebuserrors.ErrInvalidPayload) {
+			// Parser desync: orphan byte2, missing byte2, or invalid command.
+			// Reset the parser to re-synchronize on the next valid byte1.
+			// Valid messages before the desync point have already been queued above.
 			t.parser.Reset()
 			return nil
 		}
-		return err
-	}
-	for _, msg := range msgs {
-		switch msg.Kind {
-		case ENHMessageData:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Byte})
-		case ENHMessageFrame:
-			switch msg.Command {
-			case ENHResReceived:
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
-			case ENHResStarted:
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
-			case ENHResFailed:
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
-			case ENHResResetted:
-				if t.dialFunc != nil {
-					if reconnErr := t.reconnectLocked(); reconnErr != nil {
-						return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
-					}
-					t.resets++
-					// Reconnected to fresh TCP — remaining msgs were
-					// parsed from the old stream and are stale.
-					return nil
-				}
-				// Adapter-direct mode (no dialFunc): the adapter periodically
-				// sends RESETTED as a bus-level event. Do NOT signal this as
-				// ErrAdapterReset — that causes handleReset() which drains the
-				// active channel, cancels pending arbitrations, and disrupts
-				// the mux state machine. In adapter-direct mode the mux owns
-				// the TCP connection lifecycle and RESETTED is informational
-				// only — continue processing remaining msgs from the same batch.
-			}
-		}
+		return parseErr
 	}
 	return nil
 }

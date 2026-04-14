@@ -26,7 +26,6 @@ func TestENHEncodeDecodeRoundTrip(t *testing.T) {
 		transport.ENHResFailed,
 		transport.ENHResErrorEBUS,
 		transport.ENHResErrorHost,
-		transport.ENHCommand(0xF),
 	}
 	dataValues := []byte{0x00, 0x01, 0x7F, 0x80, 0xA5, 0xFF}
 
@@ -139,6 +138,95 @@ func TestENHParser_MissingByte2(t *testing.T) {
 	}
 	_, _, err := parser.Feed(0x01)
 	assertInvalidPayload(t, err)
+}
+
+func TestENHDecode_InvalidCommand0x0F(t *testing.T) {
+	t.Parallel()
+
+	// 0xFF encodes command nibble 0x0F which is not a valid ENH command.
+	_, err := transport.DecodeENH(0xFF, 0x80)
+	assertInvalidPayload(t, err)
+}
+
+func TestENHDecode_AllInvalidCommandNibbles(t *testing.T) {
+	t.Parallel()
+
+	// Commands 0x4..0x9, 0xD, 0xE, 0xF are undefined.
+	invalid := []transport.ENHCommand{0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xD, 0xE, 0xF}
+	for _, cmd := range invalid {
+		seq := transport.EncodeENH(cmd, 0x00)
+		_, err := transport.DecodeENH(seq[0], seq[1])
+		if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+			t.Fatalf("DecodeENH(cmd=0x%X) error = %v; want ErrInvalidPayload", cmd, err)
+		}
+	}
+}
+
+func TestENHParser_ParseMixedValidAndCorrupt(t *testing.T) {
+	t.Parallel()
+
+	var parser transport.ENHParser
+	// Build a stream: valid data byte (0x10), then orphan byte2 (0x80, corrupt), then valid data byte (0x20).
+	data := []byte{0x10, 0x80, 0x20}
+
+	msgs, err := parser.Parse(data)
+	// Should return both valid messages AND the error.
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("Parse error = %v; want ErrInvalidPayload", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Parse messages = %d; want 2 (valid bytes before and after corrupt)", len(msgs))
+	}
+	if msgs[0].Data != 0x10 {
+		t.Fatalf("msg[0].Data = 0x%02x; want 0x10", msgs[0].Data)
+	}
+	if msgs[1].Data != 0x20 {
+		t.Fatalf("msg[1].Data = 0x%02x; want 0x20", msgs[1].Data)
+	}
+}
+
+func TestENHParser_ParseCorruptThenValid(t *testing.T) {
+	t.Parallel()
+
+	var parser transport.ENHParser
+	// byte1 (0xC0) followed by invalid byte2 (0x01, not 0x80 mask) — corrupt frame.
+	// Then a valid data byte 0x42.
+	data := []byte{0xC0, 0x01, 0x42}
+
+	msgs, err := parser.Parse(data)
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("Parse error = %v; want ErrInvalidPayload", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Parse messages = %d; want 1", len(msgs))
+	}
+	if msgs[0].Data != 0x42 {
+		t.Fatalf("msg[0].Data = 0x%02x; want 0x42", msgs[0].Data)
+	}
+}
+
+func TestENHParser_ResetClearsPending(t *testing.T) {
+	t.Parallel()
+
+	var parser transport.ENHParser
+	// Feed byte1, putting parser in pending state.
+	_, ok, err := parser.Feed(0xC0)
+	if err != nil || ok {
+		t.Fatalf("Feed byte1 ok=%v err=%v", ok, err)
+	}
+	// Simulate timeout: reset parser.
+	parser.Reset()
+	// After reset, a fresh data byte should parse cleanly (not combine with stale byte1).
+	msg, ok, err := parser.Feed(0x55)
+	if err != nil {
+		t.Fatalf("Feed after reset error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected message after reset")
+	}
+	if msg.Command != transport.ENHResReceived || msg.Data != 0x55 {
+		t.Fatalf("message = %+v; want Received 0x55", msg)
+	}
 }
 
 func TestENHParser_ParseMultiple(t *testing.T) {
