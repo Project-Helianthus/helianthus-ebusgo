@@ -85,8 +85,10 @@ type BusEvent struct {
 
 // BusObserver receives protocol-level observe-first bus events. The bus invokes
 // observers synchronously from its own control flow in later milestones.
-// Implementations must return quickly and may not retain request/response data
-// without copying it first.
+// Implementations must return quickly and must not call Bus.Send or
+// Bus.RawTransportOp -- doing so will deadlock the bus run loop since events
+// are dispatched synchronously. Implementations may not retain request/response
+// data without copying it first.
 //
 // Panic containment is an explicit bus policy: once wiring lands, each observer
 // invocation is recovered independently so a single panic cannot terminate the

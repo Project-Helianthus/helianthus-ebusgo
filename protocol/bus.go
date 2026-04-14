@@ -165,9 +165,19 @@ func (b *Bus) Send(ctx context.Context, frame Frame) (*Frame, error) {
 		b.queueMu.Unlock()
 		return nil, ebuserrors.ErrTransportClosed
 	}
+	if b.queue.Len() >= b.outCap {
+		b.queueMu.Unlock()
+		return nil, ebuserrors.ErrQueueFull
+	}
 	request := &busRequest{
-		frame: frame,
-		ctx:   ctx,
+		frame: Frame{
+			Source:    frame.Source,
+			Target:    frame.Target,
+			Primary:   frame.Primary,
+			Secondary: frame.Secondary,
+			Data:      append([]byte(nil), frame.Data...),
+		},
+		ctx: ctx,
 		// Capacity 1 to avoid blocking the run loop when delivering results.
 		resp: make(chan busResult, 1),
 	}
@@ -194,6 +204,7 @@ func (b *Bus) runLoop(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				b.markClosed()
+				b.drainQueue()
 				return
 			case <-b.notify:
 				continue
@@ -241,6 +252,10 @@ func (b *Bus) RawTransportOp(ctx context.Context, fn func(transport.RawTransport
 	if b.closed {
 		b.queueMu.Unlock()
 		return ebuserrors.ErrTransportClosed
+	}
+	if b.queue.Len() >= b.outCap {
+		b.queueMu.Unlock()
+		return ebuserrors.ErrQueueFull
 	}
 	op := &busRequest{
 		ctx:             ctx,
@@ -548,6 +563,9 @@ func (b *Bus) wrapRetryError(err error) error {
 	return fmt.Errorf("bus send failed: %w", err)
 }
 
+// readByte blocks until a byte is available from the transport or an error
+// occurs. The blocking duration is bounded by the transport's read timeout.
+// To interrupt, close the transport connection which unblocks the read.
 func (b *Bus) readByte(runCtx, reqCtx context.Context) (byte, error) {
 	if err := b.contextError(runCtx, reqCtx); err != nil {
 		return 0, err
@@ -611,6 +629,9 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 	frameType := frame.Type()
 	if frameType == FrameTypeUnknown {
 		return nil, errUnknownFrameType
+	}
+	if len(frame.Data) > 255 {
+		return nil, fmt.Errorf("frame data length %d exceeds eBUS maximum 255: %w", len(frame.Data), ebuserrors.ErrInvalidPayload)
 	}
 	startedAt := time.Now()
 
@@ -985,6 +1006,22 @@ func (b *Bus) markClosed() {
 	b.queueMu.Unlock()
 }
 
+// drainQueue sends ErrTransportClosed to all pending requests and transport ops.
+// Must be called after markClosed to ensure no new items are enqueued.
+func (b *Bus) drainQueue() {
+	for {
+		request, ok := b.dequeue()
+		if !ok {
+			return
+		}
+		if request.transportOp != nil {
+			request.transportOpResp <- ebuserrors.ErrTransportClosed
+		} else {
+			request.resp <- busResult{err: ebuserrors.ErrTransportClosed}
+		}
+	}
+}
+
 // ObserverFaultSnapshot returns the current bounded observer-fault state.
 func (b *Bus) ObserverFaultSnapshot() ObserverFaultSnapshot {
 	b.observerFaultMu.Lock()
@@ -1101,6 +1138,14 @@ func (b *Bus) emitObserverEvent(event BusEvent) {
 	observer := b.config.Observer
 	if observer == nil {
 		return
+	}
+
+	// Clone slice fields so observer callbacks cannot alias caller memory.
+	if event.HasRequest && len(event.Request.Data) > 0 {
+		event.Request.Data = append([]byte(nil), event.Request.Data...)
+	}
+	if event.HasResponse && len(event.Response.Data) > 0 {
+		event.Response.Data = append([]byte(nil), event.Response.Data...)
 	}
 
 	result := callObserver(observer, event)

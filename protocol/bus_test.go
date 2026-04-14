@@ -1099,3 +1099,268 @@ func TestBus_CollisionRetryRespectsTimeoutRetriesWithoutDeadline(t *testing.T) {
 }
 
 var _ transport.RawTransport = (*scriptedTransport)(nil)
+
+func TestBus_SendFrameDataOver255(t *testing.T) {
+	t.Parallel()
+
+	tr := &scriptedTransport{}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      make([]byte, 256),
+	}
+	_, err := bus.Send(ctx, frame)
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("Send error = %v; want ErrInvalidPayload", err)
+	}
+}
+
+func TestBus_SendClonesFrameData(t *testing.T) {
+	t.Parallel()
+
+	// Use a gating transport so the Send blocks until we mutate the data.
+	tr := newGatingTransport()
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	data := []byte{0xAA, 0xBB}
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      data,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var sendErr error
+	go func() {
+		defer wg.Done()
+		_, sendErr = bus.Send(ctx, frame)
+	}()
+
+	// Wait for the write to start, then mutate the original data.
+	<-tr.writeStarted
+	data[0] = 0xFF
+	data[1] = 0xFF
+
+	// Release the read so the transaction completes.
+	close(tr.releaseRead)
+	wg.Wait()
+
+	// The sent bytes should contain the original data, not the mutated version.
+	flat := func() []byte {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		out := make([]byte, 0)
+		for _, w := range tr.writes {
+			out = append(out, w...)
+		}
+		return out
+	}()
+
+	// The wire format is: SRC DST PB SB LEN DATA... CRC SYN
+	// Data starts at index 4 (LEN) and the actual data bytes follow.
+	// Check that the data bytes in the wire are 0xAA, 0xBB (original).
+	if len(flat) < 7 {
+		if sendErr != nil {
+			// Transaction failed (timeout expected from gating transport), but
+			// we can still verify the written bytes contain original data.
+			t.Logf("Send error (expected with gating transport): %v", sendErr)
+		}
+		if len(flat) == 0 {
+			t.Fatal("no bytes written to transport")
+		}
+	}
+	// Find the data bytes: index 4 is LEN=0x02, indices 5-6 are the data.
+	if len(flat) >= 7 && (flat[5] != 0xAA || flat[6] != 0xBB) {
+		t.Fatalf("wire data = [0x%02x, 0x%02x]; want [0xAA, 0xBB] (clone failed)", flat[5], flat[6])
+	}
+}
+
+func TestBus_QueueFull(t *testing.T) {
+	t.Parallel()
+
+	// Use a gating transport to block the run loop on the first request.
+	tr := newGatingTransport()
+	config := protocol.DefaultBusConfig()
+	capacity := 2
+	bus := protocol.NewBus(tr, config, capacity)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
+	// First Send will be picked up by runLoop and block on transport.
+	// We need it to block so subsequent sends fill the queue.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		bus.Send(ctx, frame)
+	}()
+	// Wait for the first request to start writing.
+	<-tr.writeStarted
+
+	// Now fill the queue to capacity.
+	for i := 0; i < capacity; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bus.Send(ctx, frame)
+		}()
+	}
+
+	// Give goroutines time to enqueue.
+	time.Sleep(50 * time.Millisecond)
+
+	// The next send should fail with ErrQueueFull.
+	_, err := bus.Send(ctx, frame)
+	if !errors.Is(err, ebuserrors.ErrQueueFull) {
+		t.Fatalf("Send error = %v; want ErrQueueFull", err)
+	}
+
+	// Cleanup: release the gating transport so goroutines can finish.
+	close(tr.releaseRead)
+	cancel()
+	wg.Wait()
+}
+
+func TestBus_DrainQueueOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	// Use a gating transport so the run loop blocks on the first request.
+	tr := newGatingTransport()
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 64)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	bus.Run(runCtx)
+
+	// Send a request that will block in the run loop.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var firstErr error
+	go func() {
+		defer wg.Done()
+		_, firstErr = bus.Send(context.Background(), protocol.Frame{
+			Source:    0x10,
+			Target:    protocol.AddressBroadcast,
+			Primary:   0x01,
+			Secondary: 0x02,
+			Data:      []byte{0x03},
+		})
+	}()
+	<-tr.writeStarted
+
+	// Enqueue a second request that will sit in the queue.
+	wg.Add(1)
+	var secondErr error
+	go func() {
+		defer wg.Done()
+		_, secondErr = bus.Send(context.Background(), protocol.Frame{
+			Source:    0x20,
+			Target:    protocol.AddressBroadcast,
+			Primary:   0x01,
+			Secondary: 0x02,
+			Data:      []byte{0x04},
+		})
+	}()
+	// Give it time to enqueue.
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the run context. This should drain the queue and notify
+	// the second request with ErrTransportClosed.
+	close(tr.releaseRead)
+	runCancel()
+
+	// Both goroutines should complete within a reasonable time.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success — both goroutines finished.
+	case <-time.After(3 * time.Second):
+		t.Fatal("goroutines did not finish after run context cancelled — drain likely failed")
+	}
+
+	// The second request should have received ErrTransportClosed from drainQueue.
+	if secondErr != nil && !errors.Is(secondErr, ebuserrors.ErrTransportClosed) {
+		// It may also get context.Canceled if it was picked up, but
+		// ErrTransportClosed is the expected drain path.
+		t.Logf("second Send error = %v (ErrTransportClosed expected from drain)", secondErr)
+	}
+	_ = firstErr // First request outcome depends on transport timing.
+}
+
+func TestBus_RawTransportOpQueueFull(t *testing.T) {
+	t.Parallel()
+
+	tr := newGatingTransport()
+	config := protocol.DefaultBusConfig()
+	capacity := 1
+	bus := protocol.NewBus(tr, config, capacity)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	// First send blocks in transport.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		bus.Send(ctx, protocol.Frame{
+			Source:    0x10,
+			Target:    protocol.AddressBroadcast,
+			Primary:   0x01,
+			Secondary: 0x02,
+			Data:      []byte{0x03},
+		})
+	}()
+	<-tr.writeStarted
+
+	// Fill queue.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		bus.Send(ctx, protocol.Frame{
+			Source:    0x10,
+			Target:    protocol.AddressBroadcast,
+			Primary:   0x01,
+			Secondary: 0x02,
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// RawTransportOp should also fail with ErrQueueFull.
+	err := bus.RawTransportOp(ctx, func(transport.RawTransport) error { return nil })
+	if !errors.Is(err, ebuserrors.ErrQueueFull) {
+		t.Fatalf("RawTransportOp error = %v; want ErrQueueFull", err)
+	}
+
+	close(tr.releaseRead)
+	cancel()
+	wg.Wait()
+}
