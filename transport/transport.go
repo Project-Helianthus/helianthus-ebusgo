@@ -49,6 +49,13 @@ type InfoRequester interface {
 	RequestInfo(id AdapterInfoID) ([]byte, error)
 }
 
+// EscapeAware is implemented by transports that deliver already-unescaped
+// bytes. When BytesAreUnescaped returns true, the protocol layer must skip
+// wire-level escape decoding (0xA9 sequences) on both read and write paths.
+type EscapeAware interface {
+	BytesAreUnescaped() bool
+}
+
 // Reconnectable is an optional extension implemented by transports that can
 // tear down and re-establish their underlying connection mid-session. This is
 // used by the protocol layer to recover from dead TCP connections (timeout

@@ -1505,8 +1505,8 @@ func TestENHTransport_TimeoutResetsParserState(t *testing.T) {
 			serverErr <- err
 			return
 		}
-		// Wait for the timeout to fire.
-		time.Sleep(100 * time.Millisecond)
+		// Wait for the timeout to fire (readTimeout is 50ms).
+		time.Sleep(70 * time.Millisecond)
 		// Now send a valid raw data byte.
 		_, err := server.Write([]byte{0x55})
 		serverErr <- err

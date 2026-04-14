@@ -714,7 +714,12 @@ func isClosed(err error) bool {
 		strings.Contains(strings.ToLower(err.Error()), "closed")
 }
 
+// BytesAreUnescaped reports that ENH transport delivers pre-unescaped bytes.
+// The adapter handles eBUS wire escaping internally.
+func (t *ENHTransport) BytesAreUnescaped() bool { return true }
+
 var _ RawTransport = (*ENHTransport)(nil)
 var _ StreamEventReader = (*ENHTransport)(nil)
 var _ InfoRequester = (*ENHTransport)(nil)
 var _ Reconnectable = (*ENHTransport)(nil)
+var _ EscapeAware = (*ENHTransport)(nil)
