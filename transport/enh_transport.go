@@ -234,12 +234,13 @@ func (t *ENHTransport) reconnectLocked() error {
 
 	// Read INIT response (readMu held by caller).
 	if _, err := t.initRecvLocked(); err != nil {
-		// INIT recv failed (timeout waiting for RESETTED) but newConn is
-		// still a valid TCP connection — we successfully sent the INIT
-		// request. Keep newConn in place so subsequent operations get
-		// timeout errors (retryable) instead of ErrTransportClosed (fatal).
-		// The old conn was already closed, so there is nothing to restore.
-		return fmt.Errorf("enh reconnect init recv: %v: %w", err, ebuserrors.ErrAdapterReset)
+		// INIT recv failed but newConn is still a valid TCP connection —
+		// we successfully sent the INIT request. Keep newConn in place so
+		// subsequent operations get timeout errors (retryable) instead of
+		// ErrTransportClosed (fatal). Preserve the original error class so
+		// shouldRetry handles it correctly (e.g. ErrAdapterHostError is
+		// non-retryable, ErrTimeout is transient).
+		return fmt.Errorf("enh reconnect init recv: %w", err)
 	}
 	return nil
 }
@@ -640,9 +641,11 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	}
 }
 
+// Close closes the underlying connection. net.Conn.Close is safe for
+// concurrent use and will unblock any pending Read or Write call, so we
+// do NOT acquire readMu/writeMu here — holding writeMu would block
+// Close until a stalled Write completes, preventing timely shutdown.
 func (t *ENHTransport) Close() error {
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
 	return t.conn.Close()
 }
 

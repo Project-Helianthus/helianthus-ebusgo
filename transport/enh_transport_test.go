@@ -1843,12 +1843,13 @@ func TestENHTransport_ReconnectInitRecvError_ConnStillUsable(t *testing.T) {
 	if err == nil {
 		t.Fatal("Reconnect() should have returned an error on initRecvLocked eBUS error")
 	}
-	// The error should wrap ErrAdapterReset (transient), NOT ErrTransportClosed (fatal).
-	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
-		t.Fatalf("Reconnect() error = %v; want ErrAdapterReset (transient)", err)
-	}
+	// The error should preserve the original error class from initRecvLocked
+	// (ErrInvalidPayload for eBUS errors), NOT wrap as ErrTransportClosed (fatal).
 	if errors.Is(err, ebuserrors.ErrTransportClosed) {
-		t.Fatalf("Reconnect() error wraps ErrTransportClosed; want ErrAdapterReset only")
+		t.Fatalf("Reconnect() error wraps ErrTransportClosed; want original error class preserved")
+	}
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("Reconnect() error = %v; want ErrInvalidPayload (from eBUS error response)", err)
 	}
 
 	// The conn should still be usable — Write should not fail with ErrTransportClosed.
