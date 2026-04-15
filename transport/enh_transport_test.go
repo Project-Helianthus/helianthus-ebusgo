@@ -753,7 +753,7 @@ func TestENHTransport_ForwardsEchoedBytes(t *testing.T) {
 		t.Fatalf("server error = %v", err)
 	}
 }
-func TestENHTransport_StartArbitrationStartedPreservesReceivedBytes(t *testing.T) {
+func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -764,7 +764,6 @@ func TestENHTransport_StartArbitrationStartedPreservesReceivedBytes(t *testing.T
 	initiator := byte(0x10)
 
 	serverErr := make(chan error, 1)
-	// Goroutine exits after validating the request and sending responses.
 	go func() {
 		buf := make([]byte, 2)
 		if _, err := io.ReadFull(server, buf); err != nil {
@@ -788,15 +787,11 @@ func TestENHTransport_StartArbitrationStartedPreservesReceivedBytes(t *testing.T
 		t.Fatalf("StartArbitration error = %v", err)
 	}
 
-	// EG31/EG43: RECEIVED bytes during arbitration are preserved.
-	for _, want := range []byte{0x11, 0x22} {
-		got, err := enh.ReadByte()
-		if err != nil {
-			t.Fatalf("ReadByte error = %v; want 0x%02x", err, want)
-		}
-		if got != want {
-			t.Fatalf("ReadByte = 0x%02x; want 0x%02x", got, want)
-		}
+	// RECEIVED bytes during arbitration are discarded to prevent echo
+	// mismatch in sendRawWithEcho. ReadByte should block (timeout).
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("ReadByte after arbitration = %v; want ErrTimeout (stale bytes discarded)", err)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -804,7 +799,7 @@ func TestENHTransport_StartArbitrationStartedPreservesReceivedBytes(t *testing.T
 	}
 }
 
-func TestENHTransport_StartArbitrationFailedPreservesReceivedBytes(t *testing.T) {
+func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -816,7 +811,6 @@ func TestENHTransport_StartArbitrationFailedPreservesReceivedBytes(t *testing.T)
 	winner := byte(0x30)
 
 	serverErr := make(chan error, 1)
-	// Goroutine exits after validating the request and sending responses.
 	go func() {
 		buf := make([]byte, 2)
 		if _, err := io.ReadFull(server, buf); err != nil {
@@ -841,15 +835,11 @@ func TestENHTransport_StartArbitrationFailedPreservesReceivedBytes(t *testing.T)
 		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
 	}
 
-	// EG31/EG43: RECEIVED bytes during arbitration are preserved even on failure.
-	for _, want := range []byte{0x33, 0x44} {
-		got, readErr := enh.ReadByte()
-		if readErr != nil {
-			t.Fatalf("ReadByte error = %v; want 0x%02x", readErr, want)
-		}
-		if got != want {
-			t.Fatalf("ReadByte = 0x%02x; want 0x%02x", got, want)
-		}
+	// RECEIVED bytes during arbitration are discarded on failure too.
+	// ReadByte should block (timeout).
+	_, readErr := enh.ReadByte()
+	if !errors.Is(readErr, ebuserrors.ErrTimeout) {
+		t.Fatalf("ReadByte after failed arbitration = %v; want ErrTimeout", readErr)
 	}
 
 	if err := <-serverErr; err != nil {

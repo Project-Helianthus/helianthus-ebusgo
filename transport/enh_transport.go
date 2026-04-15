@@ -412,12 +412,10 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		for _, msg := range msgs {
 			switch msg.Command {
 			case ENHResReceived:
-				// Buffer received bus bytes during arbitration — these are
-				// valid bus data needed by the protocol layer for echo matching.
-				// Cap at 256 events to prevent unbounded growth on busy buses.
-				if len(t.pendingEvents) < 256 {
-					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
-				}
+				// Discard RECEIVED bytes during arbitration. These are other
+				// devices' traffic, not our echoes. Buffering them would cause
+				// echo mismatch in sendRawWithEcho (ReadByte drains
+				// pendingEvents first, returning stale bytes as "echoes").
 			case ENHResResetted:
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					arbitrationDone = true
@@ -450,17 +448,14 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		}
 
 		if arbitrationDone {
-			// Reset parser so that ReadByte starts with clean parse state.
-			// TCP fragmentation can leave the parser with a pending byte1
-			// from a partially-received frame that arrived alongside the
-			// STARTED/FAILED response. Without this reset, the stale byte1
-			// combines with the first byte of the next RECEIVED echo to
-			// produce a wrong value, causing sendSymbolWithEcho to detect
-			// an echo mismatch.
-			//
-			// Don't clear pendingEvents — RECEIVED bytes during arbitration
-			// are valid bus data needed by the protocol layer for echo matching.
+			// Reset parser and pending events so that ReadByte starts with
+			// a clean state. TCP fragmentation can leave the parser with a
+			// pending byte1 from a partially-received frame that arrived
+			// alongside the STARTED/FAILED response. Stale RECEIVED bytes
+			// in pendingEvents would be consumed as echoes by
+			// sendRawWithEcho, causing echo mismatch errors.
 			t.parser.Reset()
+			t.pendingEvents = t.pendingEvents[:0]
 			return arbitrationErr
 		}
 	}
