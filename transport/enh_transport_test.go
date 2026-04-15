@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1736,6 +1737,10 @@ func TestIsClosed(t *testing.T) {
 		// net.OpError wrapping os.ErrClosed.
 		{"OpError wrapping os.ErrClosed", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrClosed}, true},
 		{"OpError wrapping random error", &net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("timeout")}, false},
+		// syscall connection-reset errors (Linux ECONNRESET/ECONNABORTED).
+		{"ECONNRESET", syscall.ECONNRESET, true},
+		{"ECONNABORTED", syscall.ECONNABORTED, true},
+		{"OpError wrapping SyscallError with ECONNRESET", &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}, true},
 	}
 
 	for _, tc := range tests {

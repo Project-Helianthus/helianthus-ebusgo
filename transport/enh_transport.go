@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
@@ -191,6 +192,8 @@ func (t *ENHTransport) reconnectLocked() error {
 	// Dial new connection BEFORE closing the old one. If dial fails,
 	// the old conn stays in place so subsequent operations produce
 	// timeout errors (retryable) rather than ErrTransportClosed (fatal).
+	// If dial succeeds but INIT fails, the new conn is closed and the
+	// transport is effectively dead (ErrTransportClosed on all paths).
 	newConn, err := t.dialFunc()
 	if err != nil {
 		return fmt.Errorf("enh reconnect dial: %v: %w", err, ebuserrors.ErrTransportClosed)
@@ -391,7 +394,10 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			case ENHResReceived:
 				// Buffer received bus bytes during arbitration — these are
 				// valid bus data needed by the protocol layer for echo matching.
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				// Cap at 256 events to prevent unbounded growth on busy buses.
+				if len(t.pendingEvents) < 256 {
+					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				}
 			case ENHResResetted:
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					arbitrationDone = true
@@ -726,7 +732,9 @@ func isClosed(err error) bool {
 	if errors.Is(err, io.EOF) ||
 		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, io.ErrClosedPipe) ||
-		errors.Is(err, os.ErrClosed) {
+		errors.Is(err, os.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) {
 		return true
 	}
 	// Check wrapped net.OpError for closed-connection indicators.
