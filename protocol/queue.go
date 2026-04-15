@@ -82,14 +82,20 @@ func (q *priorityQueue) pop() (*busRequest, bool) {
 	if q.Len() == 0 {
 		return nil, false
 	}
-	// Age remaining items before popping. Items that exceed the starvation
-	// threshold are promoted to priority 0 (highest) so they get served next.
+	// Age remaining items before popping. Two-phase approach: first
+	// increment ages and collect items to promote, then apply promotions
+	// with heap.Fix. This avoids mutating the heap during iteration
+	// (heap.Fix calls Swap which reorders q.items).
+	var promoted []*queueItem
 	for _, item := range q.items {
 		item.age++
 		if item.age >= starvationThreshold && item.priority > 0 {
-			item.priority = 0
-			heap.Fix(q, item.index)
+			promoted = append(promoted, item)
 		}
+	}
+	for _, item := range promoted {
+		item.priority = 0
+		heap.Fix(q, item.index)
 	}
 	item := heap.Pop(q).(*queueItem)
 	return item.request, true

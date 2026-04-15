@@ -201,7 +201,7 @@ func (m *CollisionMonitor) matchesRecentTX(frame Frame, now time.Time) bool {
 
 func (m *CollisionMonitor) appendHistory(record txRecord) {
 	m.history = append(m.history, record)
-	if len(m.history) < m.cfg.HistoryCapacity {
+	if len(m.history) <= m.cfg.HistoryCapacity {
 		return
 	}
 	excess := len(m.history) - m.cfg.HistoryCapacity

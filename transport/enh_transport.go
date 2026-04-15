@@ -100,32 +100,43 @@ func (t *ENHTransport) Init(features byte) (byte, error) {
 	return t.initLocked(features)
 }
 
-// initLocked performs the INIT handshake. Caller must hold readMu.
-// Returns the features byte from the adapter's RESETTED response.
-func (t *ENHTransport) initLocked(features byte) (byte, error) {
-	t.writeMu.Lock()
+// initSendLocked writes the INIT request frame. Caller must hold writeMu.
+func (t *ENHTransport) initSendLocked(features byte) error {
 	seq := EncodeENH(ENHReqInit, features)
 	written := 0
 	for written < len(seq) {
 		if err := t.setWriteDeadline(); err != nil {
-			t.writeMu.Unlock()
-			return 0, t.mapWriteError(err)
+			return t.mapWriteError(err)
 		}
 		n, err := t.conn.Write(seq[written:])
 		written += n
 		if err != nil {
-			t.writeMu.Unlock()
-			return 0, t.mapWriteError(err)
+			return t.mapWriteError(err)
 		}
 		if n == 0 {
 			break
 		}
 	}
-	t.writeMu.Unlock()
 	if written != len(seq) {
-		return 0, ebuserrors.ErrInvalidPayload
+		return ebuserrors.ErrInvalidPayload
 	}
+	return nil
+}
 
+// initLocked performs the INIT handshake. Caller must hold readMu.
+// Returns the features byte from the adapter's RESETTED response.
+func (t *ENHTransport) initLocked(features byte) (byte, error) {
+	t.writeMu.Lock()
+	err := t.initSendLocked(features)
+	t.writeMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return t.initRecvLocked()
+}
+
+// initRecvLocked reads the INIT response. Caller must hold readMu.
+func (t *ENHTransport) initRecvLocked() (byte, error) {
 	maxWait := t.readTimeout
 	if maxWait <= 0 {
 		maxWait = 2 * time.Second
@@ -201,19 +212,28 @@ func (t *ENHTransport) reconnectLocked() error {
 	if tcpConn, ok := newConn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 	}
-	// Acquire writeMu to prevent Write() from reading t.conn during swap.
-	// Lock ordering: readMu (held by caller) before writeMu.
+	// Hold writeMu for the entire swap+init-send sequence to prevent
+	// concurrent Write() from sending application bytes on the new
+	// connection before INIT completes. Lock ordering: readMu (held by
+	// caller) before writeMu.
 	t.writeMu.Lock()
 	_ = t.conn.Close()
 	t.conn = newConn
-	t.writeMu.Unlock()
 	t.resetStateLocked()
-	if _, err := t.initLocked(0x01); err != nil {
-		// Init failed — close the new connection to prevent TCP leaks (EG52).
+	sendErr := t.initSendLocked(0x01)
+	if sendErr != nil {
+		_ = t.conn.Close()
+		t.writeMu.Unlock()
+		return fmt.Errorf("enh reconnect init send: %v: %w", sendErr, ebuserrors.ErrTransportClosed)
+	}
+	t.writeMu.Unlock()
+
+	// Read INIT response (readMu held by caller).
+	if _, err := t.initRecvLocked(); err != nil {
 		t.writeMu.Lock()
 		_ = t.conn.Close()
 		t.writeMu.Unlock()
-		return fmt.Errorf("enh reconnect init: %v: %w", err, ebuserrors.ErrTransportClosed)
+		return fmt.Errorf("enh reconnect init recv: %v: %w", err, ebuserrors.ErrTransportClosed)
 	}
 	return nil
 }

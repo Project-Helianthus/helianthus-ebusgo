@@ -57,9 +57,9 @@ func (t *UDPPlainTransport) ReadByte() (byte, error) {
 		if len(t.pending) > 0 {
 			value := t.pending[0]
 			t.pending = t.pending[1:]
-			// Reset slice to reclaim memory when fully drained.
+			// Release backing array when fully drained.
 			if len(t.pending) == 0 {
-				t.pending = t.pending[:0]
+				t.pending = nil
 			}
 			return value, nil
 		}
@@ -80,9 +80,12 @@ func (t *UDPPlainTransport) ReadByte() (byte, error) {
 			continue
 		}
 		t.pending = append(t.pending, t.buffer[:n]...)
-		// Enforce upper bound: drop oldest bytes to prevent unbounded growth.
+		// Enforce upper bound: copy kept tail into a new slice to release
+		// the old backing array and strictly bound memory.
 		if len(t.pending) > maxUDPPendingBytes {
-			t.pending = t.pending[len(t.pending)-maxUDPPendingBytes:]
+			kept := t.pending[len(t.pending)-maxUDPPendingBytes:]
+			t.pending = make([]byte, len(kept))
+			copy(t.pending, kept)
 		}
 	}
 }
