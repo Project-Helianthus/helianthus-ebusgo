@@ -86,6 +86,11 @@ func TestParseHexResponseLines_Fixtures(t *testing.T) {
 					t.Fatalf("parseHexResponseLines error = %v; want errNoHexPayload", err)
 				}
 				return
+			case "collision":
+				if !errors.Is(err, ebuserrors.ErrBusCollision) {
+					t.Fatalf("parseHexResponseLines error = %v; want ErrBusCollision", err)
+				}
+				return
 			default:
 				t.Fatalf("unknown WantErr=%q", fixture.WantErr)
 			}
@@ -653,15 +658,12 @@ func TestEbusdTCPTransport_SendHexCommand_HandlesNoiseBeforeHex(t *testing.T) {
 			return
 		}
 
+		// Noise lines: leading blank + dump-enabled are filtered by readResponseLines.
 		if _, err := server.Write([]byte("\n")); err != nil {
 			serverErr <- err
 			return
 		}
 		if _, err := server.Write([]byte("dump enabled\n")); err != nil {
-			serverErr <- err
-			return
-		}
-		if _, err := server.Write([]byte("ERR: invalid numeric argument\n")); err != nil {
 			serverErr <- err
 			return
 		}
@@ -680,6 +682,52 @@ func TestEbusdTCPTransport_SendHexCommand_HandlesNoiseBeforeHex(t *testing.T) {
 	want := []byte{0x00, 0x00, 0x40, 0x40}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("sendHexCommand = %x; want %x", got, want)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// TestEbusdTCPTransport_SendHexCommand_ErrBeforeHexRejectsPayload (EG7)
+// verifies that hex payload following an ERR line is rejected.
+func TestEbusdTCPTransport_SendHexCommand_ErrBeforeHexRejectsPayload(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 500*time.Millisecond, 0)
+	wantCommand := "hex -s 31 feb5240100\n"
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if line != wantCommand {
+			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			return
+		}
+
+		// ERR line followed by hex — the hex must be rejected (EG7).
+		if _, err := server.Write([]byte("ERR: access denied\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte("0100\n\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	_, err := tr.sendHexCommand(0x31, []byte{0xFE, 0xB5, 0x24, 0x01, 0x00})
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("sendHexCommand error = %v; want ErrInvalidPayload", err)
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
@@ -831,6 +879,240 @@ func TestEbusdTCPTransport_Write_SerializesConcurrentHexCommands(t *testing.T) {
 			t.Fatalf("Write #%d error = %v", index+1, err)
 		}
 	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// TestEbusdTCPTransport_Race_SendHexCommandAndClose exercises the data-race
+// fix for EG30: concurrent sendHexCommand and Close must not race on t.closed.
+// Run with -race to verify.
+func TestEbusdTCPTransport_Race_SendHexCommandAndClose(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 100*time.Millisecond, 100*time.Millisecond)
+
+	done := make(chan struct{})
+	// Goroutine: hammer sendHexCommand concurrently with Close.
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_, _ = tr.sendHexCommand(0x71, []byte{0x08, 0xB5, 0x24})
+		}
+	}()
+
+	// Close concurrently.
+	for i := 0; i < 10; i++ {
+		_ = tr.Close()
+	}
+
+	<-done
+}
+
+// TestParseHexResponseLines_ErrThenHex (EG7) verifies that hex payload
+// after an ERR line is rejected — the ERR is authoritative.
+func TestParseHexResponseLines_ErrThenHex(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{"ERR: access denied", "0100"}
+	got, err := parseHexResponseLines(lines)
+	if got != nil {
+		t.Fatalf("parseHexResponseLines = %v; want nil", got)
+	}
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("parseHexResponseLines error = %v; want ErrInvalidPayload", err)
+	}
+}
+
+// TestParseHexResponseLines_CollisionThenHex (EG7) verifies that hex
+// payload after a collision ERR is also rejected.
+func TestParseHexResponseLines_CollisionThenHex(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{"ERR: arbitration lost", "0100"}
+	got, err := parseHexResponseLines(lines)
+	if got != nil {
+		t.Fatalf("parseHexResponseLines = %v; want nil", got)
+	}
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("parseHexResponseLines error = %v; want ErrBusCollision", err)
+	}
+}
+
+// TestReadResponseLines_BlankTerminator (EG12) verifies that a blank line
+// after content terminates the response immediately.
+func TestReadResponseLines_BlankTerminator(t *testing.T) {
+	t.Parallel()
+
+	input := "0100\n\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+
+	lines, err := readResponseLines(nil, reader, 0)
+	if err != nil {
+		t.Fatalf("readResponseLines error = %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "0100" {
+		t.Fatalf("readResponseLines = %v; want [\"0100\"]", lines)
+	}
+}
+
+// TestReadResponseLines_LeadingBlanksIgnored (EG12) verifies that leading
+// blank lines before content are skipped, not treated as terminators.
+func TestReadResponseLines_LeadingBlanksIgnored(t *testing.T) {
+	t.Parallel()
+
+	input := "\n\n0100\n\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+
+	lines, err := readResponseLines(nil, reader, 0)
+	if err != nil {
+		t.Fatalf("readResponseLines error = %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "0100" {
+		t.Fatalf("readResponseLines = %v; want [\"0100\"]", lines)
+	}
+}
+
+// TestReadResponseLines_MultiLineTerminator (EG12) verifies correct
+// termination with multiple content lines followed by blank.
+func TestReadResponseLines_MultiLineTerminator(t *testing.T) {
+	t.Parallel()
+
+	input := "ERR: access denied\n0100\n\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+
+	lines, err := readResponseLines(nil, reader, 0)
+	if err != nil {
+		t.Fatalf("readResponseLines error = %v", err)
+	}
+	if len(lines) != 2 || lines[0] != "ERR: access denied" || lines[1] != "0100" {
+		t.Fatalf("readResponseLines = %v; want [\"ERR: access denied\", \"0100\"]", lines)
+	}
+}
+
+// TestEbusdTCPTransport_CollisionRecovery (EG21) verifies that after a
+// collision error, ReadByte can still retrieve a SYN byte (injected by
+// the transport) so the bus layer's waitForSyn does not deadlock.
+func TestEbusdTCPTransport_CollisionRecovery(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	tr := NewEbusdTCPTransport(client, 500*time.Millisecond, 0)
+
+	src := byte(0x31)
+	dst := byte(0x15)
+	pb := byte(0x07)
+	sb := byte(0x04)
+
+	telegram := []byte{src, dst, pb, sb, 0x00}
+	telegram = append(telegram, crcValue(telegram))
+
+	wantCommand := "hex -s 31 15070400\n"
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if line != wantCommand {
+			serverErr <- fmt.Errorf("command = %q; want %q", line, wantCommand)
+			return
+		}
+		// Respond with a collision error.
+		_, err = server.Write([]byte("ERR: arbitration lost\n\n"))
+		serverErr <- err
+	}()
+
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := tr.Write(telegram)
+		writeErr <- err
+	}()
+
+	// Drain echoed request bytes.
+	for range telegram {
+		ch := make(chan struct{ err error }, 1)
+		go func() {
+			_, err := tr.ReadByte()
+			ch <- struct{ err error }{err}
+		}()
+		select {
+		case got := <-ch:
+			if got.err != nil {
+				t.Fatalf("ReadByte (echo) error = %v", got.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("ReadByte (echo) timed out")
+		}
+	}
+
+	// Wait for Write to complete.
+	select {
+	case err := <-writeErr:
+		if err != nil {
+			t.Fatalf("Write error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Write timed out")
+	}
+
+	// ReadByte should return the collision error first.
+	collisionCh := make(chan struct {
+		b   byte
+		err error
+	}, 1)
+	go func() {
+		b, err := tr.ReadByte()
+		collisionCh <- struct {
+			b   byte
+			err error
+		}{b, err}
+	}()
+	select {
+	case got := <-collisionCh:
+		if !errors.Is(got.err, ebuserrors.ErrBusCollision) {
+			t.Fatalf("ReadByte (collision) error = %v; want ErrBusCollision", got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("ReadByte (collision) timed out")
+	}
+
+	// EG21: ReadByte must return two injected SYN bytes without blocking
+	// (waitForSyn calls readByte twice with count=2).
+	for i := 0; i < 2; i++ {
+		synCh := make(chan struct {
+			b   byte
+			err error
+		}, 1)
+		go func() {
+			b, err := tr.ReadByte()
+			synCh <- struct {
+				b   byte
+				err error
+			}{b, err}
+		}()
+		select {
+		case got := <-synCh:
+			if got.err != nil {
+				t.Fatalf("ReadByte (syn %d) error = %v", i+1, got.err)
+			}
+			if got.b != ebusSymbolSyn {
+				t.Fatalf("ReadByte (syn %d) = 0x%02x; want 0x%02x", i+1, got.b, ebusSymbolSyn)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("ReadByte (syn %d) timed out; likely EG21 deadlock", i+1)
+		}
+	}
+
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
 	}

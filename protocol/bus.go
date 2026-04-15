@@ -26,6 +26,13 @@ const adapterResetRetryDelay = 200 * time.Millisecond
 // flush its FAILED response, apply the deadline, and reset the UART state.
 const collisionBackoffFloor = 50 * time.Millisecond
 
+// Pre-allocated hot-path errors avoid fmt.Errorf allocations on every call.
+// Only errors without dynamic data (hex values, addresses) are pre-allocated.
+var (
+	errUnknownFrameType        = fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
+	errCommandAckLoopExhausted = fmt.Errorf("command ack loop exited without ack: %w", ebuserrors.ErrTimeout)
+)
+
 type RetryPolicy struct {
 	TimeoutRetries int
 	NACKRetries    int
@@ -103,7 +110,8 @@ type Bus struct {
 	observerFaultMu sync.Mutex
 	observerFault   ObserverFaultSnapshot
 
-	outCap int
+	outCap             int
+	unescapedTransport bool // true when transport delivers pre-unescaped bytes (ENH)
 }
 
 // NewBus initializes a Bus with transport, config, and optional queue capacity.
@@ -111,13 +119,17 @@ func NewBus(tr transport.RawTransport, config BusConfig, queueCapacity int) *Bus
 	if queueCapacity <= 0 {
 		queueCapacity = defaultQueueCapacity
 	}
+	unescaped := false
+	if ea, ok := tr.(transport.EscapeAware); ok {
+		unescaped = ea.BytesAreUnescaped()
+	}
 	return &Bus{
-		transport: tr,
-		config:    config,
-		queue:     newPriorityQueue(),
-		// Capacity 1 to coalesce wake-ups from multiple Send calls.
-		notify: make(chan struct{}, 1),
-		outCap: queueCapacity,
+		transport:          tr,
+		config:             config,
+		queue:              newPriorityQueue(),
+		notify:             make(chan struct{}, 1),
+		outCap:             queueCapacity,
+		unescapedTransport: unescaped,
 	}
 }
 
@@ -153,9 +165,19 @@ func (b *Bus) Send(ctx context.Context, frame Frame) (*Frame, error) {
 		b.queueMu.Unlock()
 		return nil, ebuserrors.ErrTransportClosed
 	}
+	if b.queue.Len() >= b.outCap {
+		b.queueMu.Unlock()
+		return nil, ebuserrors.ErrQueueFull
+	}
 	request := &busRequest{
-		frame: frame,
-		ctx:   ctx,
+		frame: Frame{
+			Source:    frame.Source,
+			Target:    frame.Target,
+			Primary:   frame.Primary,
+			Secondary: frame.Secondary,
+			Data:      append([]byte(nil), frame.Data...),
+		},
+		ctx: ctx,
 		// Capacity 1 to avoid blocking the run loop when delivering results.
 		resp: make(chan busResult, 1),
 	}
@@ -182,6 +204,7 @@ func (b *Bus) runLoop(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				b.markClosed()
+				b.drainQueue()
 				return
 			case <-b.notify:
 				continue
@@ -230,6 +253,10 @@ func (b *Bus) RawTransportOp(ctx context.Context, fn func(transport.RawTransport
 		b.queueMu.Unlock()
 		return ebuserrors.ErrTransportClosed
 	}
+	if b.queue.Len() >= b.outCap {
+		b.queueMu.Unlock()
+		return ebuserrors.ErrQueueFull
+	}
 	op := &busRequest{
 		ctx:             ctx,
 		transportOp:     fn,
@@ -271,7 +298,10 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 	timeoutAttempts := 0
 	nackAttempts := 0
 	reconnectAttempts := 0
-	allowUnboundedCollision := isBoundedContext(request.ctx)
+	// A deadline-bounded context can tolerate unbounded collision retries
+	// because the deadline will eventually stop the loop. Without a deadline,
+	// collision retries must be bounded by the retry policy.
+	deadlineBoundsRetries := isBoundedContext(request.ctx)
 	attemptCount := uint16(0)
 
 	for {
@@ -286,7 +316,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				// Arbitration can be lost while another initiator owns the bus.
 				// ebusd waits for subsequent SYN symbols before retrying; do the
 				// same here (bounded by request context deadline).
-				if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
+				if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, deadlineBoundsRetries); retry {
 					timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 					b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 					// 50ms backoff floor for PIC16F firmware race: the firmware
@@ -308,7 +338,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 				return nil, b.wrapRetryError(err)
 			}
-			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
+			if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, deadlineBoundsRetries); retry {
 				timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 				b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 				if errors.Is(err, ebuserrors.ErrAdapterReset) {
@@ -339,10 +369,13 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			b.emitRequestComplete(request.frame, response, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), nil, time.Since(startedAt))
 			return response, nil
 		}
-		if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, allowUnboundedCollision); retry {
+		if retry, timeoutAttempts2, nackAttempts2 := shouldRetry(err, policy, timeoutAttempts, nackAttempts, deadlineBoundsRetries); retry {
 			timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 			b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
+				// EG36: This branch only fires for genuine bus collisions
+				// (ErrBusCollision). Timeout wraps ErrTimeout and HOST errors
+				// wrap ErrAdapterHostError, neither of which satisfies Is(ErrBusCollision).
 				// 50ms backoff floor for PIC16F firmware race (post-transaction).
 				select {
 				case <-time.After(collisionBackoffFloor):
@@ -459,10 +492,14 @@ func (b *Bus) startArbitration(initiator byte, frameType FrameType, attempt uint
 	return nil
 }
 
-func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int, allowUnboundedCollision bool) (bool, int, int) {
+func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int, deadlineBoundsRetries bool) (bool, int, int) {
+	// HOST errors are non-retryable protocol violations — never retry.
+	if errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		return false, timeoutAttempts, nackAttempts
+	}
 	// Collisions are transient bus-ownership events; retry until ctx deadline/cancel.
 	if errors.Is(err, ebuserrors.ErrBusCollision) {
-		if allowUnboundedCollision {
+		if deadlineBoundsRetries {
 			return true, timeoutAttempts, nackAttempts
 		}
 		if timeoutAttempts < policy.TimeoutRetries {
@@ -526,6 +563,9 @@ func (b *Bus) wrapRetryError(err error) error {
 	return fmt.Errorf("bus send failed: %w", err)
 }
 
+// readByte blocks until a byte is available from the transport or an error
+// occurs. The blocking duration is bounded by the transport's read timeout.
+// To interrupt, close the transport connection which unblocks the read.
 func (b *Bus) readByte(runCtx, reqCtx context.Context) (byte, error) {
 	if err := b.contextError(runCtx, reqCtx); err != nil {
 		return 0, err
@@ -547,6 +587,15 @@ type busDecoder struct {
 }
 
 func (d *busDecoder) readSymbol(b *Bus, runCtx, reqCtx context.Context) (byte, error) {
+	if b.unescapedTransport {
+		// ENH transport delivers pre-unescaped bytes; no wire-level escape processing.
+		raw, err := b.readByte(runCtx, reqCtx)
+		if err != nil {
+			return 0, err
+		}
+		return raw, nil
+	}
+	// Plain transport: decode eBUS escape sequences (0xA9 + 0x00/0x01).
 	for {
 		raw, err := b.readByte(runCtx, reqCtx)
 		if err != nil {
@@ -579,7 +628,10 @@ func (d *busDecoder) readSymbol(b *Bus, runCtx, reqCtx context.Context) (byte, e
 func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attempt uint16) (*Frame, error) {
 	frameType := frame.Type()
 	if frameType == FrameTypeUnknown {
-		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
+		return nil, errUnknownFrameType
+	}
+	if len(frame.Data) > 255 {
+		return nil, fmt.Errorf("frame data length %d exceeds eBUS maximum 255: %w", len(frame.Data), ebuserrors.ErrInvalidPayload)
 	}
 	startedAt := time.Now()
 
@@ -600,6 +652,12 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		}
 	}
 
+	// Inner 2-attempt loop: per eBUS spec, the initiator retransmits the
+	// command telegram once after a NACK without re-arbitrating (commandAttempt
+	// 0 = first send, 1 = spec-mandated retry). The outer sendWithRetries
+	// applies policy-based retries that involve re-arbitration. With default
+	// NACKRetries=1 this yields at most: 2 inner sends + re-arbitrate + 2 inner
+	// sends = 4 total transmissions. This is correct per spec.
 	acked := false
 	for commandAttempt := 0; commandAttempt < 2; commandAttempt++ {
 		if err := b.sendInitiatorTelegram(runCtx, reqCtx, telegram, includeSource); err != nil {
@@ -664,7 +722,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		}
 	}
 	if !acked {
-		return nil, fmt.Errorf("command ack loop exited without ack: %w", ebuserrors.ErrTimeout)
+		return nil, errCommandAckLoopExhausted
 	}
 
 	if frameType == FrameTypeInitiatorInitiator {
@@ -675,7 +733,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		return nil, nil
 	}
 	if frameType != FrameTypeInitiatorTarget {
-		return nil, fmt.Errorf("bus send unknown frame type: %w", ebuserrors.ErrInvalidPayload)
+		return nil, errUnknownFrameType
 	}
 
 	// eBUS target response: NN DB1..DBn CRC (no header - QQ/ZZ/PB/SB are
@@ -808,10 +866,11 @@ func (b *Bus) sendEndOfMessage(runCtx, reqCtx context.Context) error {
 }
 
 func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, escape bool) error {
-	if !escape || (symbol != SymbolEscape && symbol != SymbolSyn) {
+	if b.unescapedTransport || !escape || (symbol != SymbolEscape && symbol != SymbolSyn) {
 		return b.sendRawWithEcho(runCtx, reqCtx, symbol)
 	}
 
+	// Plain transport: wire-level escape for 0xA9/0xAA symbols.
 	if err := b.sendRawWithEcho(runCtx, reqCtx, SymbolEscape); err != nil {
 		return err
 	}
@@ -866,21 +925,54 @@ func (b *Bus) waitForSyn(runCtx, reqCtx context.Context, count int) error {
 	if count <= 0 {
 		return nil
 	}
-	var decoder busDecoder
+	if b.unescapedTransport {
+		// ENH: bytes are pre-unescaped, 0xAA is always a real SYN.
+		seen := 0
+		for seen < count {
+			if err := b.contextError(runCtx, reqCtx); err != nil {
+				return err
+			}
+			raw, err := b.readByte(runCtx, reqCtx)
+			if err != nil {
+				if errors.Is(err, ebuserrors.ErrTimeout) ||
+					errors.Is(err, ebuserrors.ErrAdapterReset) ||
+					errors.Is(err, ebuserrors.ErrInvalidPayload) {
+					continue
+				}
+				return err
+			}
+			if raw == SymbolSyn {
+				seen++
+			}
+		}
+		return nil
+	}
+	// Plain transport: track escape state to distinguish real SYN from escaped data.
 	seen := 0
+	prevWasEscape := false
 	for seen < count {
 		if err := b.contextError(runCtx, reqCtx); err != nil {
 			return err
 		}
-		value, err := decoder.readSymbol(b, runCtx, reqCtx)
+		raw, err := b.readByte(runCtx, reqCtx)
 		if err != nil {
 			if errors.Is(err, ebuserrors.ErrTimeout) ||
-				errors.Is(err, ebuserrors.ErrAdapterReset) {
+				errors.Is(err, ebuserrors.ErrAdapterReset) ||
+				errors.Is(err, ebuserrors.ErrInvalidPayload) {
+				prevWasEscape = false
 				continue
 			}
 			return err
 		}
-		if value == SymbolSyn {
+		if prevWasEscape {
+			prevWasEscape = false
+			continue // Escaped byte, not a real SYN
+		}
+		if raw == SymbolEscape {
+			prevWasEscape = true
+			continue
+		}
+		if raw == SymbolSyn {
 			seen++
 		}
 	}
@@ -912,6 +1004,22 @@ func (b *Bus) markClosed() {
 	b.queueMu.Lock()
 	b.closed = true
 	b.queueMu.Unlock()
+}
+
+// drainQueue sends ErrTransportClosed to all pending requests and transport ops.
+// Must be called after markClosed to ensure no new items are enqueued.
+func (b *Bus) drainQueue() {
+	for {
+		request, ok := b.dequeue()
+		if !ok {
+			return
+		}
+		if request.transportOp != nil {
+			request.transportOpResp <- ebuserrors.ErrTransportClosed
+		} else {
+			request.resp <- busResult{err: ebuserrors.ErrTransportClosed}
+		}
+	}
 }
 
 // ObserverFaultSnapshot returns the current bounded observer-fault state.
@@ -1030,6 +1138,14 @@ func (b *Bus) emitObserverEvent(event BusEvent) {
 	observer := b.config.Observer
 	if observer == nil {
 		return
+	}
+
+	// Clone slice fields so observer callbacks cannot alias caller memory.
+	if event.HasRequest && len(event.Request.Data) > 0 {
+		event.Request.Data = append([]byte(nil), event.Request.Data...)
+	}
+	if event.HasResponse && len(event.Response.Data) > 0 {
+		event.Response.Data = append([]byte(nil), event.Response.Data...)
 	}
 
 	result := callObserver(observer, event)

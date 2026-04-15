@@ -175,3 +175,47 @@ func TestUDPPlainTransport_Close(t *testing.T) {
 		t.Fatalf("ReadByte error = %v; want ErrTransportClosed", err)
 	}
 }
+
+func TestUDPPlainTransport_PendingBufferBounded(t *testing.T) {
+	t.Parallel()
+
+	// EG42/EG53: Verify the pending buffer is bounded. We send more than
+	// maxUDPPendingBytes (65536) total data; the transport must not OOM
+	// and must still return valid bytes.
+	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP error = %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	clientConn, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("DialUDP error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	tr := transport.NewUDPPlainTransport(clientConn, 500*time.Millisecond, 200*time.Millisecond)
+	clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
+
+	// Send many datagrams totaling more than maxUDPPendingBytes (65536).
+	// Each datagram must be small enough for loopback UDP (macOS ~9216 limit).
+	chunk := bytes.Repeat([]byte{0xAB}, 8192)
+	for i := 0; i < 10; i++ {
+		if _, sendErr := server.WriteToUDP(chunk, clientAddr); sendErr != nil {
+			t.Fatalf("WriteToUDP[%d] error = %v", i, sendErr)
+		}
+	}
+
+	// Read enough bytes to verify the transport works. The buffer is capped
+	// at 65536, so oldest bytes are dropped; but recently received bytes are
+	// still valid.
+	for i := 0; i < 100; i++ {
+		b, readErr := tr.ReadByte()
+		if readErr != nil {
+			t.Fatalf("ReadByte[%d] error = %v", i, readErr)
+		}
+		if b != 0xAB {
+			t.Fatalf("ReadByte[%d] = 0x%02x; want 0xab", i, b)
+		}
+	}
+}

@@ -74,14 +74,19 @@ func TestClassifiers_CoverAllSentinels(t *testing.T) {
 			definitive: true,
 		},
 		{
+			name:       "ErrAdapterHostError",
+			err:        ebuserrors.ErrAdapterHostError,
+			definitive: true,
+		},
+		{
 			name:  "ErrTransportClosed",
 			err:   ebuserrors.ErrTransportClosed,
 			fatal: true,
 		},
 		{
-			name:  "ErrInvalidPayload",
-			err:   ebuserrors.ErrInvalidPayload,
-			fatal: true,
+			name:       "ErrInvalidPayload",
+			err:        ebuserrors.ErrInvalidPayload,
+			definitive: true,
 		},
 	}
 
@@ -174,6 +179,18 @@ func TestNormalizeErrorCodeAndCategory(t *testing.T) {
 			err:      ebuserrors.ErrTransportClosed,
 			code:     ebuserrors.CodeTransportClosed,
 			category: ebuserrors.CategoryFatal,
+		},
+		{
+			name:     "adapter host error",
+			err:      ebuserrors.ErrAdapterHostError,
+			code:     ebuserrors.CodeAdapterHostError,
+			category: ebuserrors.CategoryDefinitive,
+		},
+		{
+			name:     "queue full",
+			err:      ebuserrors.ErrQueueFull,
+			code:     ebuserrors.CodeQueueFull,
+			category: ebuserrors.CategoryInvalid,
 		},
 		{
 			name:     "unknown",

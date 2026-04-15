@@ -81,6 +81,12 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 		if t.pendingErr != nil {
 			err := t.pendingErr
 			t.pendingErr = nil
+			// EG21: After consuming a collision error, inject two SYN
+			// bytes so the bus layer's waitForSyn(ctx, ctx, 2) completes.
+			// ebusd-tcp won't produce passive SYN events on the wire.
+			if errors.Is(err, ebuserrors.ErrBusCollision) {
+				t.pending = append(t.pending, ebusSymbolSyn, ebusSymbolSyn)
+			}
 			return 0, err
 		}
 		if t.closed {
@@ -274,7 +280,10 @@ func (t *EbusdTCPTransport) maybeDispatchTelegram() (*ebusdHexDispatch, error) {
 }
 
 func (t *EbusdTCPTransport) sendHexCommand(src byte, payload []byte) ([]byte, error) {
-	if t.closed {
+	t.mu.Lock()
+	closed := t.closed
+	t.mu.Unlock()
+	if closed {
 		return nil, ebuserrors.ErrTransportClosed
 	}
 
@@ -354,12 +363,17 @@ func readResponseLines(conn net.Conn, reader *bufio.Reader, readTimeout time.Dur
 
 		trimmed := strings.TrimSpace(strings.TrimRight(line, "\r\n"))
 		if trimmed == "" {
-			if errors.Is(err, io.EOF) {
+			// EG12: Blank line after content = ebusd response terminator.
+			// Leading blank lines (before any content) are ignored.
+			if len(lines) > 0 {
 				if conn != nil {
 					_ = conn.SetReadDeadline(time.Time{})
 				}
-				if len(lines) > 0 {
-					return lines, nil
+				return lines, nil
+			}
+			if errors.Is(err, io.EOF) {
+				if conn != nil {
+					_ = conn.SetReadDeadline(time.Time{})
 				}
 				return lines, ebuserrors.ErrTransportClosed
 			}
@@ -474,6 +488,13 @@ func parseHexResponseLines(lines []string) ([]byte, error) {
 			sawErr = true
 			continue
 		}
+		// EG7: Once we've seen an ERR line, do not accept subsequent hex
+		// payload — the hex would belong to a different (stale) response
+		// or ebusd noise.
+		if sawErr {
+			continue
+		}
+
 		if strings.HasPrefix(lower, "0x") {
 			trimmed = strings.TrimSpace(trimmed[2:])
 		}

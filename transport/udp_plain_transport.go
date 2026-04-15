@@ -36,6 +36,10 @@ type UDPPlainTransport struct {
 
 const udpReadBufferSize = 65535
 
+// maxUDPPendingBytes bounds the pending byte buffer to prevent unbounded
+// memory growth from rapid datagram arrival (EG42/EG53).
+const maxUDPPendingBytes = 65536
+
 func NewUDPPlainTransport(conn *net.UDPConn, readTimeout, writeTimeout time.Duration) *UDPPlainTransport {
 	return &UDPPlainTransport{
 		conn:         conn,
@@ -53,6 +57,10 @@ func (t *UDPPlainTransport) ReadByte() (byte, error) {
 		if len(t.pending) > 0 {
 			value := t.pending[0]
 			t.pending = t.pending[1:]
+			// Release backing array when fully drained.
+			if len(t.pending) == 0 {
+				t.pending = nil
+			}
 			return value, nil
 		}
 
@@ -72,6 +80,13 @@ func (t *UDPPlainTransport) ReadByte() (byte, error) {
 			continue
 		}
 		t.pending = append(t.pending, t.buffer[:n]...)
+		// Enforce upper bound: copy kept tail into a new slice to release
+		// the old backing array and strictly bound memory.
+		if len(t.pending) > maxUDPPendingBytes {
+			kept := t.pending[len(t.pending)-maxUDPPendingBytes:]
+			t.pending = make([]byte, len(kept))
+			copy(t.pending, kept)
+		}
 	}
 }
 

@@ -71,5 +71,21 @@
       "   "
     ],
     "want_err": "timeout"
+  },
+  {
+    "name": "err_then_hex_rejected",
+    "lines": [
+      "ERR: access denied",
+      "0100"
+    ],
+    "want_err": "invalid"
+  },
+  {
+    "name": "collision_then_hex_rejected",
+    "lines": [
+      "ERR: arbitration lost",
+      "0100"
+    ],
+    "want_err": "collision"
   }
 ]

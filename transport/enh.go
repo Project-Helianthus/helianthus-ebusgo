@@ -49,6 +49,14 @@ func DecodeENH(byte1, byte2 byte) (ENHFrame, error) {
 		return ENHFrame{}, ebuserrors.ErrInvalidPayload
 	}
 	cmd := ENHCommand((byte1 >> 2) & 0x0F)
+	// Validate command nibble — only 0x0..0x3, 0xA, 0xB, 0xC are defined.
+	switch cmd {
+	case ENHReqInit, ENHReqSend, ENHReqStart, ENHReqInfo,
+		ENHResFailed, ENHResErrorEBUS, ENHResErrorHost:
+		// Valid (note: 0x0..0x3 overlap request/response by direction)
+	default:
+		return ENHFrame{}, ebuserrors.ErrInvalidPayload
+	}
 	data := byte(((byte1 & 0x03) << 6) | (byte2 & 0x3F))
 	return ENHFrame{Command: cmd, Data: data}, nil
 }
@@ -57,8 +65,7 @@ func DecodeENH(byte1, byte2 byte) (ENHFrame, error) {
 type ENHMessageKind uint8
 
 const (
-	ENHMessageData ENHMessageKind = iota
-	ENHMessageFrame
+	ENHMessageFrame ENHMessageKind = iota
 )
 
 // ENHMessage represents either a raw data byte or an enhanced frame.
@@ -116,14 +123,18 @@ func (p *ENHParser) Parse(data []byte) ([]ENHMessage, error) {
 	}
 
 	out := make([]ENHMessage, 0, len(data))
+	var firstErr error
 	for _, b := range data {
 		msg, ok, err := p.Feed(b)
 		if err != nil {
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if ok {
 			out = append(out, msg)
 		}
 	}
-	return out, nil
+	return out, firstErr
 }

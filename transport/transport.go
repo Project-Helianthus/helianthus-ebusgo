@@ -20,7 +20,7 @@ type RawTransport interface {
 type StreamEventKind uint8
 
 const (
-	StreamEventByte    StreamEventKind = iota + 1
+	StreamEventByte StreamEventKind = iota + 1
 	StreamEventReset
 	StreamEventStarted // adapter confirmed START arbitration
 	StreamEventFailed  // adapter rejected START arbitration
@@ -47,6 +47,13 @@ type StreamEventReader interface {
 // Plain TCP and UDP transports do not implement this interface.
 type InfoRequester interface {
 	RequestInfo(id AdapterInfoID) ([]byte, error)
+}
+
+// EscapeAware is implemented by transports that deliver already-unescaped
+// bytes. When BytesAreUnescaped returns true, the protocol layer must skip
+// wire-level escape decoding (0xA9 sequences) on both read and write paths.
+type EscapeAware interface {
+	BytesAreUnescaped() bool
 }
 
 // Reconnectable is an optional extension implemented by transports that can

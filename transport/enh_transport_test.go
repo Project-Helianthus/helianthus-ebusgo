@@ -2,8 +2,11 @@ package transport_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -761,7 +764,6 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 	initiator := byte(0x10)
 
 	serverErr := make(chan error, 1)
-	// Goroutine exits after validating the request and sending responses.
 	go func() {
 		buf := make([]byte, 2)
 		if _, err := io.ReadFull(server, buf); err != nil {
@@ -774,6 +776,7 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 			return
 		}
 
+		// Send RECEIVED(0x11), STARTED(initiator), RECEIVED(0x22).
 		started := transport.EncodeENH(transport.ENHResStarted, initiator)
 		payload := []byte{0x11, started[0], started[1], 0x22}
 		_, err := server.Write(payload)
@@ -784,9 +787,11 @@ func TestENHTransport_StartArbitrationStartedDiscardsReceivedBytes(t *testing.T)
 		t.Fatalf("StartArbitration error = %v", err)
 	}
 
+	// RECEIVED bytes during arbitration are discarded to prevent echo
+	// mismatch in sendRawWithEcho. ReadByte should block (timeout).
 	_, err := enh.ReadByte()
 	if !errors.Is(err, ebuserrors.ErrTimeout) {
-		t.Fatalf("ReadByte error = %v; want ErrTimeout", err)
+		t.Fatalf("ReadByte after arbitration = %v; want ErrTimeout (stale bytes discarded)", err)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -806,7 +811,6 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 	winner := byte(0x30)
 
 	serverErr := make(chan error, 1)
-	// Goroutine exits after validating the request and sending responses.
 	go func() {
 		buf := make([]byte, 2)
 		if _, err := io.ReadFull(server, buf); err != nil {
@@ -819,6 +823,7 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 			return
 		}
 
+		// Send RECEIVED(0x33), FAILED(winner), RECEIVED(0x44).
 		failed := transport.EncodeENH(transport.ENHResFailed, winner)
 		payload := []byte{0x33, failed[0], failed[1], 0x44}
 		_, err := server.Write(payload)
@@ -830,9 +835,11 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
 	}
 
-	_, err = enh.ReadByte()
-	if !errors.Is(err, ebuserrors.ErrTimeout) {
-		t.Fatalf("ReadByte error = %v; want ErrTimeout", err)
+	// RECEIVED bytes during arbitration are discarded on failure too.
+	// ReadByte should block (timeout).
+	_, readErr := enh.ReadByte()
+	if !errors.Is(readErr, ebuserrors.ErrTimeout) {
+		t.Fatalf("ReadByte after failed arbitration = %v; want ErrTimeout", readErr)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -840,7 +847,7 @@ func TestENHTransport_StartArbitrationFailedDiscardsReceivedBytes(t *testing.T) 
 	}
 }
 
-func TestENHTransport_StartArbitrationHostErrorReturnsCollision(t *testing.T) {
+func TestENHTransport_StartArbitrationHostErrorReturnsAdapterHostError(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -868,8 +875,8 @@ func TestENHTransport_StartArbitrationHostErrorReturnsCollision(t *testing.T) {
 	}()
 
 	err := enh.StartArbitration(initiator)
-	if !errors.Is(err, ebuserrors.ErrBusCollision) {
-		t.Fatalf("StartArbitration error = %v; want ErrBusCollision", err)
+	if !errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		t.Fatalf("StartArbitration error = %v; want ErrAdapterHostError", err)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -1360,5 +1367,378 @@ func TestENHTransport_ResettedTransparentInReadEvent(t *testing.T) {
 
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_StartArbitration_HostErrorWrapsAdapterHostError(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the START request (2 bytes).
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Respond with ERROR_HOST(0x03).
+		resp := transport.EncodeENH(transport.ENHResErrorHost, 0x03)
+		_, writeErr := server.Write(resp[:])
+		serverErr <- writeErr
+	}()
+
+	err := enh.StartArbitration(0x71)
+	if err == nil {
+		t.Fatal("StartArbitration returned nil; want error wrapping ErrAdapterHostError")
+	}
+	if !errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		t.Fatalf("StartArbitration error = %v; want wrapping ErrAdapterHostError", err)
+	}
+	// Must NOT wrap ErrBusCollision (the old, buggy behavior).
+	if errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatal("StartArbitration error wraps ErrBusCollision; should wrap ErrAdapterHostError instead")
+	}
+
+	if sErr := <-serverErr; sErr != nil {
+		t.Fatalf("server error = %v", sErr)
+	}
+}
+
+func TestENHTransport_Init_HostErrorWrapsAdapterHostError(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the INIT request (2 bytes).
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Respond with ERROR_HOST(0x05).
+		resp := transport.EncodeENH(transport.ENHResErrorHost, 0x05)
+		_, writeErr := server.Write(resp[:])
+		serverErr <- writeErr
+	}()
+
+	_, err := enh.Init(0x01)
+	if err == nil {
+		t.Fatal("Init returned nil error; want error wrapping ErrAdapterHostError")
+	}
+	if !errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		t.Fatalf("Init error = %v; want wrapping ErrAdapterHostError", err)
+	}
+	// Must NOT wrap ErrInvalidPayload (the old, buggy behavior).
+	if errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatal("Init error wraps ErrInvalidPayload; should wrap ErrAdapterHostError instead")
+	}
+
+	if sErr := <-serverErr; sErr != nil {
+		t.Fatalf("server error = %v", sErr)
+	}
+}
+
+func TestENHTransport_FillPendingProcessesValidMsgsBeforeError(t *testing.T) {
+	// EG8: When Parse returns valid messages alongside an error,
+	// fillPendingLocked must queue the valid messages before handling the error.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Valid data byte 0x11, then orphan byte2 (0x80, corrupt), then valid data byte 0x22.
+		_, err := server.Write([]byte{0x11, 0x80, 0x22})
+		serverErr <- err
+	}()
+
+	// Both valid bytes should be readable despite the corrupt byte in between.
+	got1, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte[0] error = %v; want 0x11", err)
+	}
+	if got1 != 0x11 {
+		t.Fatalf("ReadByte[0] = 0x%02x; want 0x11", got1)
+	}
+
+	got2, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte[1] error = %v; want 0x22", err)
+	}
+	if got2 != 0x22 {
+		t.Fatalf("ReadByte[1] = 0x%02x; want 0x22", got2)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_TimeoutResetsParserState(t *testing.T) {
+	// EG9: A read timeout mid-parse (byte1 received, timeout before byte2)
+	// must reset the parser so that the next read starts clean.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 50*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Send only byte1 of an ENH frame, then let timeout expire.
+		if _, err := server.Write([]byte{0xC0}); err != nil {
+			serverErr <- err
+			return
+		}
+		// Wait for the timeout to fire (readTimeout is 50ms).
+		time.Sleep(70 * time.Millisecond)
+		// Now send a valid raw data byte.
+		_, err := server.Write([]byte{0x55})
+		serverErr <- err
+	}()
+
+	// First ReadByte should timeout.
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("ReadByte error = %v; want ErrTimeout", err)
+	}
+
+	// After timeout, parser state should be reset. Next ReadByte should
+	// return 0x55 as a plain data byte, NOT combine it with stale byte1.
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after timeout error = %v; want 0x55", err)
+	}
+	if got != 0x55 {
+		t.Fatalf("ReadByte after timeout = 0x%02x; want 0x55", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_AdapterDirectResettedNoError(t *testing.T) {
+	// EG17: In adapter-direct mode (no dialFunc), RESETTED should not
+	// surface as an error -- it is informational only.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	// No WithDialFunc option -- adapter-direct mode.
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		reset := transport.EncodeENH(transport.ENHResResetted, 0x00)
+		after := transport.EncodeENH(transport.ENHResReceived, 0xAB)
+		payload := append(reset[:], after[:]...)
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	// ReadByte should return 0xAB transparently -- RESETTED absorbed.
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v; want 0xAB (RESETTED absorbed)", err)
+	}
+	if got != 0xAB {
+		t.Fatalf("ReadByte = 0x%02x; want 0xAB", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// TestENHTransport_Race_WriteAndReconnect exercises the data-race fix for
+// EG48/EG32: concurrent Write and Reconnect must not race on t.conn.
+// Run with -race to verify.
+func TestENHTransport_Race_WriteAndReconnect(t *testing.T) {
+	t.Parallel()
+
+	client, _ := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	// dialFunc returns a fresh net.Pipe each time.
+	dialFunc := func() (net.Conn, error) {
+		c, s := net.Pipe()
+		// Feed a RESETTED response so initLocked succeeds.
+		go func() {
+			resp := transport.EncodeENH(transport.ENHResResetted, 0x01)
+			_, _ = s.Write(resp[:])
+			// Keep server side open; closed when pipe partner closes.
+		}()
+		return c, nil
+	}
+
+	enh := transport.NewENHTransport(client, 100*time.Millisecond, 100*time.Millisecond,
+		transport.WithDialFunc(dialFunc))
+
+	done := make(chan struct{})
+	// Writer goroutine: hammer Write concurrently with Reconnect.
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_, _ = enh.Write([]byte{0x42})
+		}
+	}()
+
+	// Reconnect goroutine: runs alongside Write.
+	for i := 0; i < 10; i++ {
+		_ = enh.Reconnect()
+	}
+
+	<-done
+}
+
+// EG14/EG39: StartArbitration aborts after 3 wrong-address STARTED responses.
+func TestENHTransport_StartArbitrationWrongAddressAborts(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+	wrongAddr := byte(0x50)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		want := transport.EncodeENH(transport.ENHReqStart, initiator)
+		if buf[0] != want[0] || buf[1] != want[1] {
+			serverErr <- errors.New("unexpected arbitration request")
+			return
+		}
+
+		// Send 3 STARTED responses with the wrong address.
+		wrongStarted := transport.EncodeENH(transport.ENHResStarted, wrongAddr)
+		var payload []byte
+		for i := 0; i < 3; i++ {
+			payload = append(payload, wrongStarted[0], wrongStarted[1])
+		}
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if err == nil {
+		t.Fatal("StartArbitration error = nil; want error after 3 mismatches")
+	}
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("StartArbitration error = %v; want ErrInvalidPayload", err)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// EG14/EG39: StartArbitration succeeds if correct address arrives before 3 mismatches.
+func TestENHTransport_StartArbitrationWrongThenCorrectSucceeds(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+	wrongAddr := byte(0x50)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		// Send 2 wrong STARTEDs then the correct one.
+		wrongStarted := transport.EncodeENH(transport.ENHResStarted, wrongAddr)
+		correctStarted := transport.EncodeENH(transport.ENHResStarted, initiator)
+		var payload []byte
+		payload = append(payload, wrongStarted[0], wrongStarted[1])
+		payload = append(payload, wrongStarted[0], wrongStarted[1])
+		payload = append(payload, correctStarted[0], correctStarted[1])
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	if err := enh.StartArbitration(initiator); err != nil {
+		t.Fatalf("StartArbitration error = %v; want nil", err)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// EG40: isClosed uses errors.Is/errors.As, not substring matching.
+func TestIsClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"io.EOF", io.EOF, true},
+		{"net.ErrClosed", net.ErrClosed, true},
+		{"io.ErrClosedPipe", io.ErrClosedPipe, true},
+		{"os.ErrClosed", os.ErrClosed, true},
+		{"wrapped io.EOF", fmt.Errorf("read: %w", io.EOF), true},
+		{"wrapped net.ErrClosed", fmt.Errorf("conn: %w", net.ErrClosed), true},
+		// The old bug: substring match on "closed" caused false positives.
+		{"unrelated closed string", fmt.Errorf("operation closed by user"), false},
+		{"random error", fmt.Errorf("something went wrong"), false},
+		// net.OpError wrapping os.ErrClosed.
+		{"OpError wrapping os.ErrClosed", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrClosed}, true},
+		{"OpError wrapping random error", &net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("timeout")}, false},
+		// syscall connection-reset errors (Linux ECONNRESET/ECONNABORTED).
+		{"ECONNRESET", syscall.ECONNRESET, true},
+		{"ECONNABORTED", syscall.ECONNABORTED, true},
+		{"OpError wrapping SyscallError with ECONNRESET", &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transport.IsClosed(tc.err)
+			if got != tc.want {
+				t.Errorf("IsClosed(%v) = %v; want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

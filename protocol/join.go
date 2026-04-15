@@ -332,6 +332,13 @@ func (j *Joiner) selectInitiator(
 }
 
 func companionTargetRejectionReasons(observation *joinObservation, initiator byte) []string {
+	// Guard against byte overflow: initiator + 0x05 wraps around when
+	// initiator > 0xFA, producing a low address that could collide with
+	// well-known device addresses (e.g. 0x00-0x04). Skip companion
+	// target heuristics entirely for these cases (EG18).
+	if int(initiator)+0x05 > 0xFF {
+		return []string{"companion-target-overflows-byte"}
+	}
 	companionTarget := initiator + 0x05
 	reasons := make([]string, 0, 2)
 
@@ -396,7 +403,12 @@ func (o *joinObservation) addFrame(frame Frame) {
 	o.targetCount[frame.Target]++
 	o.observedSources[frame.Source] = struct{}{}
 	if IsInitiatorCapableAddress(frame.Source) {
-		o.observedInitiators[frame.Source] = struct{}{}
+		// Require at least 2 observations before marking an address as
+		// occupied. A single frame could be noise or a spoofed source;
+		// two independent sightings provide stronger evidence (EG26).
+		if o.sourceCount[frame.Source] >= 2 {
+			o.observedInitiators[frame.Source] = struct{}{}
+		}
 		return
 	}
 	o.observedProbableTargets[frame.Source] = struct{}{}

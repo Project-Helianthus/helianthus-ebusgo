@@ -102,10 +102,13 @@ func (m *CollisionMonitor) SetInitiator(initiator byte) {
 		m.oldInitiator = m.initiator
 		m.oldInitiatorValid = true
 		m.oldInitiatorGraceEnd = now.Add(m.cfg.GraceAfterRejoin)
+		// Clear collision state only when the address actually changes.
+		// Setting the same address again must preserve active collision state
+		// so that an ongoing collision is not silently discarded (EG25).
+		m.collisionActive = false
+		m.lastEvent = nil
 	}
 	m.initiator = initiator
-	m.collisionActive = false
-	m.lastEvent = nil
 }
 
 // SetMuted controls listen-only mode.
