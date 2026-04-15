@@ -91,6 +91,43 @@ func TestENHTransport_InitHandshake(t *testing.T) {
 	}
 }
 
+func TestENHTransport_InitSucceedsWithTrailingCorruptByte(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Send valid RESETTED frame followed by a corrupt trailing byte
+		// in the same TCP segment. Init must succeed despite the parse error.
+		resp := transport.EncodeENH(transport.ENHResResetted, 0x01)
+		payload := append(resp[:], 0x85) // 0x85 = orphan ENH byte2 (corrupt)
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	features, err := enh.Init(0x00)
+	if err != nil {
+		t.Fatalf("Init error = %v; want success (RESETTED was valid, trailing byte corrupt)", err)
+	}
+	if features != 0x01 {
+		t.Fatalf("Init features = 0x%02x; want 0x01", features)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 func TestENHTransport_InitReturnsAdapterFeatures(t *testing.T) {
 	t.Parallel()
 
