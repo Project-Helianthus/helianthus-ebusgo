@@ -167,10 +167,10 @@ func (t *ENHTransport) initRecvLocked() (byte, error) {
 			continue
 		}
 
-		msgs, err := t.parser.Parse(t.buffer[:n])
-		if err != nil {
-			return 0, err
-		}
+		msgs, parseErr := t.parser.Parse(t.buffer[:n])
+
+		// Process valid messages before handling parse error — a valid
+		// RESETTED followed by a corrupt trailing byte should succeed.
 		for _, msg := range msgs {
 			switch msg.Command {
 			case ENHResReceived:
@@ -185,6 +185,10 @@ func (t *ENHTransport) initRecvLocked() (byte, error) {
 			case ENHResErrorHost:
 				return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 			}
+		}
+		if parseErr != nil {
+			t.parser.Reset()
+			return 0, parseErr
 		}
 	}
 }
