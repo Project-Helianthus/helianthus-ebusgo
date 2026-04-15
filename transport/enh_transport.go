@@ -234,10 +234,13 @@ func (t *ENHTransport) reconnectLocked() error {
 
 	// Read INIT response (readMu held by caller).
 	if _, err := t.initRecvLocked(); err != nil {
-		t.writeMu.Lock()
-		_ = t.conn.Close()
-		t.writeMu.Unlock()
-		return fmt.Errorf("enh reconnect init recv: %v: %w", err, ebuserrors.ErrTransportClosed)
+		// INIT recv failed but newConn is still a valid TCP connection —
+		// we successfully sent the INIT request. Keep newConn in place so
+		// subsequent operations get timeout errors (retryable) instead of
+		// ErrTransportClosed (fatal). Preserve the original error class so
+		// shouldRetry handles it correctly (e.g. ErrAdapterHostError is
+		// non-retryable, ErrTimeout is transient).
+		return fmt.Errorf("enh reconnect init recv: %w", err)
 	}
 	return nil
 }
@@ -459,7 +462,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			// in pendingEvents would be consumed as echoes by
 			// sendRawWithEcho, causing echo mismatch errors.
 			t.parser.Reset()
-			t.pendingEvents = t.pendingEvents[:0]
+			t.pendingEvents = nil
 			return arbitrationErr
 		}
 
@@ -638,8 +641,15 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	}
 }
 
+// Close closes the underlying connection. We snapshot t.conn under writeMu
+// to synchronize with reconnectLocked (which replaces t.conn under the same
+// lock), then close the snapshot outside the lock so a stalled Write does
+// not block shutdown. net.Conn.Close unblocks any pending Read or Write.
 func (t *ENHTransport) Close() error {
-	return t.conn.Close()
+	t.writeMu.Lock()
+	conn := t.conn
+	t.writeMu.Unlock()
+	return conn.Close()
 }
 
 func (t *ENHTransport) resetStateLocked() {
@@ -680,6 +690,9 @@ func (t *ENHTransport) fillPendingLocked() error {
 			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 		case ENHResFailed:
 			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+		case ENHResInfo:
+			// INFO responses are consumed by RequestInfo's dedicated read path.
+			// Unsolicited INFO frames in the steady-state read are safely ignored.
 		case ENHResResetted:
 			if t.dialFunc != nil {
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {

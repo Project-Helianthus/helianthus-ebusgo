@@ -1364,3 +1364,149 @@ func TestBus_RawTransportOpQueueFull(t *testing.T) {
 	cancel()
 	wg.Wait()
 }
+
+// reconnectableScriptedTransport extends scriptedTransport with Reconnectable
+// support for testing reconnect-related retry budget resets.
+type reconnectableScriptedTransport struct {
+	mu             sync.Mutex
+	echo           []readEvent
+	inbound        []readEvent
+	phase2Inbound  []readEvent // loaded after reconnect
+	writes         [][]byte
+	echoReads      int
+	inReads        int
+	reconnected    bool
+	reconnectCount int
+}
+
+func (s *reconnectableScriptedTransport) ReadByte() (byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.echo) > 0 {
+		s.echoReads++
+		ev := s.echo[0]
+		s.echo = s.echo[1:]
+		return ev.value, ev.err
+	}
+	if len(s.inbound) > 0 {
+		s.inReads++
+		ev := s.inbound[0]
+		s.inbound = s.inbound[1:]
+		return ev.value, ev.err
+	}
+	return 0, ebuserrors.ErrTimeout
+}
+
+func (s *reconnectableScriptedTransport) Write(payload []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	copyPayload := append([]byte(nil), payload...)
+	s.writes = append(s.writes, copyPayload)
+	for _, b := range payload {
+		s.echo = append(s.echo, readEvent{value: b})
+	}
+	return len(payload), nil
+}
+
+func (s *reconnectableScriptedTransport) Close() error { return nil }
+
+func (s *reconnectableScriptedTransport) Reconnect() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reconnectCount++
+	s.reconnected = true
+	// Load phase2 inbound events after reconnect.
+	s.inbound = append(s.inbound, s.phase2Inbound...)
+	s.phase2Inbound = nil
+	return nil
+}
+
+// DIV-04: After a reconnect, nackAttempts must be reset so that the NACK
+// retry budget is available again for the fresh session.
+//
+// Sequence: NACK x2 (exhausts NACK budget for one sendTransaction) ->
+// timeout (triggers reconnect) -> NACK x2 (should succeed because NACK
+// budget was reset) -> success.
+//
+// The inner command ACK loop in sendTransaction retries the command once
+// on NACK (commandAttempt 0 -> 1), so TWO NACKs per sendTransaction call
+// produce one ErrNACK to the outer retry loop.
+func TestBus_NackAttemptsResetAfterReconnect(t *testing.T) {
+	t.Parallel()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
+	data := byte(0x20)
+	responseSegment := []byte{0x01, data}
+	goodCRC := protocol.CRC(responseSegment)
+
+	// NACKRetries=1 means one ErrNACK is retried.
+	// Flow:
+	// Attempt 1: sendTransaction -> NACK, NACK -> ErrNACK, nackAttempts=0->1, retry
+	// Attempt 2: sendTransaction -> timeout -> ErrTimeout, shouldRetry false
+	//   -> tryTransportReconnect -> reconnect -> nackAttempts=0 (reset!)
+	// Attempt 3: sendTransaction -> NACK, NACK -> ErrNACK, nackAttempts=0->1, retry
+	// Attempt 4: sendTransaction -> ACK + good response -> success
+
+	tr := &reconnectableScriptedTransport{
+		inbound: []readEvent{
+			// Attempt 1: two NACKs (inner loop retries once, then returns ErrNACK).
+			// Note: After the inner loop's first NACK (commandAttempt=0), the
+			// command is resent with SRC. After second NACK (commandAttempt=1),
+			// sendEndOfMessage writes SYN, then ErrNACK is returned.
+			{value: protocol.SymbolNack}, // first NACK -> inner retry
+			{value: protocol.SymbolNack}, // second NACK -> ErrNACK to outer loop
+			// Attempt 2: timeout (empty inbound -> ErrTimeout) triggers reconnect.
+		},
+		phase2Inbound: []readEvent{
+			// Attempt 3 (post-reconnect): two NACKs again -> ErrNACK,
+			// but nackAttempts was reset so retry is allowed.
+			{value: protocol.SymbolNack},
+			{value: protocol.SymbolNack},
+			// Attempt 4: ACK + good response.
+			{value: protocol.SymbolAck},
+			{value: 0x01},
+			{value: data},
+			{value: goodCRC},
+		},
+	}
+
+	config := protocol.BusConfig{
+		InitiatorTarget: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    1,
+		},
+		InitiatorInitiator: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    1,
+		},
+		ReconnectRetries: 1,
+		ReconnectDelay:   1 * time.Millisecond,
+	}
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, frame)
+	if err != nil {
+		t.Fatalf("Send error = %v; want success after reconnect with NACK budget reset", err)
+	}
+	if resp == nil || len(resp.Data) != 1 || resp.Data[0] != data {
+		t.Fatalf("response = %+v; want data [0x20]", resp)
+	}
+
+	tr.mu.Lock()
+	if !tr.reconnected {
+		t.Fatal("transport was not reconnected; expected reconnect to reset NACK budget")
+	}
+	tr.mu.Unlock()
+}
