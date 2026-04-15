@@ -402,11 +402,11 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			continue
 		}
 
-		msgs, err := t.parser.Parse(t.buffer[:n])
-		if err != nil {
-			return err
-		}
+		msgs, parseErr := t.parser.Parse(t.buffer[:n])
 
+		// Process valid messages before handling parse error — a buffer
+		// with a valid STARTED followed by a corrupt trailing byte should
+		// succeed, not abort.
 		var arbitrationDone bool
 		var arbitrationErr error
 		for _, msg := range msgs {
@@ -457,6 +457,13 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			t.parser.Reset()
 			t.pendingEvents = t.pendingEvents[:0]
 			return arbitrationErr
+		}
+
+		// Handle parse error only after processing valid messages — a
+		// corrupt trailing byte should not mask a valid STARTED/FAILED.
+		if parseErr != nil {
+			t.parser.Reset()
+			return parseErr
 		}
 	}
 }
@@ -573,11 +580,9 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		}
 
 		msgs, parseErr := t.parser.Parse(t.buffer[:n])
-		if parseErr != nil {
-			err = parseErr
-			return nil, err
-		}
 
+		// Process valid messages before handling parse error — a valid
+		// INFO response followed by a corrupt trailing byte should succeed.
 		for _, msg := range msgs {
 			switch msg.Command {
 			case ENHResInfo:
@@ -620,6 +625,11 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		}
 		if payloadComplete {
 			return payload, nil
+		}
+		// Handle parse error only after processing valid messages.
+		if parseErr != nil {
+			t.parser.Reset()
+			return nil, parseErr
 		}
 	}
 }
