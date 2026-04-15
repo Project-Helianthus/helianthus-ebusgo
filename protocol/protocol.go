@@ -47,7 +47,10 @@ func FrameTypeForTarget(target byte) FrameType {
 	return FrameTypeInitiatorTarget
 }
 
-// CRC calculates the eBUS CRC8 over unescaped symbols.
+// CRC calculates the eBUS CRC8. Per spec, logical bytes 0xA9 and 0xAA are
+// substituted with their wire-escape sequences (0xA9->{0xA9,0x00} and
+// 0xAA->{0xA9,0x01}) before the CRC update. The input is unescaped logical
+// bytes; the function applies the substitution internally.
 func CRC(data []byte) byte {
 	value := byte(0)
 	for _, b := range data {

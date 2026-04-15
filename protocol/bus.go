@@ -357,7 +357,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			}
 			// Retry budget exhausted — try transport reconnect for
 			// timeout-class errors before giving up.
-			if b.tryTransportReconnect(runCtx, request, err, &timeoutAttempts, &reconnectAttempts) {
+			if b.tryTransportReconnect(runCtx, request, err, &timeoutAttempts, &nackAttempts, &reconnectAttempts) {
 				continue
 			}
 			b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
@@ -402,7 +402,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 		}
 		// Retry budget exhausted — try transport reconnect for
 		// timeout-class errors before giving up.
-		if b.tryTransportReconnect(runCtx, request, err, &timeoutAttempts, &reconnectAttempts) {
+		if b.tryTransportReconnect(runCtx, request, err, &timeoutAttempts, &nackAttempts, &reconnectAttempts) {
 			continue
 		}
 		b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
@@ -415,7 +415,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 // caller should continue the retry loop.
 //
 // Python equivalent: _send_with_policy reconnect_retries tier.
-func (b *Bus) tryTransportReconnect(runCtx context.Context, request *busRequest, err error, timeoutAttempts, reconnectAttempts *int) bool {
+func (b *Bus) tryTransportReconnect(runCtx context.Context, request *busRequest, err error, timeoutAttempts, nackAttempts, reconnectAttempts *int) bool {
 	if b.config.ReconnectRetries <= 0 {
 		return false
 	}
@@ -450,6 +450,7 @@ func (b *Bus) tryTransportReconnect(runCtx context.Context, request *busRequest,
 		return true
 	}
 	*timeoutAttempts = 0 // reset timeout budget for the fresh session
+	*nackAttempts = 0    // reset NACK budget for the fresh session
 	return true
 }
 

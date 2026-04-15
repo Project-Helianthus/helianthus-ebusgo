@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1777,5 +1778,179 @@ func TestIsClosed(t *testing.T) {
 				t.Errorf("IsClosed(%v) = %v; want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// R6-REG-01: When reconnectLocked's initRecvLocked fails with an error
+// (e.g. eBUS error), the new conn must remain in place (not closed) and
+// the error must wrap ErrAdapterReset (transient), not ErrTransportClosed (fatal).
+func TestENHTransport_ReconnectInitRecvError_ConnStillUsable(t *testing.T) {
+	t.Parallel()
+
+	// First connection: the "old" one that will be replaced.
+	oldClient, oldServer := net.Pipe()
+	defer func() { _ = oldServer.Close() }()
+
+	// New connection: dial succeeds, INIT send succeeds, but adapter responds
+	// with an eBUS error instead of RESETTED.
+	newClient, newServer := net.Pipe()
+	defer func() { _ = newClient.Close() }()
+	defer func() { _ = newServer.Close() }()
+
+	dialCalled := make(chan struct{}, 1)
+	dialFunc := func() (net.Conn, error) {
+		dialCalled <- struct{}{}
+		return newClient, nil
+	}
+
+	enh := transport.NewENHTransport(oldClient, 200*time.Millisecond, 200*time.Millisecond,
+		transport.WithDialFunc(dialFunc))
+
+	// Perform Init on the old connection to set up initial state.
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(oldServer, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		resp := transport.EncodeENH(transport.ENHResResetted, 0x01)
+		_, err := oldServer.Write(resp[:])
+		serverErr <- err
+	}()
+
+	if _, err := enh.Init(0x00); err != nil {
+		t.Fatalf("Init error = %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("old server init error = %v", err)
+	}
+
+	// Trigger reconnect via Reconnect(). The new server will consume the
+	// INIT request and respond with an eBUS error, causing initRecvLocked
+	// to return an error.
+	go func() {
+		<-dialCalled
+		buf := make([]byte, 2)
+		// Consume the INIT request on the new conn.
+		_, _ = io.ReadFull(newServer, buf)
+		// Send eBUS error instead of RESETTED.
+		ebusErr := transport.EncodeENH(transport.ENHResErrorEBUS, 0x42)
+		_, _ = newServer.Write(ebusErr[:])
+	}()
+
+	err := enh.Reconnect()
+	if err == nil {
+		t.Fatal("Reconnect() should have returned an error on initRecvLocked eBUS error")
+	}
+	// The error should wrap ErrAdapterReset (transient), NOT ErrTransportClosed (fatal).
+	if !errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.Fatalf("Reconnect() error = %v; want ErrAdapterReset (transient)", err)
+	}
+	if errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("Reconnect() error wraps ErrTransportClosed; want ErrAdapterReset only")
+	}
+
+	// The conn should still be usable — Write should not fail with ErrTransportClosed.
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := enh.Write([]byte{0x42})
+		writeDone <- err
+	}()
+	// Consume the write on new server side so it doesn't block.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(newServer, buf)
+	}()
+
+	select {
+	case writeErr := <-writeDone:
+		if errors.Is(writeErr, ebuserrors.ErrTransportClosed) {
+			t.Fatalf("Write after failed reconnect returned ErrTransportClosed; conn should still be usable")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Write after failed reconnect timed out unexpectedly")
+	}
+}
+
+// R6-EG-Codex-04: Close() must be safe to call concurrently with Write().
+func TestENHTransport_CloseConcurrentWithWrite(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 100*time.Millisecond, 100*time.Millisecond)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer goroutine.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_, err := enh.Write([]byte{byte(i)})
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Closer goroutine — give writer a small head start.
+	go func() {
+		defer wg.Done()
+		time.Sleep(5 * time.Millisecond)
+		_ = enh.Close()
+	}()
+
+	// Drain writes on server side to prevent blocking.
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, err := server.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	// Test passes if there is no data race (run with -race).
+}
+
+// R6-REG-03: Unsolicited INFO frames in fillPendingLocked are safely ignored
+// and do not corrupt the event stream.
+func TestENHTransport_FillPendingIgnoresInfoFrames(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+
+		// Send INFO(0x05), then RECEIVED(0xAB).
+		info := transport.EncodeENH(transport.ENHResInfo, 0x05)
+		recv := transport.EncodeENH(transport.ENHResReceived, 0xAB)
+		payload := append(info[:], recv[:]...)
+		_, err := server.Write(payload)
+		serverErr <- err
+	}()
+
+	// ReadByte should skip the INFO frame and return 0xAB.
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v", err)
+	}
+	if got != 0xAB {
+		t.Fatalf("ReadByte = 0x%02x; want 0xAB (INFO frame should be ignored)", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
 	}
 }

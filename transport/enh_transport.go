@@ -234,10 +234,12 @@ func (t *ENHTransport) reconnectLocked() error {
 
 	// Read INIT response (readMu held by caller).
 	if _, err := t.initRecvLocked(); err != nil {
-		t.writeMu.Lock()
-		_ = t.conn.Close()
-		t.writeMu.Unlock()
-		return fmt.Errorf("enh reconnect init recv: %v: %w", err, ebuserrors.ErrTransportClosed)
+		// INIT recv failed (timeout waiting for RESETTED) but newConn is
+		// still a valid TCP connection — we successfully sent the INIT
+		// request. Keep newConn in place so subsequent operations get
+		// timeout errors (retryable) instead of ErrTransportClosed (fatal).
+		// The old conn was already closed, so there is nothing to restore.
+		return fmt.Errorf("enh reconnect init recv: %v: %w", err, ebuserrors.ErrAdapterReset)
 	}
 	return nil
 }
@@ -459,7 +461,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			// in pendingEvents would be consumed as echoes by
 			// sendRawWithEcho, causing echo mismatch errors.
 			t.parser.Reset()
-			t.pendingEvents = t.pendingEvents[:0]
+			t.pendingEvents = nil
 			return arbitrationErr
 		}
 
@@ -639,6 +641,8 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 }
 
 func (t *ENHTransport) Close() error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	return t.conn.Close()
 }
 
@@ -680,6 +684,9 @@ func (t *ENHTransport) fillPendingLocked() error {
 			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 		case ENHResFailed:
 			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+		case ENHResInfo:
+			// INFO responses are consumed by RequestInfo's dedicated read path.
+			// Unsolicited INFO frames in the steady-state read are safely ignored.
 		case ENHResResetted:
 			if t.dialFunc != nil {
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
