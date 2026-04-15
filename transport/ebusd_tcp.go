@@ -81,11 +81,11 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 		if t.pendingErr != nil {
 			err := t.pendingErr
 			t.pendingErr = nil
-			// EG21: After consuming a collision error, inject a SYN
-			// byte so the bus layer's waitForSyn completes. ebusd-tcp
-			// won't produce passive SYN events on the wire.
+			// EG21: After consuming a collision error, inject two SYN
+			// bytes so the bus layer's waitForSyn(ctx, ctx, 2) completes.
+			// ebusd-tcp won't produce passive SYN events on the wire.
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
-				t.pending = append(t.pending, ebusSymbolSyn)
+				t.pending = append(t.pending, ebusSymbolSyn, ebusSymbolSyn)
 			}
 			return 0, err
 		}

@@ -1086,28 +1086,31 @@ func TestEbusdTCPTransport_CollisionRecovery(t *testing.T) {
 		t.Fatalf("ReadByte (collision) timed out")
 	}
 
-	// EG21: ReadByte must now return the injected SYN without blocking.
-	synCh := make(chan struct {
-		b   byte
-		err error
-	}, 1)
-	go func() {
-		b, err := tr.ReadByte()
-		synCh <- struct {
+	// EG21: ReadByte must return two injected SYN bytes without blocking
+	// (waitForSyn calls readByte twice with count=2).
+	for i := 0; i < 2; i++ {
+		synCh := make(chan struct {
 			b   byte
 			err error
-		}{b, err}
-	}()
-	select {
-	case got := <-synCh:
-		if got.err != nil {
-			t.Fatalf("ReadByte (syn) error = %v", got.err)
+		}, 1)
+		go func() {
+			b, err := tr.ReadByte()
+			synCh <- struct {
+				b   byte
+				err error
+			}{b, err}
+		}()
+		select {
+		case got := <-synCh:
+			if got.err != nil {
+				t.Fatalf("ReadByte (syn %d) error = %v", i+1, got.err)
+			}
+			if got.b != ebusSymbolSyn {
+				t.Fatalf("ReadByte (syn %d) = 0x%02x; want 0x%02x", i+1, got.b, ebusSymbolSyn)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("ReadByte (syn %d) timed out; likely EG21 deadlock", i+1)
 		}
-		if got.b != ebusSymbolSyn {
-			t.Fatalf("ReadByte (syn) = 0x%02x; want 0x%02x", got.b, ebusSymbolSyn)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("ReadByte (syn) timed out; likely EG21 deadlock")
 	}
 
 	if err := <-serverErr; err != nil {
