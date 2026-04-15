@@ -641,12 +641,15 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	}
 }
 
-// Close closes the underlying connection. net.Conn.Close is safe for
-// concurrent use and will unblock any pending Read or Write call, so we
-// do NOT acquire readMu/writeMu here — holding writeMu would block
-// Close until a stalled Write completes, preventing timely shutdown.
+// Close closes the underlying connection. We snapshot t.conn under writeMu
+// to synchronize with reconnectLocked (which replaces t.conn under the same
+// lock), then close the snapshot outside the lock so a stalled Write does
+// not block shutdown. net.Conn.Close unblocks any pending Read or Write.
 func (t *ENHTransport) Close() error {
-	return t.conn.Close()
+	t.writeMu.Lock()
+	conn := t.conn
+	t.writeMu.Unlock()
+	return conn.Close()
 }
 
 func (t *ENHTransport) resetStateLocked() {

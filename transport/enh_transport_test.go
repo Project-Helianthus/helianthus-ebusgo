@@ -1792,7 +1792,8 @@ func TestENHTransport_ReconnectInitRecvError_ConnStillUsable(t *testing.T) {
 	defer func() { _ = oldServer.Close() }()
 
 	// New connection: dial succeeds, INIT send succeeds, but adapter responds
-	// with an eBUS error instead of RESETTED.
+	// with an eBUS error instead of RESETTED. The error should preserve the
+	// original error class (ErrInvalidPayload), not wrap as ErrTransportClosed.
 	newClient, newServer := net.Pipe()
 	defer func() { _ = newClient.Close() }()
 	defer func() { _ = newServer.Close() }()
