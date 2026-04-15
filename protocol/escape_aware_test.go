@@ -16,7 +16,9 @@ type escapeAwareTransport struct {
 	scriptedTransport
 }
 
-func (t *escapeAwareTransport) BytesAreUnescaped() bool { return true }
+func (t *escapeAwareTransport) BytesAreUnescaped() bool      { return true }
+func (t *escapeAwareTransport) StartArbitration(byte) error  { return nil }
+func (t *escapeAwareTransport) ArbitrationSendsSource() bool { return true }
 
 // TestBus_EscapeAware_SendDoesNotDoubleEscape verifies that when the transport
 // implements EscapeAware, sendSymbolWithEcho sends 0xA9 and 0xAA as raw bytes
@@ -46,12 +48,14 @@ func TestBus_EscapeAware_SendDoesNotDoubleEscape(t *testing.T) {
 		t.Fatalf("Send error = %v", err)
 	}
 
-	// With an unescaped transport, the wire bytes should contain the raw
-	// 0xA9 and 0xAA in the data portion -- NOT expanded escape sequences.
-	// telegram = SRC DST PB SB LEN DATA[0] DATA[1] CRC SYN
-	command := []byte{0x10, protocol.AddressBroadcast, 0x01, 0x02, 0x02,
+	// With an unescaped transport that implements StartArbitration +
+	// ArbitrationSendsSource, SRC is NOT sent on wire (adapter sends it
+	// during arbitration). Wire bytes: DST PB SB LEN DATA[0] DATA[1] CRC SYN
+	fullTelegram := []byte{0x10, protocol.AddressBroadcast, 0x01, 0x02, 0x02,
 		protocol.SymbolEscape, protocol.SymbolSyn}
-	command = append(command, protocol.CRC(command))
+	fullTelegram = append(fullTelegram, protocol.CRC(fullTelegram))
+	// Skip SRC (index 0) — arbitration sends source.
+	command := append([]byte(nil), fullTelegram[1:]...)
 	command = append(command, protocol.SymbolSyn) // end-of-message SYN
 
 	got := tr.writesFlattened()
@@ -137,6 +141,61 @@ func TestBus_EscapeAware_ReadSymbolReturnsRawBytes(t *testing.T) {
 	}
 	if resp != nil {
 		t.Fatalf("response = %+v; want nil for I-I", resp)
+	}
+}
+
+// TestBus_EscapeAware_ResponseWith0xAA verifies that on an ENH transport,
+// a response data byte of 0xAA (SymbolSyn) is NOT treated as idle SYN.
+// This is the ebusgo equivalent of VE-NEW-01 from the VRC Explorer audit.
+// On plain transports, 0xAA in the response path means bus-idle timeout.
+// On ENH, 0xAA is a valid data byte (adapter strips wire escaping).
+func TestBus_EscapeAware_ResponseWith0xAA(t *testing.T) {
+	t.Parallel()
+
+	// I-T frame: we send, target responds with data containing 0xAA.
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x15,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
+	// Build expected response: LEN=2, DATA=[0xAA, 0x55], CRC
+	respData := []byte{0xAA, 0x55}
+	respSegment := append([]byte{byte(len(respData))}, respData...)
+	respCRC := protocol.CRC(respSegment)
+
+	// scriptedTransport.Write auto-generates echoes, so inbound only needs
+	// bytes that come FROM the target: command ACK, response, response ACK echo.
+	inbound := []readEvent{
+		// Command ACK from target.
+		{value: protocol.SymbolAck},
+		// Target response: LEN, DATA[0]=0xAA, DATA[1]=0x55, CRC.
+		{value: byte(len(respData))},
+		{value: 0xAA}, // This is the critical byte — must NOT be treated as SYN.
+		{value: 0x55},
+		{value: respCRC},
+	}
+
+	tr := &escapeAwareTransport{
+		scriptedTransport: scriptedTransport{inbound: inbound},
+	}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, frame)
+	if err != nil {
+		t.Fatalf("Send error = %v; want success (0xAA is valid data on ENH, not SYN)", err)
+	}
+	if resp == nil {
+		t.Fatal("response = nil; want response with 0xAA data")
+	}
+	if len(resp.Data) != 2 || resp.Data[0] != 0xAA || resp.Data[1] != 0x55 {
+		t.Fatalf("response.Data = %v; want [0xAA, 0x55]", resp.Data)
 	}
 }
 

@@ -709,7 +709,16 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
 		case SymbolSyn:
-			err := fmt.Errorf("syn while waiting for command ack: %w", ebuserrors.ErrTimeout)
+			// On plain transports, SYN during ACK wait means the bus went
+			// idle without a response (timeout). On ENH transports, 0xAA is
+			// a valid data byte — the adapter does not send idle SYN.
+			if !b.unescapedTransport {
+				err := fmt.Errorf("syn while waiting for command ack: %w", ebuserrors.ErrTimeout)
+				b.emitOutcomeEvent(frame, frameType, attempt, err)
+				return nil, err
+			}
+			// ENH: treat 0xAA as unexpected symbol, not SYN timeout.
+			err := fmt.Errorf("unexpected symbol 0x%02x while waiting for command ack: %w", ack, ebuserrors.ErrTimeout)
 			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
 		default:
@@ -745,7 +754,10 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
 		}
-		if lengthSym == SymbolSyn {
+		// On plain transports, SYN (0xAA) during response means bus went idle
+		// (timeout). On ENH transports, 0xAA is a valid data byte — the
+		// adapter does not inject idle SYN into the byte stream.
+		if !b.unescapedTransport && lengthSym == SymbolSyn {
 			err := fmt.Errorf("syn while waiting for response length: %w", ebuserrors.ErrTimeout)
 			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
@@ -759,7 +771,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 				b.emitOutcomeEvent(frame, frameType, attempt, err)
 				return nil, err
 			}
-			if value == SymbolSyn {
+			if !b.unescapedTransport && value == SymbolSyn {
 				err := fmt.Errorf("syn while reading response data: %w", ebuserrors.ErrTimeout)
 				b.emitOutcomeEvent(frame, frameType, attempt, err)
 				return nil, err
@@ -772,7 +784,7 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
 		}
-		if crcValue == SymbolSyn {
+		if !b.unescapedTransport && crcValue == SymbolSyn {
 			err := fmt.Errorf("syn while waiting for response crc: %w", ebuserrors.ErrTimeout)
 			b.emitOutcomeEvent(frame, frameType, attempt, err)
 			return nil, err
@@ -903,7 +915,7 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte) error {
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
-	if echo == SymbolSyn && raw != SymbolSyn {
+	if !b.unescapedTransport && echo == SymbolSyn && raw != SymbolSyn {
 		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
