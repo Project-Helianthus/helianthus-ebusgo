@@ -2147,71 +2147,132 @@ func TestENHTransport_XR_UpstreamLoss_GracefulShutdown_NoHang(t *testing.T) {
 }
 
 func TestENHTransport_XR_INFO_FrameLength_AndSerialAccess(t *testing.T) {
-	// Fix 2: RequestInfo with readTimeout=0 uses a fallback timeout and
-	// returns within bounded time instead of blocking forever.
 	t.Parallel()
 
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
+	t.Run("timeout_fallback", func(t *testing.T) {
+		t.Parallel()
+		// Fix 2: RequestInfo with readTimeout=0 uses a fallback timeout and
+		// returns within bounded time instead of blocking forever.
+		client, server := net.Pipe()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
 
-	// readTimeout=0 means "no timeout configured" -- RequestInfo must use fallback.
-	enh := transport.NewENHTransport(client, 0, 200*time.Millisecond)
+		// readTimeout=0 means "no timeout configured" -- RequestInfo must use fallback.
+		enh := transport.NewENHTransport(client, 0, 200*time.Millisecond)
 
-	serverErr := make(chan error, 1)
-	go func() {
-		defer close(serverErr)
-		// Read the INFO request but never respond.
-		buf := make([]byte, 2)
-		_, err := io.ReadFull(server, buf)
-		serverErr <- err
-	}()
+		serverErr := make(chan error, 1)
+		go func() {
+			defer close(serverErr)
+			// Read the INFO request but never respond.
+			buf := make([]byte, 2)
+			_, err := io.ReadFull(server, buf)
+			serverErr <- err
+		}()
 
-	start := time.Now()
-	_, err := enh.RequestInfo(transport.AdapterInfoVersion)
-	elapsed := time.Since(start)
+		start := time.Now()
+		_, err := enh.RequestInfo(transport.AdapterInfoVersion)
+		elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatal("RequestInfo with zero timeout returned nil error; want timeout")
-	}
-	if !errors.Is(err, ebuserrors.ErrTimeout) {
-		t.Fatalf("RequestInfo error = %v; want ErrTimeout", err)
-	}
-	// Fallback is 2s; should complete within 3s even with scheduling jitter.
-	if elapsed > 3*time.Second {
-		t.Fatalf("RequestInfo took %s; want bounded by ~2s fallback timeout", elapsed)
-	}
+		if err == nil {
+			t.Fatal("RequestInfo with zero timeout returned nil error; want timeout")
+		}
+		if !errors.Is(err, ebuserrors.ErrTimeout) {
+			t.Fatalf("RequestInfo error = %v; want ErrTimeout", err)
+		}
+		// Fallback is 2s; should complete within 3s even with scheduling jitter.
+		if elapsed > 3*time.Second {
+			t.Fatalf("RequestInfo took %s; want bounded by ~2s fallback timeout", elapsed)
+		}
 
-	if err := <-serverErr; err != nil {
-		t.Fatalf("server error = %v", err)
-	}
+		if err := <-serverErr; err != nil {
+			t.Fatalf("server error = %v", err)
+		}
+	})
+
+	t.Run("serial_access", func(t *testing.T) {
+		t.Parallel()
+		// Two concurrent RequestInfo calls must serialize (both hold readMu+writeMu)
+		// and not corrupt each other's results.
+		client, server := net.Pipe()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
+
+		enh := transport.NewENHTransport(client, 500*time.Millisecond, 200*time.Millisecond)
+
+		// Server side: respond to each INFO request with a 1-byte payload.
+		// First request gets 0xAA, second gets 0xBB.
+		go func() {
+			buf := make([]byte, 2)
+			responses := []byte{0xAA, 0xBB}
+			for _, resp := range responses {
+				if _, err := io.ReadFull(server, buf); err != nil {
+					return
+				}
+				// Send INFO length=1, then INFO data=resp.
+				lenFrame := transport.EncodeENH(transport.ENHResInfo, 0x01)
+				dataFrame := transport.EncodeENH(transport.ENHResInfo, resp)
+				payload := append(lenFrame[:], dataFrame[:]...)
+				if _, err := server.Write(payload); err != nil {
+					return
+				}
+			}
+		}()
+
+		var wg sync.WaitGroup
+		results := make([][]byte, 2)
+		errs := make([]error, 2)
+
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				results[idx], errs[idx] = enh.RequestInfo(transport.AdapterInfoVersion)
+			}(i)
+		}
+		wg.Wait()
+
+		for i := 0; i < 2; i++ {
+			if errs[i] != nil {
+				t.Fatalf("RequestInfo[%d] error = %v", i, errs[i])
+			}
+			if len(results[i]) != 1 {
+				t.Fatalf("RequestInfo[%d] payload len = %d; want 1", i, len(results[i]))
+			}
+		}
+		// Due to serialization, one gets 0xAA and the other gets 0xBB.
+		got := map[byte]bool{results[0][0]: true, results[1][0]: true}
+		if !got[0xAA] || !got[0xBB] {
+			t.Fatalf("RequestInfo results = {0x%02x, 0x%02x}; want {0xAA, 0xBB}", results[0][0], results[1][0])
+		}
+	})
 }
 
 func TestENHTransport_CloseDoesNotBlockBehindStalledWrite(t *testing.T) {
-	// Fix 3: Close() snapshots conn under writeMu then closes outside lock.
-	// A stalled Write on net.Pipe (reader never drains) must not prevent
-	// Close() from completing.
+	// Close() no longer acquires writeMu — it closes conn directly, which
+	// unblocks a stalled Write. Verify Close returns promptly even when
+	// Write holds writeMu blocked on conn.Write.
 	t.Parallel()
 
-	client, server := net.Pipe()
-	// Do NOT read from server -- Write will block on the pipe.
+	// stallConn blocks Write on a channel so we can deterministically
+	// know when Write is holding writeMu inside conn.Write.
+	clientPipe, server := net.Pipe()
 	defer func() { _ = server.Close() }()
 
-	enh := transport.NewENHTransport(client, time.Second, time.Second)
+	stallCh := make(chan struct{})
+	stalled := &stallableConn{Conn: clientPipe, stallCh: stallCh}
+	enh := transport.NewENHTransport(stalled, time.Second, time.Second)
 
-	// Start a Write that will block because no one reads the pipe.
-	writeStarted := make(chan struct{})
+	// Start a Write that will stall inside conn.Write (holding writeMu).
+	writeErr := make(chan error, 1)
 	go func() {
-		close(writeStarted)
-		// Large payload to ensure it blocks (net.Pipe has limited buffer).
-		bigPayload := make([]byte, 4096)
-		_, _ = enh.Write(bigPayload)
+		_, err := enh.Write([]byte{0x42})
+		writeErr <- err
 	}()
-	<-writeStarted
-	// Give the goroutine time to enter Write and acquire writeMu.
-	time.Sleep(20 * time.Millisecond)
 
-	// Close must complete within 1 second even though Write is stalled.
+	// Wait until the goroutine is blocked inside stallableConn.Write.
+	<-stallCh
+
+	// Close must complete promptly — it no longer waits for writeMu.
 	done := make(chan error, 1)
 	go func() {
 		done <- enh.Close()
@@ -2219,11 +2280,39 @@ func TestENHTransport_CloseDoesNotBlockBehindStalledWrite(t *testing.T) {
 
 	select {
 	case err := <-done:
-		// Close may return an error if conn is already broken, that is fine.
-		_ = err
+		_ = err // Close may return an error from already-closed pipe, that is fine.
 	case <-time.After(time.Second):
 		t.Fatal("Close() blocked for >1s behind stalled Write")
 	}
+
+	// Unblock the stalled Write so the goroutine can exit.
+	close(stallCh)
+	<-writeErr
+}
+
+// stallableConn blocks the first Write on a channel to simulate a stalled
+// conn.Write. The channel is signaled (receives) when Write enters, and
+// the Write blocks until the channel is closed.
+type stallableConn struct {
+	net.Conn
+	stallCh chan struct{}
+	once    sync.Once
+}
+
+func (c *stallableConn) Write(b []byte) (int, error) {
+	stalled := false
+	c.once.Do(func() {
+		// Signal that we are inside Write (caller knows writeMu is held).
+		c.stallCh <- struct{}{}
+		// Block until stallCh is closed.
+		<-c.stallCh
+		stalled = true
+	})
+	if stalled {
+		// After unstalling, the conn is likely closed — propagate the error.
+		return c.Conn.Write(b)
+	}
+	return c.Conn.Write(b)
 }
 
 // shortWriteConn wraps a net.Conn and returns short writes on demand.
@@ -2410,16 +2499,46 @@ func TestENHTransport_RequestInfoPendingEventsFloodBounded(t *testing.T) {
 
 func TestENHTransport_XR_ENH_UnknownCommand_ExplicitError(t *testing.T) {
 	// Fix 7: DecodeENH rejects unknown command nibbles with ErrInvalidPayload.
-	// Command nibble 0x04 is not defined in the ENH protocol.
 	t.Parallel()
 
-	// 0xD1 = 1101_0001: byte1 marker 0xC0 | (cmd=0x04 << 2) | data_hi=0x01
-	// 0x80 = 1000_0000: byte2 marker 0x80 | data_lo=0x00
-	_, err := transport.DecodeENH(0xD1, 0x80)
-	if err == nil {
-		t.Fatal("DecodeENH(0xD1, 0x80) returned nil error; want ErrInvalidPayload")
-	}
-	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
-		t.Fatalf("DecodeENH(0xD1, 0x80) error = %v; want ErrInvalidPayload", err)
-	}
+	t.Run("decode_level", func(t *testing.T) {
+		// Command nibble 0x04 is not defined in the ENH protocol.
+		// 0xD1 = 1101_0001: byte1 marker 0xC0 | (cmd=0x04 << 2) | data_hi=0x01
+		// 0x80 = 1000_0000: byte2 marker 0x80 | data_lo=0x00
+		_, err := transport.DecodeENH(0xD1, 0x80)
+		if err == nil {
+			t.Fatal("DecodeENH(0xD1, 0x80) returned nil error; want ErrInvalidPayload")
+		}
+		if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+			t.Fatalf("DecodeENH(0xD1, 0x80) error = %v; want ErrInvalidPayload", err)
+		}
+	})
+
+	t.Run("transport_recovery", func(t *testing.T) {
+		// Feed an unknown ENH command through the live transport and verify
+		// the parser recovers: fillPendingLocked swallows ErrInvalidPayload
+		// (parser desync recovery), so the unknown command is silently
+		// discarded and subsequent valid data works.
+		client, server := net.Pipe()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
+
+		enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+		go func() {
+			// Unknown command (0xD1, 0x80) followed by valid RECEIVED(0x42).
+			recv := transport.EncodeENH(transport.ENHResReceived, 0x42)
+			payload := append([]byte{0xD1, 0x80}, recv[:]...)
+			_, _ = server.Write(payload)
+		}()
+
+		// ReadByte should recover from the unknown command and return 0x42.
+		got, err := enh.ReadByte()
+		if err != nil {
+			t.Fatalf("ReadByte after unknown command = %v; want nil (parser recovery)", err)
+		}
+		if got != 0x42 {
+			t.Fatalf("ReadByte = 0x%02x; want 0x42", got)
+		}
+	})
 }

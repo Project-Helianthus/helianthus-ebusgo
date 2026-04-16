@@ -243,6 +243,9 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 // If dialFunc is nil (no reconnect capability), falls back to parser-only
 // reset for backward compatibility.
 func (t *ENHTransport) reconnectLocked() error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	if t.dialFunc == nil {
 		t.resetStateLocked()
 		return nil
@@ -713,16 +716,16 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 }
 
 // Close closes the underlying connection. We set the closed flag first so
-// all public methods bail out immediately, then snapshot t.conn under writeMu
-// to synchronize with reconnectLocked (which replaces t.conn under the same
-// lock), then close the snapshot outside the lock so a stalled Write does
-// not block shutdown. net.Conn.Close unblocks any pending Read or Write.
+// all public methods bail out immediately, then close conn directly without
+// acquiring writeMu. This prevents Close from blocking behind a stalled
+// Write that holds writeMu waiting on conn.Write. net.Conn.Close is
+// concurrent-safe and unblocks any pending Read or Write.
+//
+// After closed=true, reconnectLocked cannot replace t.conn (it checks
+// closed first), so the conn pointer is stable at this point.
 func (t *ENHTransport) Close() error {
 	t.closed.Store(true)
-	t.writeMu.Lock()
-	conn := t.conn
-	t.writeMu.Unlock()
-	return conn.Close()
+	return t.conn.Close()
 }
 
 func (t *ENHTransport) resetStateLocked() {
@@ -762,13 +765,11 @@ func (t *ENHTransport) fillPendingLocked() error {
 				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 			}
 		case ENHResStarted:
-			if len(t.pendingEvents) < maxPendingEvents {
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
-			}
+			// Control events: always queue — dropping STARTED/FAILED causes
+			// stuck arbitration. These are rare (one per arbitration cycle).
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 		case ENHResFailed:
-			if len(t.pendingEvents) < maxPendingEvents {
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
-			}
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
 			// Unsolicited INFO frames in the steady-state read are safely ignored.
