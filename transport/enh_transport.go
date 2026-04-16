@@ -33,9 +33,11 @@ func WithDialFunc(fn func() (net.Conn, error)) ENHTransportOption {
 
 // ENHTransport wraps a net.Conn and exposes the RawTransport interface using ENH framing.
 //
-// Lock ordering: readMu before writeMu. Both must be held when replacing t.conn.
+// Lock ordering: readMu before writeMu. connMu is independent (never held
+// during I/O) and protects only the conn pointer for Close/reconnect sync.
 type ENHTransport struct {
-	conn         net.Conn
+	connMu sync.Mutex // protects conn pointer swap only, not I/O operations
+	conn   net.Conn
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	// true for ENH mode: START arbitration already transmits source symbol on wire.
@@ -267,8 +269,10 @@ func (t *ENHTransport) reconnectLocked() error {
 	// connection before INIT completes. Lock ordering: readMu (held by
 	// caller) before writeMu.
 	t.writeMu.Lock()
+	t.connMu.Lock()
 	_ = t.conn.Close()
 	t.conn = newConn
+	t.connMu.Unlock()
 	t.resetStateLocked()
 	sendErr := t.initSendLocked(0x01)
 	if sendErr != nil {
@@ -716,16 +720,16 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 }
 
 // Close closes the underlying connection. We set the closed flag first so
-// all public methods bail out immediately, then close conn directly without
-// acquiring writeMu. This prevents Close from blocking behind a stalled
-// Write that holds writeMu waiting on conn.Write. net.Conn.Close is
-// concurrent-safe and unblocks any pending Read or Write.
-//
-// After closed=true, reconnectLocked cannot replace t.conn (it checks
-// closed first), so the conn pointer is stable at this point.
+// all public methods bail out immediately, then snapshot the conn pointer
+// under connMu (not writeMu — a stalled Write holds writeMu and we must
+// not block behind it). net.Conn.Close is concurrent-safe and unblocks
+// any pending Read or Write.
 func (t *ENHTransport) Close() error {
 	t.closed.Store(true)
-	return t.conn.Close()
+	t.connMu.Lock()
+	conn := t.conn
+	t.connMu.Unlock()
+	return conn.Close()
 }
 
 func (t *ENHTransport) resetStateLocked() {
