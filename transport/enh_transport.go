@@ -264,6 +264,12 @@ func (t *ENHTransport) reconnectLocked() error {
 	if tcpConn, ok := newConn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 	}
+	// Re-check closed after dial — Close() may have run while we were
+	// blocked in dialFunc. If so, close the freshly dialed conn and bail.
+	if t.closed.Load() {
+		_ = newConn.Close()
+		return fmt.Errorf("enh transport closed during reconnect: %w", ebuserrors.ErrTransportClosed)
+	}
 	// Hold writeMu for the entire swap+init-send sequence to prevent
 	// concurrent Write() from sending application bytes on the new
 	// connection before INIT completes. Lock ordering: readMu (held by
