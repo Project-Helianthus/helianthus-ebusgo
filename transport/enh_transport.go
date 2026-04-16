@@ -33,8 +33,9 @@ func WithDialFunc(fn func() (net.Conn, error)) ENHTransportOption {
 
 // ENHTransport wraps a net.Conn and exposes the RawTransport interface using ENH framing.
 //
-// Lock ordering: readMu before writeMu. connMu is independent (never held
-// during I/O) and protects only the conn pointer for Close/reconnect sync.
+// Lock ordering: readMu before writeMu. connMu is independent and protects
+// only the conn pointer swap — never held during blocking I/O (conn.Close
+// is called after connMu.Unlock).
 type ENHTransport struct {
 	connMu sync.Mutex // protects conn pointer swap only, not I/O operations
 	conn   net.Conn
@@ -112,6 +113,9 @@ type InitResult struct {
 // Returns the adapter's confirmed features byte from the RESETTED response.
 // Any RESETTED frames observed later will reset the local parser and echo state.
 func (t *ENHTransport) Init(features byte) (byte, error) {
+	if t.closed.Load() {
+		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 	return t.initLocked(features)
@@ -122,6 +126,9 @@ func (t *ENHTransport) Init(features byte) (byte, error) {
 // the timeout window — the connection may still be usable but optional
 // features (INFO queries, etc.) should not be assumed available.
 func (t *ENHTransport) InitWithResult(features byte) (InitResult, error) {
+	if t.closed.Load() {
+		return InitResult{}, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 	return t.initWithResultLocked(features)
@@ -189,6 +196,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 	for {
 		remaining := maxWait - time.Since(start)
 		if remaining <= 0 {
+			t.parser.Reset() // Clear stale byte1 from partial frame
 			return InitResult{}, nil
 		}
 		if t.readTimeout <= 0 || remaining < t.readTimeout {
@@ -202,6 +210,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
 			if isTimeout(err) {
+				t.parser.Reset() // Clear stale byte1 from partial frame
 				return InitResult{}, nil
 			}
 			return InitResult{}, t.mapReadError(err)
@@ -276,9 +285,10 @@ func (t *ENHTransport) reconnectLocked() error {
 	// caller) before writeMu.
 	t.writeMu.Lock()
 	t.connMu.Lock()
-	_ = t.conn.Close()
+	oldConn := t.conn
 	t.conn = newConn
 	t.connMu.Unlock()
+	_ = oldConn.Close()
 	t.resetStateLocked()
 	sendErr := t.initSendLocked(0x01)
 	if sendErr != nil {
@@ -607,13 +617,18 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		}
 	}()
 
-	// Send the INFO request.
+	// Hold writeMu for the entire INFO exchange (write + read) to prevent
+	// concurrent Write/RequestStart from interleaving bytes on the TCP
+	// stream during the response read phase. Close() does not need writeMu
+	// (uses connMu), so this does not block shutdown.
 	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	// Send the INFO request.
 	seq := EncodeENH(ENHReqInfo, byte(id))
 	written := 0
 	for written < len(seq) {
 		if err = t.setWriteDeadline(); err != nil {
-			t.writeMu.Unlock()
 			err = t.mapWriteError(err)
 			return nil, err
 		}
@@ -621,7 +636,6 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		n, err = t.conn.Write(seq[written:])
 		written += n
 		if err != nil {
-			t.writeMu.Unlock()
 			err = t.mapWriteError(err)
 			return nil, err
 		}
@@ -629,7 +643,6 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 			break
 		}
 	}
-	t.writeMu.Unlock()
 	if written != len(seq) {
 		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
 		return nil, err
@@ -776,7 +789,9 @@ func (t *ENHTransport) fillPendingLocked() error {
 			}
 		case ENHResStarted:
 			// Control events: always queue — dropping STARTED/FAILED causes
-			// stuck arbitration. These are rare (one per arbitration cycle).
+			// stuck arbitration. Growth is bounded: at most one per read cycle
+			// (adapter sends exactly one STARTED or FAILED per START request),
+			// and read cycles are bounded by readTimeout.
 			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 		case ENHResFailed:
 			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
