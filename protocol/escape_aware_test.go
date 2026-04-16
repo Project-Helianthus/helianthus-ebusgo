@@ -199,6 +199,55 @@ func TestBus_EscapeAware_ResponseWith0xAA(t *testing.T) {
 	}
 }
 
+// TestBus_XR_ENH_0xAA_DataNotSYN is the cross-repo conformance test name for
+// the scenario covered by TestBus_EscapeAware_ResponseWith0xAA. On an ENH
+// transport, 0xAA in response data is a valid byte, not a SYN boundary.
+func TestBus_XR_ENH_0xAA_DataNotSYN(t *testing.T) {
+	t.Parallel()
+
+	// I-T frame: we send, target responds with data containing 0xAA.
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x15,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
+	// Build expected response: LEN=2, DATA=[0xAA, 0x55], CRC
+	respData := []byte{0xAA, 0x55}
+	respSegment := append([]byte{byte(len(respData))}, respData...)
+	respCRC := protocol.CRC(respSegment)
+
+	inbound := []readEvent{
+		{value: protocol.SymbolAck},
+		{value: byte(len(respData))},
+		{value: 0xAA}, // Must NOT be treated as SYN on ENH transport.
+		{value: 0x55},
+		{value: respCRC},
+	}
+
+	tr := &escapeAwareTransport{
+		scriptedTransport: scriptedTransport{inbound: inbound},
+	}
+	config := protocol.DefaultBusConfig()
+	bus := protocol.NewBus(tr, config, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	bus.Run(ctx)
+
+	resp, err := bus.Send(ctx, frame)
+	if err != nil {
+		t.Fatalf("Send error = %v; want success (0xAA is valid data on ENH, not SYN)", err)
+	}
+	if resp == nil {
+		t.Fatal("response = nil; want response with 0xAA data")
+	}
+	if len(resp.Data) != 2 || resp.Data[0] != 0xAA || resp.Data[1] != 0x55 {
+		t.Fatalf("response.Data = %v; want [0xAA, 0x55]", resp.Data)
+	}
+}
+
 // TestShouldRetry_DeadlineBoundsRetries_CompilesCorrectly verifies that the
 // renamed deadlineBoundsRetries parameter compiles and works correctly through
 // the full sendWithRetries path.

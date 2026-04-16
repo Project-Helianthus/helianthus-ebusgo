@@ -9,11 +9,16 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
+
+// maxPendingEvents caps the pendingEvents slice to prevent unbounded growth
+// when bus traffic floods the transport during INFO or normal read paths.
+const maxPendingEvents = 256
 
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
@@ -36,6 +41,10 @@ type ENHTransport struct {
 	// true for ENH mode: START arbitration already transmits source symbol on wire.
 	// false for ENS mode: source symbol must still be written in telegram payload.
 	arbitrationSendsSource bool
+
+	// closed is set atomically by Close() to signal terminal state. All public
+	// methods check this before acquiring locks to prevent post-Close hangs.
+	closed atomic.Bool
 
 	// dialFunc, when non-nil, enables mid-session reconnection on RESETTED.
 	// The function should return a fresh net.Conn to the adapter.
@@ -89,6 +98,12 @@ func (t *ENHTransport) ArbitrationSendsSource() bool {
 	return t.arbitrationSendsSource
 }
 
+// InitResult contains the outcome of an ENH INIT handshake.
+type InitResult struct {
+	Features  byte // Adapter's confirmed features byte from RESETTED response.
+	Confirmed bool // True if adapter sent RESETTED; false on timeout (unconfirmed).
+}
+
 // Init performs an ENH initialization handshake by sending ENHReqInit(features)
 // and waiting for ENHResResetted(features).
 //
@@ -98,6 +113,28 @@ func (t *ENHTransport) Init(features byte) (byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 	return t.initLocked(features)
+}
+
+// InitWithResult performs an ENH INIT handshake and returns detailed result.
+// When Confirmed is false, the adapter did not respond with RESETTED within
+// the timeout window — the connection may still be usable but optional
+// features (INFO queries, etc.) should not be assumed available.
+func (t *ENHTransport) InitWithResult(features byte) (InitResult, error) {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+	return t.initWithResultLocked(features)
+}
+
+// initWithResultLocked performs the INIT handshake returning a rich result.
+// Caller must hold readMu.
+func (t *ENHTransport) initWithResultLocked(features byte) (InitResult, error) {
+	t.writeMu.Lock()
+	err := t.initSendLocked(features)
+	t.writeMu.Unlock()
+	if err != nil {
+		return InitResult{}, err
+	}
+	return t.initRecvResultLocked()
 }
 
 // initSendLocked writes the INIT request frame. Caller must hold writeMu.
@@ -132,11 +169,15 @@ func (t *ENHTransport) initLocked(features byte) (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	return t.initRecvLocked()
+	result, err := t.initRecvResultLocked()
+	return result.Features, err
 }
 
-// initRecvLocked reads the INIT response. Caller must hold readMu.
-func (t *ENHTransport) initRecvLocked() (byte, error) {
+// initRecvResultLocked reads the INIT response and returns a rich result.
+// Caller must hold readMu. When RESETTED is received, Confirmed is true and
+// Features contains the adapter's features byte. On timeout without RESETTED,
+// Confirmed is false and Features is 0 (fail-open: no error returned).
+func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 	maxWait := t.readTimeout
 	if maxWait <= 0 {
 		maxWait = 2 * time.Second
@@ -146,22 +187,22 @@ func (t *ENHTransport) initRecvLocked() (byte, error) {
 	for {
 		remaining := maxWait - time.Since(start)
 		if remaining <= 0 {
-			return 0, nil
+			return InitResult{}, nil
 		}
 		if t.readTimeout <= 0 || remaining < t.readTimeout {
 			if err := t.conn.SetReadDeadline(time.Now().Add(remaining)); err != nil {
-				return 0, t.mapReadError(err)
+				return InitResult{}, t.mapReadError(err)
 			}
 		} else if err := t.setReadDeadline(); err != nil {
-			return 0, t.mapReadError(err)
+			return InitResult{}, t.mapReadError(err)
 		}
 
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
 			if isTimeout(err) {
-				return 0, nil
+				return InitResult{}, nil
 			}
-			return 0, t.mapReadError(err)
+			return InitResult{}, t.mapReadError(err)
 		}
 		if n == 0 {
 			continue
@@ -174,21 +215,23 @@ func (t *ENHTransport) initRecvLocked() (byte, error) {
 		for _, msg := range msgs {
 			switch msg.Command {
 			case ENHResReceived:
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				if len(t.pendingEvents) < maxPendingEvents {
+					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				}
 			case ENHResResetted:
 				t.resetStateLocked()
-				return msg.Data, nil
+				return InitResult{Features: msg.Data, Confirmed: true}, nil
 			case ENHResInfo:
 				// Ignore info responses for now; leave any received bytes queued.
 			case ENHResErrorEBUS:
-				return 0, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				return InitResult{}, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 			case ENHResErrorHost:
-				return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
+				return InitResult{}, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 			}
 		}
 		if parseErr != nil {
 			t.parser.Reset()
-			return 0, parseErr
+			return InitResult{}, parseErr
 		}
 	}
 }
@@ -233,7 +276,7 @@ func (t *ENHTransport) reconnectLocked() error {
 	t.writeMu.Unlock()
 
 	// Read INIT response (readMu held by caller).
-	if _, err := t.initRecvLocked(); err != nil {
+	if _, err := t.initRecvResultLocked(); err != nil {
 		// INIT recv failed but newConn is still a valid TCP connection —
 		// we successfully sent the INIT request. Keep newConn in place so
 		// subsequent operations get timeout errors (retryable) instead of
@@ -251,6 +294,9 @@ func (t *ENHTransport) reconnectLocked() error {
 //
 // Returns ErrTransportClosed if no DialFunc was configured.
 func (t *ENHTransport) Reconnect() error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 	if t.dialFunc == nil {
@@ -260,6 +306,9 @@ func (t *ENHTransport) Reconnect() error {
 }
 
 func (t *ENHTransport) ReadByte() (byte, error) {
+	if t.closed.Load() {
+		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -297,6 +346,9 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 // started/failed) to passive consumers while preserving ReadByte
 // compatibility for active callers.
 func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
+	if t.closed.Load() {
+		return StreamEvent{}, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -326,6 +378,9 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 // single conn.Write call for atomicity — TCP may fragment, but the retry
 // loop ensures the complete buffer is delivered.
 func (t *ENHTransport) Write(payload []byte) (int, error) {
+	if t.closed.Load() {
+		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
@@ -368,6 +423,9 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 // Any received ENHResReceived bytes observed while waiting are queued so that subsequent ReadByte
 // calls can consume them.
 func (t *ENHTransport) StartArbitration(initiator byte) error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -403,6 +461,9 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
+			if isTimeout(err) {
+				t.parser.Reset() // Clear any pending byte1 from partial frame
+			}
 			return t.mapReadError(err)
 		}
 		if n == 0 {
@@ -486,15 +547,21 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 // Only writeMu is held; readMu is NOT acquired so a concurrent ReadEvent
 // loop can consume the response without deadlock.
 func (t *ENHTransport) RequestStart(initiator byte) error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	seq := EncodeENH(ENHReqStart, initiator)
 	if err := t.setWriteDeadline(); err != nil {
 		return t.mapWriteError(err)
 	}
-	_, err := t.conn.Write(seq[:])
+	n, err := t.conn.Write(seq[:])
 	if err != nil {
 		return t.mapWriteError(err)
+	}
+	if n != len(seq) {
+		return fmt.Errorf("enh request start short write (%d/%d): %w", n, len(seq), ebuserrors.ErrInvalidPayload)
 	}
 	return nil
 }
@@ -506,11 +573,14 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 // Returns ErrTimeout if the response does not arrive within readTimeout.
 // Returns ErrAdapterReset if a RESETTED frame is received mid-exchange.
 func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
+	if t.closed.Load() {
+		return nil, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
 	var err error
-	readDeadline := time.Time{}
+	var readDeadline time.Time
 	defer func() {
 		if err != nil {
 			t.parser.Reset()
@@ -551,9 +621,11 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
 		return nil, err
 	}
-	if t.readTimeout > 0 {
-		readDeadline = time.Now().Add(t.readTimeout)
+	infoTimeout := t.readTimeout
+	if infoTimeout <= 0 {
+		infoTimeout = 2 * time.Second // Fallback matches Init default
 	}
+	readDeadline = time.Now().Add(infoTimeout)
 
 	// Read response: first INFO frame has length, then N data frames.
 	payloadLen := -1
@@ -562,15 +634,11 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	resetBeforeCompletion := false
 
 	for {
-		if !readDeadline.IsZero() && time.Now().After(readDeadline) {
+		if time.Now().After(readDeadline) {
 			err = fmt.Errorf("enh info exchange deadline exceeded: %w", ebuserrors.ErrTimeout)
 			return nil, err
 		}
-		if readDeadline.IsZero() {
-			err = t.conn.SetReadDeadline(time.Time{})
-		} else {
-			err = t.conn.SetReadDeadline(readDeadline)
-		}
+		err = t.conn.SetReadDeadline(readDeadline)
 		if err != nil {
 			err = t.mapReadError(err)
 			return nil, err
@@ -612,8 +680,11 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					}
 				}
 			case ENHResReceived:
-				// Bus byte received during INFO — queue it.
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				// Bus byte received during INFO — queue it, bounded.
+				if len(t.pendingEvents) < maxPendingEvents {
+					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				}
+				// Drop when at cap — INFO is bounded by deadline anyway.
 			case ENHResResetted:
 				t.surfaceResetLocked()
 				if !payloadComplete {
@@ -641,11 +712,13 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	}
 }
 
-// Close closes the underlying connection. We snapshot t.conn under writeMu
+// Close closes the underlying connection. We set the closed flag first so
+// all public methods bail out immediately, then snapshot t.conn under writeMu
 // to synchronize with reconnectLocked (which replaces t.conn under the same
 // lock), then close the snapshot outside the lock so a stalled Write does
 // not block shutdown. net.Conn.Close unblocks any pending Read or Write.
 func (t *ENHTransport) Close() error {
+	t.closed.Store(true)
 	t.writeMu.Lock()
 	conn := t.conn
 	t.writeMu.Unlock()
@@ -685,11 +758,17 @@ func (t *ENHTransport) fillPendingLocked() error {
 	for _, msg := range msgs {
 		switch msg.Command {
 		case ENHResReceived:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+			if len(t.pendingEvents) < maxPendingEvents {
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+			}
 		case ENHResStarted:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			if len(t.pendingEvents) < maxPendingEvents {
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			}
 		case ENHResFailed:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+			if len(t.pendingEvents) < maxPendingEvents {
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+			}
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
 			// Unsolicited INFO frames in the steady-state read are safely ignored.

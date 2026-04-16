@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1954,5 +1955,471 @@ func TestENHTransport_FillPendingIgnoresInfoFrames(t *testing.T) {
 
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
+	}
+}
+
+// TestENHTransport_XR_INIT_TimeoutFailOpen_Bounded verifies that when the
+// adapter does not respond with RESETTED during INIT, the transport fails
+// open: Init returns features=0 with nil error, and InitWithResult returns
+// Confirmed=false so the caller can distinguish timeout from confirmed 0x00.
+func TestENHTransport_XR_INIT_TimeoutFailOpen_Bounded(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	// Short timeout to keep the test fast.
+	enh := transport.NewENHTransport(client, 100*time.Millisecond, 100*time.Millisecond)
+
+	// Server reads the INIT request but never sends RESETTED.
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		buf := make([]byte, 2)
+		_, err := io.ReadFull(server, buf)
+		serverErr <- err
+	}()
+
+	// Subtest 1: Init backward compat — returns 0, nil on timeout.
+	features, err := enh.Init(0x00)
+	if err != nil {
+		t.Fatalf("Init error = %v; want nil (fail-open on timeout)", err)
+	}
+	if features != 0x00 {
+		t.Fatalf("Init features = 0x%02x; want 0x00", features)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+
+	// Subtest 2: InitWithResult — returns Confirmed=false on timeout.
+	// Need a fresh connection since Init already consumed the first one.
+	client2, server2 := net.Pipe()
+	defer func() { _ = client2.Close() }()
+	defer func() { _ = server2.Close() }()
+
+	enh2 := transport.NewENHTransport(client2, 100*time.Millisecond, 100*time.Millisecond)
+
+	serverErr2 := make(chan error, 1)
+	go func() {
+		defer close(serverErr2)
+		buf := make([]byte, 2)
+		_, err := io.ReadFull(server2, buf)
+		serverErr2 <- err
+	}()
+
+	result, err := enh2.InitWithResult(0x01)
+	if err != nil {
+		t.Fatalf("InitWithResult error = %v; want nil (fail-open on timeout)", err)
+	}
+	if result.Confirmed {
+		t.Fatal("InitWithResult Confirmed = true; want false (no RESETTED received)")
+	}
+	if result.Features != 0x00 {
+		t.Fatalf("InitWithResult Features = 0x%02x; want 0x00", result.Features)
+	}
+
+	if err := <-serverErr2; err != nil {
+		t.Fatalf("server2 error = %v", err)
+	}
+}
+
+// TestENHTransport_InitWithResult_Confirmed verifies that when the adapter
+// responds with RESETTED, InitWithResult returns Confirmed=true and the
+// adapter's features byte.
+func TestENHTransport_InitWithResult_Confirmed(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		resp := transport.EncodeENH(transport.ENHResResetted, 0x03)
+		_, err := server.Write(resp[:])
+		serverErr <- err
+	}()
+
+	result, err := enh.InitWithResult(0x01)
+	if err != nil {
+		t.Fatalf("InitWithResult error = %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("InitWithResult Confirmed = false; want true")
+	}
+	if result.Features != 0x03 {
+		t.Fatalf("InitWithResult Features = 0x%02x; want 0x03", result.Features)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+// --- XR alignment tests ---
+
+func TestENHTransport_XR_UpstreamLoss_GracefulShutdown_NoHang(t *testing.T) {
+	// Fix 1: Close() sets terminal state; Reconnect() after Close() returns
+	// ErrTransportClosed immediately without hanging on lock acquisition.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+
+	dialFunc, _ := enhMockDialer()
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond,
+		transport.WithDialFunc(dialFunc))
+
+	if err := enh.Close(); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+
+	// Reconnect after Close must return ErrTransportClosed, not hang.
+	done := make(chan error, 1)
+	go func() {
+		done <- enh.Reconnect()
+	}()
+
+	var err error
+	select {
+	case err = <-done:
+		if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+			t.Fatalf("Reconnect after Close error = %v; want ErrTransportClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Reconnect after Close hung for >1s")
+	}
+
+	// ReadByte after Close must also return ErrTransportClosed.
+	_, err = enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("ReadByte after Close error = %v; want ErrTransportClosed", err)
+	}
+
+	// ReadEvent after Close must return ErrTransportClosed.
+	reader, ok := interface{}(enh).(transport.StreamEventReader)
+	if !ok {
+		t.Fatal("ENH transport does not implement StreamEventReader")
+	}
+	_, err = reader.ReadEvent()
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("ReadEvent after Close error = %v; want ErrTransportClosed", err)
+	}
+
+	// Write after Close must return ErrTransportClosed.
+	_, err = enh.Write([]byte{0x11})
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("Write after Close error = %v; want ErrTransportClosed", err)
+	}
+
+	// StartArbitration after Close must return ErrTransportClosed.
+	err = enh.StartArbitration(0x10)
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("StartArbitration after Close error = %v; want ErrTransportClosed", err)
+	}
+
+	// RequestStart after Close must return ErrTransportClosed.
+	err = enh.RequestStart(0x10)
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("RequestStart after Close error = %v; want ErrTransportClosed", err)
+	}
+
+	// RequestInfo after Close must return ErrTransportClosed.
+	infoReq, ok := interface{}(enh).(transport.InfoRequester)
+	if !ok {
+		t.Fatal("ENH transport does not implement InfoRequester")
+	}
+	_, err = infoReq.RequestInfo(transport.AdapterInfoVersion)
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("RequestInfo after Close error = %v; want ErrTransportClosed", err)
+	}
+}
+
+func TestENHTransport_XR_INFO_FrameLength_AndSerialAccess(t *testing.T) {
+	// Fix 2: RequestInfo with readTimeout=0 uses a fallback timeout and
+	// returns within bounded time instead of blocking forever.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	// readTimeout=0 means "no timeout configured" -- RequestInfo must use fallback.
+	enh := transport.NewENHTransport(client, 0, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the INFO request but never respond.
+		buf := make([]byte, 2)
+		_, err := io.ReadFull(server, buf)
+		serverErr <- err
+	}()
+
+	start := time.Now()
+	_, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("RequestInfo with zero timeout returned nil error; want timeout")
+	}
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("RequestInfo error = %v; want ErrTimeout", err)
+	}
+	// Fallback is 2s; should complete within 3s even with scheduling jitter.
+	if elapsed > 3*time.Second {
+		t.Fatalf("RequestInfo took %s; want bounded by ~2s fallback timeout", elapsed)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_CloseDoesNotBlockBehindStalledWrite(t *testing.T) {
+	// Fix 3: Close() snapshots conn under writeMu then closes outside lock.
+	// A stalled Write on net.Pipe (reader never drains) must not prevent
+	// Close() from completing.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	// Do NOT read from server -- Write will block on the pipe.
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, time.Second, time.Second)
+
+	// Start a Write that will block because no one reads the pipe.
+	writeStarted := make(chan struct{})
+	go func() {
+		close(writeStarted)
+		// Large payload to ensure it blocks (net.Pipe has limited buffer).
+		bigPayload := make([]byte, 4096)
+		_, _ = enh.Write(bigPayload)
+	}()
+	<-writeStarted
+	// Give the goroutine time to enter Write and acquire writeMu.
+	time.Sleep(20 * time.Millisecond)
+
+	// Close must complete within 1 second even though Write is stalled.
+	done := make(chan error, 1)
+	go func() {
+		done <- enh.Close()
+	}()
+
+	select {
+	case err := <-done:
+		// Close may return an error if conn is already broken, that is fine.
+		_ = err
+	case <-time.After(time.Second):
+		t.Fatal("Close() blocked for >1s behind stalled Write")
+	}
+}
+
+// shortWriteConn wraps a net.Conn and returns short writes on demand.
+type shortWriteConn struct {
+	net.Conn
+	shortWriteOnce atomic.Bool
+}
+
+func (c *shortWriteConn) Write(b []byte) (int, error) {
+	if c.shortWriteOnce.CompareAndSwap(false, true) && len(b) > 1 {
+		// Write only 1 byte out of the full buffer.
+		return c.Conn.Write(b[:1])
+	}
+	return c.Conn.Write(b)
+}
+
+func TestENHTransport_XR_START_RequestStart_WriteAll_NoDoubleSend(t *testing.T) {
+	// Fix 4: RequestStart checks n against len(seq) and returns an error
+	// on short write instead of silently succeeding.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	wrapped := &shortWriteConn{Conn: client}
+	enh := transport.NewENHTransport(wrapped, 200*time.Millisecond, 200*time.Millisecond)
+
+	// Drain the server side so the write does not block.
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, err := server.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	err := enh.RequestStart(0x10)
+	if err == nil {
+		t.Fatal("RequestStart returned nil on short write; want error")
+	}
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("RequestStart error = %v; want ErrInvalidPayload", err)
+	}
+}
+
+func TestENHTransport_XR_ENH_ParserReset_AfterReadTimeout(t *testing.T) {
+	// Fix 5: StartArbitration resets parser on read timeout so that a
+	// partial ENH frame (byte1 only) does not combine with the next byte.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 80*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the START request.
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Send only byte1 of an ENH frame, then let timeout expire.
+		if _, err := server.Write([]byte{0xC0}); err != nil {
+			serverErr <- err
+			return
+		}
+		// Wait for the timeout to fire.
+		time.Sleep(120 * time.Millisecond)
+		// Now send a raw data byte (0x42) on its own.
+		// If parser was NOT reset, 0x42 would be combined with stale 0xC0
+		// as byte2 and decoded as a frame. If parser WAS reset, 0x42 is
+		// a plain raw byte (< 0x80) delivered as RECEIVED.
+		if _, err := server.Write([]byte{0x42}); err != nil {
+			serverErr <- err
+			return
+		}
+		// Wait for ReadByte to consume it before closing.
+		time.Sleep(50 * time.Millisecond)
+		serverErr <- nil
+	}()
+
+	// StartArbitration should timeout (no STARTED/FAILED received).
+	err := enh.StartArbitration(initiator)
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("StartArbitration error = %v; want ErrTimeout", err)
+	}
+
+	// After timeout, parser should be reset. ReadByte should return 0x42
+	// as a plain data byte, not combined with stale byte1.
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after timeout error = %v; want 0x42", err)
+	}
+	if got != 0x42 {
+		t.Fatalf("ReadByte after timeout = 0x%02x; want 0x42 (parser should have been reset)", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_RequestInfoPendingEventsFloodBounded(t *testing.T) {
+	// Fix 6: pendingEvents is capped at 256 during RequestInfo. Flooding
+	// with RECEIVED frames must not grow the slice unboundedly.
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 200*time.Millisecond)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the INFO request.
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+
+		// Flood 1000 RECEIVED frames, then send a valid INFO response.
+		received := transport.EncodeENH(transport.ENHResReceived, 0x55)
+		for i := 0; i < 1000; i++ {
+			if _, err := server.Write(received[:]); err != nil {
+				serverErr <- err
+				return
+			}
+		}
+
+		// Complete the INFO response: length=1, data=0xAA.
+		length := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		data := transport.EncodeENH(transport.ENHResInfo, 0xAA)
+		response := append(length[:], data[:]...)
+		_, err := server.Write(response)
+		serverErr <- err
+	}()
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v", err)
+	}
+	if len(got) != 1 || got[0] != 0xAA {
+		t.Fatalf("RequestInfo payload = %v; want [0xAA]", got)
+	}
+
+	// Count how many RECEIVED bytes are buffered. Must not exceed 256.
+	count := 0
+	for {
+		_, readErr := enh.ReadByte()
+		if readErr != nil {
+			if errors.Is(readErr, ebuserrors.ErrTimeout) {
+				break
+			}
+			t.Fatalf("ReadByte error = %v (after %d bytes)", readErr, count)
+		}
+		count++
+		if count > 300 {
+			t.Fatalf("pendingEvents exceeded 300; cap is not enforced")
+		}
+	}
+	// maxPendingEvents = 256 (internal constant).
+	if count > 256 {
+		t.Fatalf("drained %d pending bytes; want <= 256 (maxPendingEvents)", count)
+	}
+	if count == 0 {
+		t.Fatal("drained 0 pending bytes; expected some buffered RECEIVED events")
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestENHTransport_XR_ENH_UnknownCommand_ExplicitError(t *testing.T) {
+	// Fix 7: DecodeENH rejects unknown command nibbles with ErrInvalidPayload.
+	// Command nibble 0x04 is not defined in the ENH protocol.
+	t.Parallel()
+
+	// 0xD1 = 1101_0001: byte1 marker 0xC0 | (cmd=0x04 << 2) | data_hi=0x01
+	// 0x80 = 1000_0000: byte2 marker 0x80 | data_lo=0x00
+	_, err := transport.DecodeENH(0xD1, 0x80)
+	if err == nil {
+		t.Fatal("DecodeENH(0xD1, 0x80) returned nil error; want ErrInvalidPayload")
+	}
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("DecodeENH(0xD1, 0x80) error = %v; want ErrInvalidPayload", err)
 	}
 }

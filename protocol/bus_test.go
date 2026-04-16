@@ -1510,3 +1510,69 @@ func TestBus_NackAttemptsResetAfterReconnect(t *testing.T) {
 	}
 	tr.mu.Unlock()
 }
+
+// TestBus_XR_START_ReconnectWait_BoundedDeadline verifies that when a Send
+// context expires during the reconnect delay, the caller receives the context
+// error (context.DeadlineExceeded) rather than a transport-layer error.
+//
+// Sequence: timeout-class error exhausts retry budget -> tryTransportReconnect
+// enters ReconnectDelay select -> request context deadline fires -> Send
+// returns context.DeadlineExceeded.
+func TestBus_XR_START_ReconnectWait_BoundedDeadline(t *testing.T) {
+	t.Parallel()
+
+	// I-T frame so the transport needs an ACK from the target.
+	// With empty inbound, ReadByte returns ErrTimeout on every attempt.
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    0x08,
+		Primary:   0x01,
+		Secondary: 0x02,
+		Data:      []byte{0x03},
+	}
+
+	// Transport that always times out (empty inbound -> ErrTimeout).
+	tr := &reconnectableScriptedTransport{}
+
+	config := protocol.BusConfig{
+		InitiatorTarget: protocol.RetryPolicy{
+			TimeoutRetries: 0, // Exhaust immediately, triggers reconnect path.
+			NACKRetries:    0,
+		},
+		InitiatorInitiator: protocol.RetryPolicy{
+			TimeoutRetries: 0,
+			NACKRetries:    0,
+		},
+		ReconnectRetries: 1,
+		// Long reconnect delay — the context deadline will fire during this wait.
+		ReconnectDelay: 10 * time.Second,
+	}
+
+	bus := protocol.NewBus(tr, config, 8)
+	runCtx, runCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer runCancel()
+	bus.Run(runCtx)
+
+	// Short deadline on the request context so it expires during ReconnectDelay.
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer reqCancel()
+
+	start := time.Now()
+	_, err := bus.Send(reqCtx, frame)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Send error = nil; want context.DeadlineExceeded")
+	}
+	// The error should surface the context deadline, not a transport error.
+	// Send's outer select races request.resp vs ctx.Done. When the reconnect
+	// delay exceeds the request deadline, ctx.Done fires and Send returns
+	// the context error directly.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send error = %v; want context.DeadlineExceeded", err)
+	}
+	// Should complete quickly (within ~300ms), not wait for the full 10s delay.
+	if elapsed > 2*time.Second {
+		t.Fatalf("Send took %s; want bounded by request deadline (~200ms)", elapsed)
+	}
+}
