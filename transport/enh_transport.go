@@ -285,6 +285,15 @@ func (t *ENHTransport) reconnectLocked() error {
 	// caller) before writeMu.
 	t.writeMu.Lock()
 	t.connMu.Lock()
+	// Final closed check under locks — eliminates TOCTOU between the
+	// post-dial check and the actual swap. If Close() ran after our
+	// earlier check, abort and close the freshly dialed conn.
+	if t.closed.Load() {
+		t.connMu.Unlock()
+		t.writeMu.Unlock()
+		_ = newConn.Close()
+		return fmt.Errorf("enh transport closed during reconnect: %w", ebuserrors.ErrTransportClosed)
+	}
 	oldConn := t.conn
 	t.conn = newConn
 	t.connMu.Unlock()
@@ -819,9 +828,15 @@ func (t *ENHTransport) fillPendingLocked() error {
 	}
 	if parseErr != nil {
 		if errors.Is(parseErr, ebuserrors.ErrInvalidPayload) {
-			// Parser desync: orphan byte2, missing byte2, or invalid command.
-			// Reset the parser to re-synchronize on the next valid byte1.
-			// Valid messages before the desync point have already been queued above.
+			// Parser desync: orphan byte2, missing byte2, or unknown command.
+			// Reset parser to re-synchronize on the next valid byte1.
+			// Valid messages before the desync have already been queued above.
+			//
+			// Design choice: unknown/invalid ENH commands produce ErrInvalidPayload
+			// at the DecodeENH level (explicit error per XR invariant), but the
+			// transport absorbs it here for robustness — a single corrupt frame
+			// must not kill the session. The bus layer sees the gap as a missing
+			// byte (timeout on next readSymbol) rather than a masked collision.
 			t.parser.Reset()
 			return nil
 		}

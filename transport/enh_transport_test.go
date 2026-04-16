@@ -2067,6 +2067,85 @@ func TestENHTransport_InitWithResult_Confirmed(t *testing.T) {
 	}
 }
 
+func TestENHTransport_InitWithResult_ErrorHost(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+		resp := transport.EncodeENH(transport.ENHResErrorHost, 0x42)
+		_, _ = server.Write(resp[:])
+	}()
+
+	_, err := enh.InitWithResult(0x01)
+	if err == nil {
+		t.Fatal("InitWithResult should return error on ErrorHost")
+	}
+	if !errors.Is(err, ebuserrors.ErrAdapterHostError) {
+		t.Fatalf("InitWithResult error = %v; want ErrAdapterHostError", err)
+	}
+}
+
+func TestENHTransport_InitWithResult_ErrorEBUS(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+		resp := transport.EncodeENH(transport.ENHResErrorEBUS, 0x99)
+		_, _ = server.Write(resp[:])
+	}()
+
+	_, err := enh.InitWithResult(0x01)
+	if err == nil {
+		t.Fatal("InitWithResult should return error on ErrorEBUS")
+	}
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("InitWithResult error = %v; want ErrInvalidPayload", err)
+	}
+}
+
+func TestENHTransport_InitWithResult_CorruptTrailingByte(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+		// Valid RESETTED + corrupt trailing byte in same segment
+		resp := transport.EncodeENH(transport.ENHResResetted, 0x01)
+		_, _ = server.Write(append(resp[:], 0x85))
+	}()
+
+	result, err := enh.InitWithResult(0x01)
+	if err != nil {
+		t.Fatalf("InitWithResult error = %v; want success (RESETTED valid)", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("InitWithResult Confirmed = false; want true")
+	}
+	if result.Features != 0x01 {
+		t.Fatalf("InitWithResult Features = 0x%02x; want 0x01", result.Features)
+	}
+}
+
 // --- XR alignment tests ---
 
 func TestENHTransport_XR_UpstreamLoss_GracefulShutdown_NoHang(t *testing.T) {

@@ -1515,6 +1515,9 @@ func TestBus_NackAttemptsResetAfterReconnect(t *testing.T) {
 // context expires during the reconnect delay, the caller receives the context
 // error (context.DeadlineExceeded) rather than a transport-layer error.
 //
+// TODO: Add integration-style variant using real transport.ENHTransport with
+// net.Pipe/dialFunc for reconnect/close interactions instead of scripted transport.
+//
 // Sequence: timeout-class error exhausts retry budget -> tryTransportReconnect
 // enters ReconnectDelay select -> request context deadline fires -> Send
 // returns context.DeadlineExceeded.
