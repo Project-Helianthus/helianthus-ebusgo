@@ -837,23 +837,28 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// INFO responses are consumed by RequestInfo's dedicated read path.
 			// Unsolicited INFO frames in the steady-state read are safely ignored.
 		case ENHResResetted:
-			// Always surface the reset boundary to event consumers so upstream
-			// layers can drain stale state. This is independent of whether the
-			// transport performs a TCP reconnect — reset notification and
-			// reconnect are separate concerns (XR_ENH_RESETTED_AlwaysSurfacesBoundary).
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventReset, Data: msg.Data})
+			// Always surface the reset boundary exactly once, regardless of
+			// whether the transport performs a TCP reconnect
+			// (XR_ENH_RESETTED_AlwaysSurfacesBoundary). The delivery channel
+			// differs between modes:
+			//   dialFunc != nil: reconnectLocked clears pendingEvents, so
+			//     the boundary is signaled via t.resets++ (ReadEvent converts
+			//     this into one StreamEventReset).
+			//   dialFunc == nil: no reconnect, pendingEvents is preserved,
+			//     so we queue one StreamEventReset directly.
 			if t.dialFunc != nil {
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
 				}
 				t.resets++
-				// Reconnected to fresh TCP — remaining msgs were
-				// parsed from the old stream and are stale.
+				// Reconnected to fresh TCP — remaining msgs in this batch
+				// were parsed from the old stream and are stale.
 				return nil
 			}
-			// Adapter-direct mode (no dialFunc): boundary surfaced above for
-			// event consumers. Remaining msgs in the same batch continue to
-			// be processed — bus-level data after RESETTED is still valid.
+			// Adapter-direct mode: queue one StreamEventReset for ReadEvent
+			// consumers. Remaining msgs in the same batch continue to be
+			// processed — bus-level data after RESETTED is still valid.
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventReset, Data: msg.Data})
 		}
 	}
 	if parseErr != nil {
