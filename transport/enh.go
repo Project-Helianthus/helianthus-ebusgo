@@ -116,25 +116,25 @@ func (p *ENHParser) Feed(b byte) (ENHMessage, bool, error) {
 	return ENHMessage{Kind: ENHMessageFrame, Command: frame.Command, Data: frame.Data}, true, nil
 }
 
-// Parse consumes a byte slice and returns all complete messages.
+// Parse consumes a byte slice and returns messages parsed up to (but not
+// including) the first error. Bytes after the first error are NOT
+// processed — the caller must surface the error before reading further
+// data, so protocol violations create a crisp fault boundary instead of
+// leaking post-violation bytes to upper layers.
 func (p *ENHParser) Parse(data []byte) ([]ENHMessage, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
 
 	out := make([]ENHMessage, 0, len(data))
-	var firstErr error
 	for _, b := range data {
 		msg, ok, err := p.Feed(b)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+			return out, err
 		}
 		if ok {
 			out = append(out, msg)
 		}
 	}
-	return out, firstErr
+	return out, nil
 }

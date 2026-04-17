@@ -1112,9 +1112,12 @@ func TestENHTransport_ReadByteResettedReconnects(t *testing.T) {
 }
 
 func TestENHTransport_ResettedTransparentWithoutDialFunc(t *testing.T) {
-	// Without dialFunc (adapter-direct mode), RESETTED is silently
-	// absorbed — no ErrAdapterReset, no parser reset, no state disruption.
-	// Post-RESETTED bytes are delivered directly.
+	// Without dialFunc (adapter-direct mode), RESETTED is queued as a
+	// StreamEventReset boundary for ReadEvent consumers (see
+	// TestENHTransport_XR_ENH_RESETTED_AlwaysSurfacesBoundary). For
+	// ReadByte callers, non-byte events are skipped — so ReadByte does
+	// not see the reset and delivers post-RESETTED bytes directly without
+	// triggering a parser reset or signaling ErrAdapterReset.
 	t.Parallel()
 
 	client, server := net.Pipe()
@@ -1130,10 +1133,10 @@ func TestENHTransport_ResettedTransparentWithoutDialFunc(t *testing.T) {
 		_, _ = server.Write(payload)
 	}()
 
-	// RESETTED absorbed; ReadByte delivers 0x77 directly.
+	// ReadByte skips the StreamEventReset and delivers 0x77 directly.
 	got, err := enh.ReadByte()
 	if err != nil {
-		t.Fatalf("ReadByte error = %v; want 0x77 (RESETTED absorbed)", err)
+		t.Fatalf("ReadByte error = %v; want 0x77 (reset skipped by ReadByte)", err)
 	}
 	if got != 0x77 {
 		t.Fatalf("ReadByte = 0x%02x; want 0x77", got)
@@ -1527,12 +1530,14 @@ func TestENHTransport_FillPendingProcessesValidMsgsBeforeError(t *testing.T) {
 	serverErr := make(chan error, 1)
 	go func() {
 		defer close(serverErr)
-		// Valid data byte 0x11, then orphan byte2 (0x80, corrupt), then valid data byte 0x22.
+		// Valid data byte 0x11, then orphan byte2 (0x80, protocol violation).
+		// Any bytes after the violation in this read would be dropped — Parse
+		// stops at the first error to create a crisp fault boundary.
 		_, err := server.Write([]byte{0x11, 0x80, 0x22})
 		serverErr <- err
 	}()
 
-	// Valid bytes readable first (queued before deferred error).
+	// Valid byte queued before the violation is readable first.
 	got1, err := enh.ReadByte()
 	if err != nil {
 		t.Fatalf("ReadByte[0] error = %v; want 0x11", err)
@@ -1541,18 +1546,12 @@ func TestENHTransport_FillPendingProcessesValidMsgsBeforeError(t *testing.T) {
 		t.Fatalf("ReadByte[0] = 0x%02x; want 0x11", got1)
 	}
 
-	got2, err := enh.ReadByte()
-	if err != nil {
-		t.Fatalf("ReadByte[1] error = %v; want 0x22", err)
-	}
-	if got2 != 0x22 {
-		t.Fatalf("ReadByte[1] = 0x%02x; want 0x22", got2)
-	}
-
 	// After queue drained, deferred parse error surfaces explicitly.
+	// The 0x22 byte after the violation is NOT delivered — caller must
+	// see the explicit protocol error as a fault boundary.
 	_, err = enh.ReadByte()
 	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
-		t.Fatalf("ReadByte[2] = %v; want ErrInvalidPayload (explicit protocol violation)", err)
+		t.Fatalf("ReadByte[1] = %v; want ErrInvalidPayload (explicit protocol violation)", err)
 	}
 
 	if err := <-serverErr; err != nil {
@@ -2624,9 +2623,9 @@ func TestENHTransport_XR_ENH_UnknownCommand_ExplicitError(t *testing.T) {
 	t.Run("live_path_explicit_error", func(t *testing.T) {
 		// XR_ENH_UnknownCommand_LivePath_ExplicitError: feed unknown ENH
 		// command through live transport and verify ReadByte surfaces
-		// ErrInvalidPayload explicitly (not masked as timeout/collision/
-		// silent discard). After the error, parser is reset so subsequent
-		// valid data is readable.
+		// ErrInvalidPayload explicitly as the first result. Bytes appearing
+		// AFTER the protocol violation in the same read are NOT delivered
+		// before the error — crisp fault boundary.
 		client, server := net.Pipe()
 		defer func() { _ = client.Close() }()
 		defer func() { _ = server.Close() }()
@@ -2634,25 +2633,18 @@ func TestENHTransport_XR_ENH_UnknownCommand_ExplicitError(t *testing.T) {
 		enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
 
 		go func() {
-			// Unknown command (0xD1, 0x80) followed by valid RECEIVED(0x42).
+			// Unknown command (0xD1, 0x80) followed by what would be a valid
+			// RECEIVED(0x42) — the 0x42 byte must NOT leak before the error.
 			recv := transport.EncodeENH(transport.ENHResReceived, 0x42)
 			payload := append([]byte{0xD1, 0x80}, recv[:]...)
 			_, _ = server.Write(payload)
 		}()
 
-		// Valid byte 0x42 from RECEIVED comes first (queued before error).
-		got, err := enh.ReadByte()
-		if err != nil {
-			t.Fatalf("ReadByte[0] error = %v; want 0x42", err)
-		}
-		if got != 0x42 {
-			t.Fatalf("ReadByte[0] = 0x%02x; want 0x42", got)
-		}
-
-		// After the valid byte, explicit protocol violation surfaces.
-		_, err = enh.ReadByte()
+		// First ReadByte surfaces the explicit protocol violation.
+		// No valid bytes precede it in this buffer (unknown command is the first frame).
+		_, err := enh.ReadByte()
 		if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
-			t.Fatalf("ReadByte[1] on unknown command = %v; want ErrInvalidPayload (explicit)", err)
+			t.Fatalf("ReadByte[0] on unknown command = %v; want ErrInvalidPayload (explicit, first)", err)
 		}
 	})
 }
@@ -2693,8 +2685,19 @@ func TestENHTransport_XR_ENH_RESETTED_AlwaysSurfacesBoundary(t *testing.T) {
 }
 
 // TestENHTransport_XR_Burst_BoundedBackpressure verifies that RECEIVED data
-// events are capped by maxPendingEvents — unbounded flood is not possible.
-// Uses a short in-memory write so net.Pipe doesn't block the producer.
+// events are capped by maxPendingEvents=256 — unbounded flood is not
+// possible. The cap triggers when a caller holds the read path exclusively
+// (RequestInfo pattern) while bus data floods the parser; ReadByte alone
+// always drains as it reads, so the queue can't grow above 1 in steady state.
+//
+// The authoritative cap-enforcement proof is in
+// TestENHTransport_RequestInfoPendingEventsFloodBounded, which floods 1000
+// RECEIVED frames during a RequestInfo exchange (readMu held, no drain)
+// and asserts drained count <= 256.
+//
+// This test verifies the lightweight invariant: during ReadByte steady-state
+// consumption, a burst of RECEIVED bytes is delivered in order without loss
+// below the cap.
 func TestENHTransport_XR_Burst_BoundedBackpressure(t *testing.T) {
 	t.Parallel()
 
@@ -2702,15 +2705,13 @@ func TestENHTransport_XR_Burst_BoundedBackpressure(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
-	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond)
 
-	// Writer sends a modest burst (larger than buffer size 256) in one Write.
-	// fillPendingLocked's internal buffer is 256 bytes = 128 ENH pairs = 128
-	// RECEIVED events per read. Queue is capped, so even if we keep reading,
-	// old events get dropped.
+	// 200 RECEIVED events — below cap, all must be delivered in order.
+	const burstSize = 200
 	recv := transport.EncodeENH(transport.ENHResReceived, 0xAA)
-	burst := make([]byte, 0, 128*2)
-	for i := 0; i < 128; i++ {
+	burst := make([]byte, 0, burstSize*2)
+	for i := 0; i < burstSize; i++ {
 		burst = append(burst, recv[:]...)
 	}
 
@@ -2720,26 +2721,20 @@ func TestENHTransport_XR_Burst_BoundedBackpressure(t *testing.T) {
 		writeDone <- err
 	}()
 
-	// Drain events — must all be 0xAA, count must be bounded.
-	timeout := time.After(2 * time.Second)
-	drained := 0
-	for drained < 128 {
+	timeout := time.After(3 * time.Second)
+	for drained := 0; drained < burstSize; drained++ {
 		select {
 		case <-timeout:
-			t.Fatalf("timed out draining after %d bytes", drained)
+			t.Fatalf("timed out after %d bytes", drained)
 		default:
 		}
 		b, err := enh.ReadByte()
 		if err != nil {
-			t.Fatalf("ReadByte[%d] error = %v", drained, err)
+			t.Fatalf("ReadByte[%d] = %v", drained, err)
 		}
 		if b != 0xAA {
 			t.Fatalf("ReadByte[%d] = 0x%02x; want 0xAA", drained, b)
 		}
-		drained++
-	}
-	if drained != 128 {
-		t.Fatalf("drained %d; want 128", drained)
 	}
 
 	if err := <-writeDone; err != nil {
