@@ -202,6 +202,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 		remaining := maxWait - time.Since(start)
 		if remaining <= 0 {
 			t.parser.Reset() // Clear stale byte1 from partial frame
+			t.deferredErr = nil
 			return InitResult{}, nil
 		}
 		if t.readTimeout <= 0 || remaining < t.readTimeout {
@@ -216,6 +217,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 		if err != nil {
 			if isTimeout(err) {
 				t.parser.Reset() // Clear stale byte1 from partial frame
+				t.deferredErr = nil
 				return InitResult{}, nil
 			}
 			return InitResult{}, t.mapReadError(err)
@@ -513,6 +515,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		if err != nil {
 			if isTimeout(err) {
 				t.parser.Reset() // Clear any pending byte1 from partial frame
+				t.deferredErr = nil
 			}
 			return t.mapReadError(err)
 		}
@@ -574,6 +577,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			// sendRawWithEcho, causing echo mismatch errors.
 			t.parser.Reset()
 			t.pendingEvents = nil
+			t.deferredErr = nil
 			return arbitrationErr
 		}
 
@@ -581,6 +585,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		// corrupt trailing byte should not mask a valid STARTED/FAILED.
 		if parseErr != nil {
 			t.parser.Reset()
+			t.deferredErr = nil
 			return parseErr
 		}
 	}
@@ -634,6 +639,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	defer func() {
 		if err != nil {
 			t.parser.Reset()
+			t.deferredErr = nil
 			// Preserve buffered events on timeout/error so they are not
 			// silently dropped. Clear pending on fatal transport errors and
 			// adapter resets where the parser state is unrecoverable or events
@@ -760,6 +766,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		// Handle parse error only after processing valid messages.
 		if parseErr != nil {
 			t.parser.Reset()
+			t.deferredErr = nil
 			return nil, parseErr
 		}
 	}
@@ -781,6 +788,10 @@ func (t *ENHTransport) Close() error {
 func (t *ENHTransport) resetStateLocked() {
 	t.parser.Reset()
 	t.pendingEvents = nil
+	// Clear any deferred parse error — state discard means previously
+	// deferred errors from before this boundary are stale and must not
+	// leak into subsequent operations.
+	t.deferredErr = nil
 }
 
 func (t *ENHTransport) surfaceResetLocked() {

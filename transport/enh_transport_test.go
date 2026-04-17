@@ -2746,3 +2746,52 @@ func TestENHTransport_XR_Burst_BoundedBackpressure(t *testing.T) {
 		t.Fatalf("writer error = %v", err)
 	}
 }
+
+// TestENHTransport_DeferredErrClearedOnArbitrationTimeout verifies that a
+// deferred parse error does not leak across arbitration lifecycle boundaries.
+// If ReadByte buffered a valid byte + deferred ErrInvalidPayload, and then
+// StartArbitration hits a timeout, subsequent ReadByte must not surface the
+// stale payload error.
+func TestENHTransport_DeferredErrClearedOnArbitrationTimeout(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 100*time.Millisecond, 100*time.Millisecond)
+
+	// Server sends valid byte 0x11 + orphan byte 0x80 (parse error).
+	// Then never responds to StartArbitration — forces arbitration timeout.
+	go func() {
+		_, _ = server.Write([]byte{0x11, 0x80})
+		// Discard the StartArbitration write.
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+		// No response — StartArbitration will time out.
+	}()
+
+	// Consume the valid byte — this triggers fillPendingLocked which queues
+	// 0x11 and sets deferredErr = ErrInvalidPayload.
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte = %v; want 0x11", err)
+	}
+	if got != 0x11 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x11", got)
+	}
+
+	// StartArbitration hits a read timeout. This reset path must clear
+	// deferredErr so it doesn't leak into the next ReadByte.
+	err = enh.StartArbitration(0x10)
+	if err == nil {
+		t.Fatal("StartArbitration should timeout; got nil")
+	}
+
+	// Now read — the conn is effectively done; we expect either timeout
+	// or EOF, but NOT the stale ErrInvalidPayload from before.
+	_, err = enh.ReadByte()
+	if errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("ReadByte after arbitration timeout = %v; deferred error leaked across boundary", err)
+	}
+}
