@@ -65,6 +65,15 @@ type ENHTransport struct {
 	deferredErr error
 	resets      int
 	buffer      []byte
+	// awaitingStart is set atomically by RequestStart() and cleared when a
+	// STARTED/FAILED arrives (or parser state is reset). While set, the
+	// async arbitration window is open: RECEIVED bytes received in this
+	// window are bus traffic observed before grant, not our echoes — they
+	// must not leak into pendingEvents where the protocol layer would
+	// consume them as if they were post-grant echoes. Blocking
+	// StartArbitration clears pendingEvents after grant, but the async
+	// path needs this in-window drop to achieve the same invariant.
+	awaitingStart atomic.Bool
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -611,11 +620,17 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 	if err := t.setWriteDeadline(); err != nil {
 		return t.mapWriteError(err)
 	}
+	// Open the arbitration window BEFORE the write so any RECEIVED bytes
+	// that arrive concurrently with STARTED/FAILED are filtered out of
+	// pendingEvents (they are pre-grant bus traffic, not our echoes).
+	t.awaitingStart.Store(true)
 	n, err := t.conn.Write(seq[:])
 	if err != nil {
+		t.awaitingStart.Store(false)
 		return t.mapWriteError(err)
 	}
 	if n != len(seq) {
+		t.awaitingStart.Store(false)
 		return fmt.Errorf("enh request start short write (%d/%d): %w", n, len(seq), ebuserrors.ErrInvalidPayload)
 	}
 	return nil
@@ -792,6 +807,9 @@ func (t *ENHTransport) resetStateLocked() {
 	// deferred errors from before this boundary are stale and must not
 	// leak into subsequent operations.
 	t.deferredErr = nil
+	// Clear async arbitration window — any pending RequestStart is
+	// invalidated by the reset (connection swap or lifecycle boundary).
+	t.awaitingStart.Store(false)
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -822,17 +840,33 @@ func (t *ENHTransport) fillPendingLocked() error {
 	for _, msg := range msgs {
 		switch msg.Command {
 		case ENHResReceived:
+			// Drop RECEIVED bytes that arrive inside the async arbitration
+			// window — they are pre-grant bus traffic, not our echoes. The
+			// blocking StartArbitration clears pendingEvents after grant;
+			// this is the async-path equivalent (see awaitingStart doc).
+			if t.awaitingStart.Load() {
+				continue
+			}
 			if len(t.pendingEvents) < maxPendingEvents {
 				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 			}
 		case ENHResStarted:
-			// Control events: always queue — dropping STARTED/FAILED causes
-			// stuck arbitration. Growth is bounded: at most one per read cycle
-			// (adapter sends exactly one STARTED or FAILED per START request),
-			// and read cycles are bounded by readTimeout.
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			// Arbitration window closed — subsequent RECEIVED bytes are
+			// post-grant echoes and must be queued normally.
+			t.awaitingStart.Store(false)
+			// Cap control events too: an adapter fault that repeatedly
+			// emits STARTED/FAILED without data would otherwise grow
+			// pendingEvents unboundedly. Under normal operation there is
+			// at most one STARTED or FAILED per arbitration cycle, so the
+			// cap is never reached in steady state.
+			if len(t.pendingEvents) < maxPendingEvents {
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			}
 		case ENHResFailed:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+			t.awaitingStart.Store(false)
+			if len(t.pendingEvents) < maxPendingEvents {
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+			}
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
 			// Unsolicited INFO frames in the steady-state read are safely ignored.

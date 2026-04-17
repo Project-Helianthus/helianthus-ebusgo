@@ -2790,3 +2790,65 @@ func TestENHTransport_DeferredErrClearedOnArbitrationTimeout(t *testing.T) {
 		t.Fatalf("ReadByte after arbitration timeout = %v; deferred error leaked across boundary", err)
 	}
 }
+
+// TestENHTransport_RequestStart_AsyncDropsPreGrantBytes verifies that
+// RECEIVED bytes arriving in the async arbitration window are not leaked
+// to pendingEvents before STARTED/FAILED. Blocking StartArbitration clears
+// pendingEvents after grant; RequestStart achieves the same by using
+// awaitingStart to filter the pre-grant window.
+func TestENHTransport_RequestStart_AsyncDropsPreGrantBytes(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond)
+	initiator := byte(0x10)
+
+	go func() {
+		// Consume the START request.
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		// Send pre-grant RECEIVED bytes (bus traffic observed before STARTED),
+		// then STARTED, then post-grant RECEIVED byte (valid echo).
+		preGrant1 := transport.EncodeENH(transport.ENHResReceived, 0x11)
+		preGrant2 := transport.EncodeENH(transport.ENHResReceived, 0x22)
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		postGrant := transport.EncodeENH(transport.ENHResReceived, 0x33)
+
+		payload := append(preGrant1[:], preGrant2[:]...)
+		payload = append(payload, started[:]...)
+		payload = append(payload, postGrant[:]...)
+		_, _ = server.Write(payload)
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	reader := interface{}(enh).(transport.StreamEventReader)
+
+	// First event must be STARTED — pre-grant RECEIVED bytes (0x11, 0x22)
+	// must NOT appear before it.
+	event, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent[0] error = %v", err)
+	}
+	if event.Kind != transport.StreamEventStarted {
+		t.Fatalf("ReadEvent[0] = %+v; want StreamEventStarted (pre-grant bytes must be dropped)", event)
+	}
+	if event.Data != initiator {
+		t.Fatalf("ReadEvent[0].Data = 0x%02x; want 0x%02x", event.Data, initiator)
+	}
+
+	// Next event: post-grant RECEIVED(0x33) delivered as byte.
+	event, err = reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent[1] error = %v", err)
+	}
+	if event.Kind != transport.StreamEventByte || event.Byte != 0x33 {
+		t.Fatalf("ReadEvent[1] = %+v; want StreamEventByte(0x33)", event)
+	}
+}
