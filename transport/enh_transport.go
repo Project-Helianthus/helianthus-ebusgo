@@ -212,6 +212,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 		if remaining <= 0 {
 			t.parser.Reset() // Clear stale byte1 from partial frame
 			t.deferredErr = nil
+			t.awaitingStart.Store(false)
 			return InitResult{}, nil
 		}
 		if t.readTimeout <= 0 || remaining < t.readTimeout {
@@ -227,6 +228,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 			if isTimeout(err) {
 				t.parser.Reset() // Clear stale byte1 from partial frame
 				t.deferredErr = nil
+				t.awaitingStart.Store(false)
 				return InitResult{}, nil
 			}
 			return InitResult{}, t.mapReadError(err)
@@ -525,6 +527,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			if isTimeout(err) {
 				t.parser.Reset() // Clear any pending byte1 from partial frame
 				t.deferredErr = nil
+				t.awaitingStart.Store(false)
 			}
 			return t.mapReadError(err)
 		}
@@ -587,6 +590,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			t.parser.Reset()
 			t.pendingEvents = nil
 			t.deferredErr = nil
+			t.awaitingStart.Store(false)
 			return arbitrationErr
 		}
 
@@ -595,6 +599,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		if parseErr != nil {
 			t.parser.Reset()
 			t.deferredErr = nil
+			t.awaitingStart.Store(false)
 			return parseErr
 		}
 	}
@@ -655,6 +660,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		if err != nil {
 			t.parser.Reset()
 			t.deferredErr = nil
+			t.awaitingStart.Store(false)
 			// Preserve buffered events on timeout/error so they are not
 			// silently dropped. Clear pending on fatal transport errors and
 			// adapter resets where the parser state is unrecoverable or events
@@ -782,6 +788,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 		if parseErr != nil {
 			t.parser.Reset()
 			t.deferredErr = nil
+			t.awaitingStart.Store(false)
 			return nil, parseErr
 		}
 	}
@@ -798,6 +805,32 @@ func (t *ENHTransport) Close() error {
 	conn := t.conn
 	t.connMu.Unlock()
 	return conn.Close()
+}
+
+// appendControlEventLocked queues a control event (STARTED/FAILED/Reset)
+// that MUST NOT be silently dropped. If the pendingEvents cap is reached,
+// the oldest StreamEventByte is evicted to make room. Control events
+// preserve ordering relative to each other; byte ordering is preserved
+// among non-evicted bytes. Caller must hold readMu.
+func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
+	if len(t.pendingEvents) >= maxPendingEvents {
+		// Evict oldest byte event to make room. Iterate from head — first
+		// byte event found is dropped. If none found (queue is all control
+		// events — pathological), expand past the cap as a safety valve.
+		evicted := false
+		for i, existing := range t.pendingEvents {
+			if existing.Kind == StreamEventByte {
+				t.pendingEvents = append(t.pendingEvents[:i], t.pendingEvents[i+1:]...)
+				evicted = true
+				break
+			}
+		}
+		// If no byte event was evicted, the queue is all control events.
+		// Accept brief overshoot of the cap — bounded by the number of
+		// outstanding arbitration cycles. Never drop a control event.
+		_ = evicted
+	}
+	t.pendingEvents = append(t.pendingEvents, ev)
 }
 
 func (t *ENHTransport) resetStateLocked() {
@@ -826,6 +859,11 @@ func (t *ENHTransport) fillPendingLocked() error {
 	if err != nil {
 		if isTimeout(err) {
 			t.parser.Reset() // EG9: clear any pending byte1 from partial frame
+			// Close async arbitration window on read timeout — if STARTED/
+			// FAILED didn't arrive, the RequestStart caller should treat
+			// this as a timed-out arbitration. Leaving awaitingStart set
+			// would silently drop RECEIVED bytes on subsequent reads.
+			t.awaitingStart.Store(false)
 		}
 		return t.mapReadError(err)
 	}
@@ -854,19 +892,14 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// Arbitration window closed — subsequent RECEIVED bytes are
 			// post-grant echoes and must be queued normally.
 			t.awaitingStart.Store(false)
-			// Cap control events too: an adapter fault that repeatedly
-			// emits STARTED/FAILED without data would otherwise grow
-			// pendingEvents unboundedly. Under normal operation there is
-			// at most one STARTED or FAILED per arbitration cycle, so the
-			// cap is never reached in steady state.
-			if len(t.pendingEvents) < maxPendingEvents {
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
-			}
+			// Control events MUST NEVER be dropped — gateway/adaptermux
+			// wait for exactly one STARTED or FAILED per arbitration cycle.
+			// If the queue is full of byte events, evict the oldest byte
+			// events to make room. Control event ordering is preserved.
+			t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 		case ENHResFailed:
 			t.awaitingStart.Store(false)
-			if len(t.pendingEvents) < maxPendingEvents {
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
-			}
+			t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
 			// Unsolicited INFO frames in the steady-state read are safely ignored.
@@ -890,20 +923,30 @@ func (t *ENHTransport) fillPendingLocked() error {
 				return nil
 			}
 			// Adapter-direct mode: queue one StreamEventReset for ReadEvent
-			// consumers. Remaining msgs in the same batch continue to be
+			// consumers using the control-event path (never dropped under
+			// byte flood). Remaining msgs in the same batch continue to be
 			// processed — bus-level data after RESETTED is still valid.
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventReset, Data: msg.Data})
+			t.appendControlEventLocked(StreamEvent{Kind: StreamEventReset, Data: msg.Data})
 		}
 	}
 	if parseErr != nil {
 		if errors.Is(parseErr, ebuserrors.ErrInvalidPayload) {
 			// Parser desync: orphan byte2, missing byte2, or unknown command.
 			// Reset parser to re-synchronize on the next valid byte1.
-			// If valid messages were queued in this batch, defer the error
-			// so callers drain the queue first (no lost data), then surface
-			// the explicit protocol error on a subsequent call
-			// (XR_ENH_UnknownCommand_LivePath_ExplicitError).
 			t.parser.Reset()
+			// During async arbitration, surface the error immediately — the
+			// RequestStart caller is waiting for a crisp STARTED/FAILED
+			// outcome, not a parse error delayed behind a byte backlog.
+			// Also close the arbitration window so subsequent reads resume
+			// normal byte delivery.
+			if t.awaitingStart.Load() {
+				t.awaitingStart.Store(false)
+				return parseErr
+			}
+			// Steady-state read: if valid messages were queued in this batch,
+			// defer the error so callers drain the queue first (no lost
+			// data), then surface the explicit protocol error on a subsequent
+			// call (XR_ENH_UnknownCommand_LivePath_ExplicitError).
 			if len(msgs) > 0 {
 				t.deferredErr = parseErr
 				return nil
