@@ -20,6 +20,16 @@ import (
 // when bus traffic floods the transport during INFO or normal read paths.
 const maxPendingEvents = 256
 
+// arbitrationWindowTimeout bounds the async arbitration window opened by
+// RequestStart(). If STARTED/FAILED does not arrive within this budget,
+// the window is force-closed so subsequent RECEIVED bytes stop being
+// dropped as pre-grant traffic. Set generously relative to eBUS wire
+// timing (a full arbitration cycle is well under 100ms); 500ms keeps the
+// deadline above any legitimate adapter latency while preventing
+// permanent starvation on a busy bus where STARTED/FAILED is lost but
+// RECEIVED keeps arriving.
+const arbitrationWindowTimeout = 500 * time.Millisecond
+
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
 
@@ -74,6 +84,12 @@ type ENHTransport struct {
 	// StartArbitration clears pendingEvents after grant, but the async
 	// path needs this in-window drop to achieve the same invariant.
 	awaitingStart atomic.Bool
+	// arbitrationDeadline is the absolute time after which awaitingStart
+	// is force-closed even if no STARTED/FAILED arrives. Prevents permanent
+	// starvation on a busy bus where RECEIVED keeps arriving (no read
+	// timeout) but the arbitration response is lost. Stored as Unix nanos
+	// for lock-free access; 0 = no deadline (window closed).
+	arbitrationDeadline atomic.Int64
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -628,17 +644,33 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 	// Open the arbitration window BEFORE the write so any RECEIVED bytes
 	// that arrive concurrently with STARTED/FAILED are filtered out of
 	// pendingEvents (they are pre-grant bus traffic, not our echoes).
+	// Set a deadline so a lost STARTED/FAILED cannot permanently drop
+	// RECEIVED bytes on a busy bus (no read timeout to rely on).
+	t.arbitrationDeadline.Store(time.Now().Add(arbitrationWindowTimeout).UnixNano())
 	t.awaitingStart.Store(true)
 	n, err := t.conn.Write(seq[:])
 	if err != nil {
 		t.awaitingStart.Store(false)
+		t.arbitrationDeadline.Store(0)
 		return t.mapWriteError(err)
 	}
 	if n != len(seq) {
 		t.awaitingStart.Store(false)
+		t.arbitrationDeadline.Store(0)
 		return fmt.Errorf("enh request start short write (%d/%d): %w", n, len(seq), ebuserrors.ErrInvalidPayload)
 	}
 	return nil
+}
+
+// arbitrationWindowExpired checks if the async arbitration window's
+// deadline has passed. Returns true when the window must be force-closed
+// even though no STARTED/FAILED has arrived.
+func (t *ENHTransport) arbitrationWindowExpired() bool {
+	deadline := t.arbitrationDeadline.Load()
+	if deadline == 0 {
+		return false
+	}
+	return time.Now().UnixNano() >= deadline
 }
 
 // RequestInfo sends an INFO request for the given ID and returns the raw
@@ -760,11 +792,27 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					}
 				}
 			case ENHResReceived:
-				// Bus byte received during INFO — queue it, bounded.
+				// Bus byte received during INFO. If an async arbitration
+				// window is open, drop pre-grant bytes (same semantics as
+				// fillPendingLocked awaitingStart gate).
+				if t.awaitingStart.Load() {
+					continue
+				}
 				if len(t.pendingEvents) < maxPendingEvents {
 					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 				}
 				// Drop when at cap — INFO is bounded by deadline anyway.
+			case ENHResStarted:
+				// Async arbitration grant observed while consuming INFO.
+				// Close the arbitration window so subsequent RECEIVED
+				// bytes are delivered (no silent deadlock). Queue the
+				// control event via the never-drop path so event-aware
+				// consumers see it.
+				t.awaitingStart.Store(false)
+				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			case ENHResFailed:
+				t.awaitingStart.Store(false)
+				t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
 				t.surfaceResetLocked()
 				if !payloadComplete {
@@ -843,6 +891,7 @@ func (t *ENHTransport) resetStateLocked() {
 	// Clear async arbitration window — any pending RequestStart is
 	// invalidated by the reset (connection swap or lifecycle boundary).
 	t.awaitingStart.Store(false)
+	t.arbitrationDeadline.Store(0)
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -882,8 +931,17 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// window — they are pre-grant bus traffic, not our echoes. The
 			// blocking StartArbitration clears pendingEvents after grant;
 			// this is the async-path equivalent (see awaitingStart doc).
+			// Force-close the window if its deadline expired (STARTED/
+			// FAILED was lost on a busy bus); remaining RECEIVED bytes
+			// from that point are delivered normally.
 			if t.awaitingStart.Load() {
-				continue
+				if t.arbitrationWindowExpired() {
+					t.awaitingStart.Store(false)
+					t.arbitrationDeadline.Store(0)
+					// Fall through: deliver this byte to pendingEvents.
+				} else {
+					continue
+				}
 			}
 			if len(t.pendingEvents) < maxPendingEvents {
 				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
@@ -934,13 +992,18 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// Parser desync: orphan byte2, missing byte2, or unknown command.
 			// Reset parser to re-synchronize on the next valid byte1.
 			t.parser.Reset()
+			// Always close the async arbitration window on a parse error —
+			// a malformed frame before STARTED/FAILED arrives means the
+			// START response is compromised and would never be recognized.
+			// Leaving awaitingStart=true would silently drop all subsequent
+			// RECEIVED bytes. Clear unconditionally, not only when observed
+			// set at this specific moment.
+			wasAwaiting := t.awaitingStart.Load()
+			t.awaitingStart.Store(false)
 			// During async arbitration, surface the error immediately — the
 			// RequestStart caller is waiting for a crisp STARTED/FAILED
 			// outcome, not a parse error delayed behind a byte backlog.
-			// Also close the arbitration window so subsequent reads resume
-			// normal byte delivery.
-			if t.awaitingStart.Load() {
-				t.awaitingStart.Store(false)
+			if wasAwaiting {
 				return parseErr
 			}
 			// Steady-state read: if valid messages were queued in this batch,

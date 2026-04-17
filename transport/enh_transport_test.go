@@ -3042,3 +3042,168 @@ func TestENHTransport_AwaitingStartClearedOnTimeout(t *testing.T) {
 	}
 	<-done
 }
+
+// TestENHTransport_RequestInfo_ClosesArbitrationWindowOnSTARTED verifies
+// that when RequestStart() has opened the async arbitration window and
+// RequestInfo() consumes the STARTED response, the window is closed so
+// subsequent RECEIVED bytes are delivered (not dropped as pre-grant).
+// Copilot P1 on PR #135.
+func TestENHTransport_RequestInfo_ClosesArbitrationWindowOnSTARTED(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond)
+	initiator := byte(0x31)
+
+	go func() {
+		// Consume the START request (RequestStart).
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+		// Consume the INFO request.
+		_, _ = io.ReadFull(server, buf)
+
+		// Adapter sequence: STARTED (for our async arbitration) arrives
+		// interleaved with the INFO response. RequestInfo must handle
+		// STARTED and close the arbitration window.
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		length := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		data := transport.EncodeENH(transport.ENHResInfo, 0x77)
+		payload := append(started[:], length[:]...)
+		payload = append(payload, data[:]...)
+		_, _ = server.Write(payload)
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v", err)
+	}
+	if len(got) != 1 || got[0] != 0x77 {
+		t.Fatalf("RequestInfo payload = %v; want [0x77]", got)
+	}
+
+	// Arbitration window must now be closed — next RECEIVED byte delivered.
+	done := make(chan struct{})
+	go func() {
+		recv := transport.EncodeENH(transport.ENHResReceived, 0x42)
+		_, _ = server.Write(recv[:])
+		close(done)
+	}()
+
+	b, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after RequestInfo+STARTED = %v; want 0x42 (arbitration window closed)", err)
+	}
+	if b != 0x42 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x42", b)
+	}
+	<-done
+}
+
+// TestENHTransport_AwaitingStartClearedOnParseErrorNoDefer verifies that
+// a parse error in fillPendingLocked clears awaitingStart even when the
+// deferred-error path is taken (msgs queued before the error). Without
+// this, a malformed frame before STARTED/FAILED would leave awaitingStart
+// set and drop subsequent RECEIVED bytes. Copilot P2 on PR #135.
+func TestENHTransport_AwaitingStartClearedOnParseErrorNoDefer(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond)
+	initiator := byte(0x10)
+
+	// RequestStart opens the window. After it returns, we simulate a
+	// malformed frame arriving (no STARTED). The window must close.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+		// Send orphan byte2 (0x80) — triggers ErrInvalidPayload in parser.
+		// No valid msgs precede, so the "defer" branch is NOT taken.
+		_, _ = server.Write([]byte{0x80})
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	// Surface the parse error.
+	_, err := enh.ReadByte()
+	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
+		t.Fatalf("ReadByte = %v; want ErrInvalidPayload", err)
+	}
+
+	// Now send a legit RECEIVED byte. It must be delivered (awaitingStart cleared).
+	done := make(chan struct{})
+	go func() {
+		recv := transport.EncodeENH(transport.ENHResReceived, 0x55)
+		_, _ = server.Write(recv[:])
+		close(done)
+	}()
+
+	b, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after parse error = %v; want 0x55 (awaitingStart cleared)", err)
+	}
+	if b != 0x55 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x55", b)
+	}
+	<-done
+}
+
+// TestENHTransport_ArbitrationWindowExpiresOnBusyBus verifies that the
+// async arbitration window is force-closed by its deadline. After the
+// deadline expires, the first RECEIVED byte that arrives is delivered
+// (not dropped as pre-grant). Copilot P2 on PR #135 — permanent
+// starvation scenario on a busy bus where STARTED/FAILED is lost.
+func TestENHTransport_ArbitrationWindowExpiresOnBusyBus(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	initiator := byte(0x10)
+
+	// Server:
+	// 1. Consumes the START request.
+	// 2. Waits past the arbitration window deadline (500ms + margin).
+	// 3. Sends one post-deadline RECEIVED byte.
+	//    The reader should deliver this byte — proving the window was
+	//    force-closed by its deadline (STARTED/FAILED never arrived).
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		// Sleep past the window deadline (arbitrationWindowTimeout=500ms).
+		time.Sleep(700 * time.Millisecond)
+
+		postExpiry := transport.EncodeENH(transport.ENHResReceived, 0xC3)
+		_, _ = server.Write(postExpiry[:])
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	// ReadByte should return 0xC3 — the byte that arrived after the
+	// arbitration window expired. If the deadline mechanism didn't work,
+	// this byte would be dropped as pre-grant and ReadByte would block
+	// (until the read deadline hits).
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte = %v; want 0xC3 (window should expire, post-byte delivered)", err)
+	}
+	if got != 0xC3 {
+		t.Fatalf("ReadByte = 0x%02x; want 0xC3 (post-expiry byte)", got)
+	}
+}
