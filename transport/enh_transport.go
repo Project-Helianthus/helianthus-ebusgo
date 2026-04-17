@@ -37,8 +37,8 @@ func WithDialFunc(fn func() (net.Conn, error)) ENHTransportOption {
 // only the conn pointer swap — never held during blocking I/O (conn.Close
 // is called after connMu.Unlock).
 type ENHTransport struct {
-	connMu sync.Mutex // protects conn pointer swap only, not I/O operations
-	conn   net.Conn
+	connMu       sync.Mutex // protects conn pointer swap only, not I/O operations
+	conn         net.Conn
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	// true for ENH mode: START arbitration already transmits source symbol on wire.
@@ -58,8 +58,13 @@ type ENHTransport struct {
 
 	parser        ENHParser
 	pendingEvents []StreamEvent
-	resets        int
-	buffer        []byte
+	// deferredErr holds a parse error that occurred while valid messages
+	// were also produced. The error is surfaced on the next Read*()
+	// call after pendingEvents is fully drained, so valid messages are
+	// not lost. Accessed only under readMu.
+	deferredErr error
+	resets      int
+	buffer      []byte
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -359,10 +364,16 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			if ev.Kind == StreamEventByte {
 				return ev.Byte, nil
 			}
-			// Skip non-byte events (StreamEventStarted, StreamEventFailed).
-			// These are intentionally dropped in ReadByte — event-aware
-			// consumers should use ReadEvent instead, which returns all
-			// event types.
+			// Skip non-byte events (StreamEventStarted, StreamEventFailed,
+			// StreamEventReset) in ReadByte — event-aware consumers should
+			// use ReadEvent instead.
+		}
+
+		// Surface deferred parse error after pendingEvents is fully drained.
+		if t.deferredErr != nil {
+			err := t.deferredErr
+			t.deferredErr = nil
+			return 0, err
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
@@ -394,6 +405,13 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 			ev := t.pendingEvents[0]
 			t.pendingEvents = t.pendingEvents[1:]
 			return ev, nil
+		}
+
+		// Surface deferred parse error after pendingEvents is fully drained.
+		if t.deferredErr != nil {
+			err := t.deferredErr
+			t.deferredErr = nil
+			return StreamEvent{}, err
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
@@ -808,6 +826,11 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// INFO responses are consumed by RequestInfo's dedicated read path.
 			// Unsolicited INFO frames in the steady-state read are safely ignored.
 		case ENHResResetted:
+			// Always surface the reset boundary to event consumers so upstream
+			// layers can drain stale state. This is independent of whether the
+			// transport performs a TCP reconnect — reset notification and
+			// reconnect are separate concerns (XR_ENH_RESETTED_AlwaysSurfacesBoundary).
+			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventReset, Data: msg.Data})
 			if t.dialFunc != nil {
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
@@ -817,28 +840,25 @@ func (t *ENHTransport) fillPendingLocked() error {
 				// parsed from the old stream and are stale.
 				return nil
 			}
-			// Adapter-direct mode (no dialFunc): the adapter periodically
-			// sends RESETTED as a bus-level event. Do NOT signal this as
-			// ErrAdapterReset — that causes handleReset() which drains the
-			// active channel, cancels pending arbitrations, and disrupts
-			// the mux state machine. In adapter-direct mode the mux owns
-			// the TCP connection lifecycle and RESETTED is informational
-			// only — continue processing remaining msgs from the same batch.
+			// Adapter-direct mode (no dialFunc): boundary surfaced above for
+			// event consumers. Remaining msgs in the same batch continue to
+			// be processed — bus-level data after RESETTED is still valid.
 		}
 	}
 	if parseErr != nil {
 		if errors.Is(parseErr, ebuserrors.ErrInvalidPayload) {
 			// Parser desync: orphan byte2, missing byte2, or unknown command.
 			// Reset parser to re-synchronize on the next valid byte1.
-			// Valid messages before the desync have already been queued above.
-			//
-			// Design choice: unknown/invalid ENH commands produce ErrInvalidPayload
-			// at the DecodeENH level (explicit error per XR invariant), but the
-			// transport absorbs it here for robustness — a single corrupt frame
-			// must not kill the session. The bus layer sees the gap as a missing
-			// byte (timeout on next readSymbol) rather than a masked collision.
+			// If valid messages were queued in this batch, defer the error
+			// so callers drain the queue first (no lost data), then surface
+			// the explicit protocol error on a subsequent call
+			// (XR_ENH_UnknownCommand_LivePath_ExplicitError).
 			t.parser.Reset()
-			return nil
+			if len(msgs) > 0 {
+				t.deferredErr = parseErr
+				return nil
+			}
+			return parseErr
 		}
 		return parseErr
 	}
