@@ -641,24 +641,23 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 	if err := t.setWriteDeadline(); err != nil {
 		return t.mapWriteError(err)
 	}
-	// Open the arbitration window BEFORE the write so any RECEIVED bytes
-	// that arrive concurrently with STARTED/FAILED are filtered out of
-	// pendingEvents (they are pre-grant bus traffic, not our echoes).
-	// Set a deadline so a lost STARTED/FAILED cannot permanently drop
-	// RECEIVED bytes on a busy bus (no read timeout to rely on).
-	t.arbitrationDeadline.Store(time.Now().Add(arbitrationWindowTimeout).UnixNano())
-	t.awaitingStart.Store(true)
 	n, err := t.conn.Write(seq[:])
 	if err != nil {
-		t.awaitingStart.Store(false)
-		t.arbitrationDeadline.Store(0)
 		return t.mapWriteError(err)
 	}
 	if n != len(seq) {
-		t.awaitingStart.Store(false)
-		t.arbitrationDeadline.Store(0)
 		return fmt.Errorf("enh request start short write (%d/%d): %w", n, len(seq), ebuserrors.ErrInvalidPayload)
 	}
+	// Open the arbitration window AFTER the write succeeds. Setting it
+	// earlier risks a false window on a blocked/failed write, during
+	// which fillPendingLocked would drop legitimate RECEIVED bytes as
+	// pre-grant traffic even though the START request never reached the
+	// adapter. writeMu is held across Write and this store, so reads
+	// blocked waiting for data cannot observe a false window either.
+	// The deadline is set together with the flag so both are valid
+	// from the same instant.
+	t.arbitrationDeadline.Store(time.Now().Add(arbitrationWindowTimeout).UnixNano())
+	t.awaitingStart.Store(true)
 	return nil
 }
 
@@ -862,9 +861,13 @@ func (t *ENHTransport) Close() error {
 // among non-evicted bytes. Caller must hold readMu.
 func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
 	if len(t.pendingEvents) >= maxPendingEvents {
-		// Evict oldest byte event to make room. Iterate from head — first
-		// byte event found is dropped. If none found (queue is all control
-		// events — pathological), expand past the cap as a safety valve.
+		// Evict oldest byte event first (data is recoverable; gateway
+		// re-reads bus state). If no byte event exists (queue is all
+		// control events — pathological, e.g. repeated STARTED/FAILED/
+		// RESETTED under adapter fault), evict the oldest control event.
+		// This preserves the bounded-backpressure guarantee strictly
+		// while keeping the most recent control event (always more
+		// relevant than a stale one from an earlier arbitration cycle).
 		evicted := false
 		for i, existing := range t.pendingEvents {
 			if existing.Kind == StreamEventByte {
@@ -873,10 +876,10 @@ func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
 				break
 			}
 		}
-		// If no byte event was evicted, the queue is all control events.
-		// Accept brief overshoot of the cap — bounded by the number of
-		// outstanding arbitration cycles. Never drop a control event.
-		_ = evicted
+		if !evicted {
+			// All control events — drop the oldest to bound memory.
+			t.pendingEvents = t.pendingEvents[1:]
+		}
 	}
 	t.pendingEvents = append(t.pendingEvents, ev)
 }
