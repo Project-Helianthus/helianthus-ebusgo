@@ -3576,3 +3576,214 @@ func TestENHTransport_RequestInfo_ArbitrationWindowExpires(t *testing.T) {
 		t.Fatalf("ReadByte = 0x%02x; want 0xC3", b)
 	}
 }
+
+// TestENHTransport_PostGrantSYNSuppressed verifies that idle SYN bytes
+// arriving between arbitration grant (STARTED) and the first real echo
+// are suppressed. Root cause: eBUS wire goes idle (0xAA) after STARTED;
+// adapter emits RECEIVED(0xAA) for idle ticks; sendRawWithEcho then
+// reads the queued 0xAA thinking it's the echo of our first written
+// byte (e.g. DST) → echo mismatch. This test confirms the post-grant
+// pre-echo window swallows those idle SYNs.
+func TestENHTransport_PostGrantSYNSuppressed(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	initiator := byte(0x71)
+
+	// Blocking StartArbitration's read loop discards same-batch RECEIVED
+	// (see EG31/EG43 reversal). So the test sends STARTED in batch 1
+	// only, then after StartArbitration returns, emits idle SYNs + echo
+	// in batch 2 — which fillPendingLocked processes on the next ReadByte.
+	// The post-grant pre-echo window must suppress the idle SYNs.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		// Batch 1: STARTED only.
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		_, _ = server.Write(started[:])
+
+		// Small delay for client to return from StartArbitration.
+		time.Sleep(30 * time.Millisecond)
+
+		// Batch 2: 2× idle SYN, then real echo 0x15.
+		syn := transport.EncodeENH(transport.ENHResReceived, 0xAA)
+		echo := transport.EncodeENH(transport.ENHResReceived, 0x15)
+		batch2 := append([]byte(nil), syn[:]...)
+		batch2 = append(batch2, syn[:]...)
+		batch2 = append(batch2, echo[:]...)
+		_, _ = server.Write(batch2)
+	}()
+
+	if err := enh.StartArbitration(initiator); err != nil {
+		t.Fatalf("StartArbitration error = %v", err)
+	}
+
+	// ReadByte should return 0x15 (the real echo), NOT 0xAA (idle SYN).
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte error = %v; want 0x15 (idle SYNs must be suppressed)", err)
+	}
+	if got != 0x15 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x15 (idle SYNs leaked as echo!)", got)
+	}
+}
+
+// TestENHTransport_PostGrantNonSYNClearsWindow verifies that the first
+// non-SYN RECEIVED byte after a grant closes the post-grant pre-echo
+// window. Subsequent RECEIVED(0xAA) bytes within the transaction must
+// be delivered as data (they are legitimate 0xAA data bytes that the
+// adapter un-escaped from wire [0xA9, 0x01]), NOT suppressed.
+func TestENHTransport_PostGrantNonSYNClearsWindow(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	initiator := byte(0x71)
+
+	// Server: batch 1 = STARTED. Batch 2 (after StartArbitration returns):
+	// RECEIVED(0x42) first non-SYN echo closes the window. Then
+	// RECEIVED(0xAA) — a legitimate data byte that must NOT be suppressed.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		_, _ = server.Write(started[:])
+
+		time.Sleep(30 * time.Millisecond)
+
+		echo := transport.EncodeENH(transport.ENHResReceived, 0x42)
+		data := transport.EncodeENH(transport.ENHResReceived, 0xAA)
+		_, _ = server.Write(append(echo[:], data[:]...))
+	}()
+
+	if err := enh.StartArbitration(initiator); err != nil {
+		t.Fatalf("StartArbitration error = %v", err)
+	}
+
+	// First byte: 0x42 (real echo — closes window).
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte[0] error = %v", err)
+	}
+	if got != 0x42 {
+		t.Fatalf("ReadByte[0] = 0x%02x; want 0x42", got)
+	}
+
+	// Second byte: 0xAA (legitimate data, window closed so not suppressed).
+	got, err = enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte[1] error = %v; want 0xAA (legit data, window closed)", err)
+	}
+	if got != 0xAA {
+		t.Fatalf("ReadByte[1] = 0x%02x; want 0xAA (legit data, NOT suppressed)", got)
+	}
+}
+
+// TestENHTransport_PostGrantWindow_RequestStartAsync verifies the
+// post-grant pre-echo window also works via the async RequestStart +
+// ReadEvent path (adaptermux style). STARTED arrives via ReadEvent,
+// followed by idle SYNs + real echo via ReadByte.
+func TestENHTransport_PostGrantWindow_RequestStartAsync(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	initiator := byte(0x71)
+
+	// Server: consume START, emit STARTED + 2 idle SYNs + real echo.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		syn1 := transport.EncodeENH(transport.ENHResReceived, 0xAA)
+		syn2 := transport.EncodeENH(transport.ENHResReceived, 0xAA)
+		echo := transport.EncodeENH(transport.ENHResReceived, 0x15)
+		payload := append([]byte(nil), started[:]...)
+		payload = append(payload, syn1[:]...)
+		payload = append(payload, syn2[:]...)
+		payload = append(payload, echo[:]...)
+		_, _ = server.Write(payload)
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	reader := interface{}(enh).(transport.StreamEventReader)
+
+	// First event: STARTED — closes awaitingStart, opens postGrantPreEcho.
+	ev, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent[0] error = %v", err)
+	}
+	if ev.Kind != transport.StreamEventStarted {
+		t.Fatalf("ReadEvent[0] = %+v; want StreamEventStarted", ev)
+	}
+
+	// Next byte via ReadByte: must be 0x15 (idle SYNs suppressed).
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte = %v; want 0x15 (post-grant SYNs suppressed)", err)
+	}
+	if got != 0x15 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x15 (idle SYN leaked after async grant!)", got)
+	}
+}
+
+// TestENHTransport_PostGrantWindow_ClearedOnFailed verifies that the
+// post-grant pre-echo window is NOT opened when arbitration FAILS.
+// FAILED means we lost the arbitration; no echo follows, so suppressing
+// idle SYNs would discard legitimate bus traffic during collision backoff.
+func TestENHTransport_PostGrantWindow_ClearedOnFailed(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+
+	// Server: batch 1 = FAILED only. Batch 2 (after StartArbitration
+	// returns with error): RECEIVED(0xAA) legit bus SYN. Window must NOT
+	// be opened after FAILED, so the 0xAA must be delivered as data.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		failed := transport.EncodeENH(transport.ENHResFailed, 0x30)
+		_, _ = server.Write(failed[:])
+
+		time.Sleep(30 * time.Millisecond)
+
+		syn := transport.EncodeENH(transport.ENHResReceived, 0xAA)
+		_, _ = server.Write(syn[:])
+	}()
+
+	err := enh.StartArbitration(0x71)
+	if err == nil {
+		t.Fatal("StartArbitration = nil; want ErrBusCollision from FAILED")
+	}
+
+	// After FAILED, the 0xAA must be delivered as data — not suppressed.
+	// (Window was never opened because arbitration failed.)
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after FAILED = %v; want 0xAA (window should NOT suppress after FAILED)", err)
+	}
+	if got != 0xAA {
+		t.Fatalf("ReadByte = 0x%02x; want 0xAA (legit bus SYN suppressed after FAILED)", got)
+	}
+}

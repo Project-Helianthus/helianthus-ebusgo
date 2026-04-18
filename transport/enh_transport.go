@@ -90,6 +90,22 @@ type ENHTransport struct {
 	// timeout) but the arbitration response is lost. Stored as Unix nanos
 	// for lock-free access; 0 = no deadline (window closed).
 	arbitrationDeadline atomic.Int64
+	// postGrantPreEcho is set to true when STARTED/FAILED closes the
+	// arbitration window. While set, fillPendingLocked suppresses any
+	// RECEIVED(0xAA) idle SYN bytes that arrive on the wire between the
+	// arbitration grant and the first real echo from our next write.
+	// Cleared on the first non-SYN RECEIVED byte (the real echo), or on
+	// parser reset / reconnect / error lifecycle boundaries.
+	//
+	// Root cause: eBUS wire goes idle (0xAA SYN) after STARTED is sent
+	// by the adapter; our bus layer then writes the first byte (DST),
+	// but the adapter may emit RECEIVED(0xAA) for idle ticks before
+	// echoing our write. sendRawWithEcho reads the queued 0xAA thinking
+	// it's the echo of DST → echo mismatch error. Suppressing idle SYN
+	// during this brief window eliminates the mismatch without affecting
+	// legitimate 0xAA data bytes within a transaction (which arrive
+	// after the first non-SYN RECEIVED clears this flag).
+	postGrantPreEcho atomic.Bool
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -607,6 +623,15 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			t.pendingEvents = nil
 			t.deferredErr = nil
 			t.awaitingStart.Store(false)
+			// On successful grant, open the post-grant pre-echo window
+			// so idle SYN bytes arriving between STARTED and our first
+			// write's echo are suppressed. On failure/error, clear it
+			// defensively.
+			if arbitrationErr == nil {
+				t.postGrantPreEcho.Store(true)
+			} else {
+				t.postGrantPreEcho.Store(false)
+			}
 			return arbitrationErr
 		}
 
@@ -694,6 +719,7 @@ func (t *ENHTransport) requestInfoFail(err error) error {
 	t.deferredErr = nil
 	t.awaitingStart.Store(false)
 	t.arbitrationDeadline.Store(0)
+	t.postGrantPreEcho.Store(false)
 	// Preserve buffered events on timeout/error so they are not silently
 	// dropped. Clear pending on fatal transport errors and adapter resets
 	// where the parser state is unrecoverable or events from the same TCP
@@ -827,13 +853,19 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				// Close the arbitration window so subsequent RECEIVED
 				// bytes are delivered (no silent deadlock). Queue the
 				// control event via the never-drop path so event-aware
-				// consumers see it.
+				// consumers see it. Open the post-grant pre-echo window
+				// to suppress idle SYN between grant and first real echo.
 				t.awaitingStart.Store(false)
 				t.arbitrationDeadline.Store(0)
+				t.postGrantPreEcho.Store(true)
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 			case ENHResFailed:
+				// FAILED = arbitration lost — no echo will follow, so
+				// don't open the pre-echo window (would suppress legit
+				// idle SYNs from the bus during collision backoff).
 				t.awaitingStart.Store(false)
 				t.arbitrationDeadline.Store(0)
+				t.postGrantPreEcho.Store(false)
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
 				t.surfaceResetLocked()
@@ -881,6 +913,12 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 // any pending Read or Write.
 func (t *ENHTransport) Close() error {
 	t.closed.Store(true)
+	// Clear transport-state flags defensively (atomic — no lock needed).
+	// Any post-Close read is rejected by the closed flag; clearing these
+	// avoids stale state leaking if the transport is somehow reused.
+	t.awaitingStart.Store(false)
+	t.arbitrationDeadline.Store(0)
+	t.postGrantPreEcho.Store(false)
 	t.connMu.Lock()
 	conn := t.conn
 	t.connMu.Unlock()
@@ -928,6 +966,10 @@ func (t *ENHTransport) resetStateLocked() {
 	// invalidated by the reset (connection swap or lifecycle boundary).
 	t.awaitingStart.Store(false)
 	t.arbitrationDeadline.Store(0)
+	// Clear post-grant pre-echo window — lifecycle reset means any
+	// in-flight arbitration-echo correlation is broken; next write will
+	// open a fresh window if applicable.
+	t.postGrantPreEcho.Store(false)
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -979,20 +1021,39 @@ func (t *ENHTransport) fillPendingLocked() error {
 					continue
 				}
 			}
+			// Post-grant pre-echo window: suppress idle SYN bytes that
+			// arrive between arbitration grant and the first real echo
+			// of our write. The first non-SYN byte is the real echo and
+			// closes the window so later legitimate 0xAA data bytes are
+			// delivered normally. See postGrantPreEcho field doc.
+			if t.postGrantPreEcho.Load() {
+				if msg.Data == ebusSymbolSyn {
+					continue
+				}
+				t.postGrantPreEcho.Store(false)
+			}
 			if len(t.pendingEvents) < maxPendingEvents {
 				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 			}
 		case ENHResStarted:
 			// Arbitration window closed — subsequent RECEIVED bytes are
-			// post-grant echoes and must be queued normally.
+			// post-grant echoes and must be queued normally. Open the
+			// post-grant pre-echo window to suppress idle SYN between
+			// grant and first real echo.
 			t.awaitingStart.Store(false)
+			t.arbitrationDeadline.Store(0)
+			t.postGrantPreEcho.Store(true)
 			// Control events MUST NEVER be dropped — gateway/adaptermux
 			// wait for exactly one STARTED or FAILED per arbitration cycle.
 			// If the queue is full of byte events, evict the oldest byte
 			// events to make room. Control event ordering is preserved.
 			t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 		case ENHResFailed:
+			// FAILED = arbitration lost; no echo will follow. Clear
+			// postGrantPreEcho (defensively) and do not open the window.
 			t.awaitingStart.Store(false)
+			t.arbitrationDeadline.Store(0)
+			t.postGrantPreEcho.Store(false)
 			t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
@@ -1020,6 +1081,9 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// consumers using the control-event path (never dropped under
 			// byte flood). Remaining msgs in the same batch continue to be
 			// processed — bus-level data after RESETTED is still valid.
+			// Clear post-grant pre-echo window: any in-flight arbitration
+			// correlation is invalidated by the adapter reset.
+			t.postGrantPreEcho.Store(false)
 			t.appendControlEventLocked(StreamEvent{Kind: StreamEventReset, Data: msg.Data})
 		}
 	}
