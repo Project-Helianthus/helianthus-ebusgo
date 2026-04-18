@@ -9,11 +9,41 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 )
+
+// maxPendingEvents caps the pendingEvents slice to prevent unbounded growth
+// when bus traffic floods the transport during INFO or normal read paths.
+const maxPendingEvents = 256
+
+// arbitrationWindowTimeout bounds the async arbitration window opened by
+// RequestStart(). If STARTED/FAILED does not arrive within this budget,
+// the window is force-closed so subsequent RECEIVED bytes stop being
+// dropped as pre-grant traffic. Set generously relative to eBUS wire
+// timing (a full arbitration cycle is well under 100ms); 500ms keeps the
+// deadline above any legitimate adapter latency while preventing
+// permanent starvation on a busy bus where STARTED/FAILED is lost but
+// RECEIVED keeps arriving.
+const arbitrationWindowTimeout = 500 * time.Millisecond
+
+// postGrantPreEchoTimeout bounds the post-grant pre-echo window opened by
+// STARTED. Inside this window, RECEIVED(0xAA) bytes are treated as idle
+// SYN from the eBUS wire and suppressed so they don't leak as echoes of
+// the bus layer's first write. The window closes on: (a) the first
+// non-SYN RECEIVED (the real echo, normal case), or (b) this deadline.
+//
+// Deadline prevents a degenerate case where the first legitimate echo
+// happens to be 0xAA (for example, a frame whose first post-arbitration
+// byte is 0xAA) — without a deadline, that echo would be suppressed,
+// the window would never close, and the write path would stall. 50ms is
+// well above TCP latency between STARTED and our first Write returning
+// from conn.Write, but short enough to not materially affect protocol
+// timing (a full eBUS transaction is bounded by larger timeouts).
+const postGrantPreEchoTimeout = 50 * time.Millisecond
 
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
@@ -28,14 +58,21 @@ func WithDialFunc(fn func() (net.Conn, error)) ENHTransportOption {
 
 // ENHTransport wraps a net.Conn and exposes the RawTransport interface using ENH framing.
 //
-// Lock ordering: readMu before writeMu. Both must be held when replacing t.conn.
+// Lock ordering: readMu before writeMu. connMu is independent and protects
+// only the conn pointer swap — never held during blocking I/O (conn.Close
+// is called after connMu.Unlock).
 type ENHTransport struct {
+	connMu       sync.Mutex // protects conn pointer swap only, not I/O operations
 	conn         net.Conn
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	// true for ENH mode: START arbitration already transmits source symbol on wire.
 	// false for ENS mode: source symbol must still be written in telegram payload.
 	arbitrationSendsSource bool
+
+	// closed is set atomically by Close() to signal terminal state. All public
+	// methods check this before acquiring locks to prevent post-Close hangs.
+	closed atomic.Bool
 
 	// dialFunc, when non-nil, enables mid-session reconnection on RESETTED.
 	// The function should return a fresh net.Conn to the adapter.
@@ -46,8 +83,57 @@ type ENHTransport struct {
 
 	parser        ENHParser
 	pendingEvents []StreamEvent
-	resets        int
-	buffer        []byte
+	// deferredErr holds a parse error that occurred while valid messages
+	// were also produced. The error is surfaced on the next Read*()
+	// call after pendingEvents is fully drained, so valid messages are
+	// not lost. Accessed only under readMu.
+	deferredErr error
+	resets      int
+	buffer      []byte
+	// awaitingStart is set atomically by RequestStart() and cleared when a
+	// STARTED/FAILED arrives (or parser state is reset). While set, the
+	// async arbitration window is open: RECEIVED bytes received in this
+	// window are bus traffic observed before grant, not our echoes — they
+	// must not leak into pendingEvents where the protocol layer would
+	// consume them as if they were post-grant echoes. Blocking
+	// StartArbitration clears pendingEvents after grant, but the async
+	// path needs this in-window drop to achieve the same invariant.
+	awaitingStart atomic.Bool
+	// awaitingStartInitiator holds the initiator byte RequestStart is
+	// waiting a grant for. STARTED frames with a different Data are
+	// NOT our grant (another device won or a stale response); the async
+	// path must keep awaitingStart open until a matching STARTED, FAILED,
+	// or the arbitration deadline expires. Stored as uint32 so we can
+	// use atomic.Uint32 (byte in low bits). Only valid when
+	// awaitingStart.Load() is true.
+	awaitingStartInitiator atomic.Uint32
+	// arbitrationDeadline is the absolute time after which awaitingStart
+	// is force-closed even if no STARTED/FAILED arrives. Prevents permanent
+	// starvation on a busy bus where RECEIVED keeps arriving (no read
+	// timeout) but the arbitration response is lost. Stored as Unix nanos
+	// for lock-free access; 0 = no deadline (window closed).
+	arbitrationDeadline atomic.Int64
+	// postGrantPreEcho is set to true when STARTED/FAILED closes the
+	// arbitration window. While set, fillPendingLocked suppresses any
+	// RECEIVED(0xAA) idle SYN bytes that arrive on the wire between the
+	// arbitration grant and the first real echo from our next write.
+	// Cleared on: (a) the first non-SYN RECEIVED byte (the real echo,
+	// normal case), (b) postGrantPreEchoDeadline expiry, (c) parser
+	// reset / reconnect / error lifecycle boundaries.
+	//
+	// Root cause: eBUS wire goes idle (0xAA SYN) after STARTED is sent
+	// by the adapter; our bus layer then writes the first byte (DST),
+	// but the adapter may emit RECEIVED(0xAA) for idle ticks before
+	// echoing our write. sendRawWithEcho reads the queued 0xAA thinking
+	// it's the echo of DST → echo mismatch error. Suppressing idle SYN
+	// during this brief window eliminates the mismatch.
+	//
+	// Deadline covers the degenerate case where the first legit echo
+	// happens to be 0xAA — without it, that echo would be suppressed,
+	// the window would never close, and reads would stall. See
+	// postGrantPreEchoTimeout for timing rationale.
+	postGrantPreEcho         atomic.Bool
+	postGrantPreEchoDeadline atomic.Int64
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -89,15 +175,49 @@ func (t *ENHTransport) ArbitrationSendsSource() bool {
 	return t.arbitrationSendsSource
 }
 
+// InitResult contains the outcome of an ENH INIT handshake.
+type InitResult struct {
+	Features  byte // Adapter's confirmed features byte from RESETTED response.
+	Confirmed bool // True if adapter sent RESETTED; false on timeout (unconfirmed).
+}
+
 // Init performs an ENH initialization handshake by sending ENHReqInit(features)
 // and waiting for ENHResResetted(features).
 //
 // Returns the adapter's confirmed features byte from the RESETTED response.
 // Any RESETTED frames observed later will reset the local parser and echo state.
 func (t *ENHTransport) Init(features byte) (byte, error) {
+	if t.closed.Load() {
+		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 	return t.initLocked(features)
+}
+
+// InitWithResult performs an ENH INIT handshake and returns detailed result.
+// When Confirmed is false, the adapter did not respond with RESETTED within
+// the timeout window — the connection may still be usable but optional
+// features (INFO queries, etc.) should not be assumed available.
+func (t *ENHTransport) InitWithResult(features byte) (InitResult, error) {
+	if t.closed.Load() {
+		return InitResult{}, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+	return t.initWithResultLocked(features)
+}
+
+// initWithResultLocked performs the INIT handshake returning a rich result.
+// Caller must hold readMu.
+func (t *ENHTransport) initWithResultLocked(features byte) (InitResult, error) {
+	t.writeMu.Lock()
+	err := t.initSendLocked(features)
+	t.writeMu.Unlock()
+	if err != nil {
+		return InitResult{}, err
+	}
+	return t.initRecvResultLocked()
 }
 
 // initSendLocked writes the INIT request frame. Caller must hold writeMu.
@@ -132,11 +252,15 @@ func (t *ENHTransport) initLocked(features byte) (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	return t.initRecvLocked()
+	result, err := t.initRecvResultLocked()
+	return result.Features, err
 }
 
-// initRecvLocked reads the INIT response. Caller must hold readMu.
-func (t *ENHTransport) initRecvLocked() (byte, error) {
+// initRecvResultLocked reads the INIT response and returns a rich result.
+// Caller must hold readMu. When RESETTED is received, Confirmed is true and
+// Features contains the adapter's features byte. On timeout without RESETTED,
+// Confirmed is false and Features is 0 (fail-open: no error returned).
+func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 	maxWait := t.readTimeout
 	if maxWait <= 0 {
 		maxWait = 2 * time.Second
@@ -146,22 +270,28 @@ func (t *ENHTransport) initRecvLocked() (byte, error) {
 	for {
 		remaining := maxWait - time.Since(start)
 		if remaining <= 0 {
-			return 0, nil
+			t.parser.Reset() // Clear stale byte1 from partial frame
+			t.deferredErr = nil
+			t.awaitingStart.Store(false)
+			return InitResult{}, nil
 		}
 		if t.readTimeout <= 0 || remaining < t.readTimeout {
 			if err := t.conn.SetReadDeadline(time.Now().Add(remaining)); err != nil {
-				return 0, t.mapReadError(err)
+				return InitResult{}, t.mapReadError(err)
 			}
 		} else if err := t.setReadDeadline(); err != nil {
-			return 0, t.mapReadError(err)
+			return InitResult{}, t.mapReadError(err)
 		}
 
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
 			if isTimeout(err) {
-				return 0, nil
+				t.parser.Reset() // Clear stale byte1 from partial frame
+				t.deferredErr = nil
+				t.awaitingStart.Store(false)
+				return InitResult{}, nil
 			}
-			return 0, t.mapReadError(err)
+			return InitResult{}, t.mapReadError(err)
 		}
 		if n == 0 {
 			continue
@@ -174,21 +304,23 @@ func (t *ENHTransport) initRecvLocked() (byte, error) {
 		for _, msg := range msgs {
 			switch msg.Command {
 			case ENHResReceived:
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				if len(t.pendingEvents) < maxPendingEvents {
+					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				}
 			case ENHResResetted:
 				t.resetStateLocked()
-				return msg.Data, nil
+				return InitResult{Features: msg.Data, Confirmed: true}, nil
 			case ENHResInfo:
 				// Ignore info responses for now; leave any received bytes queued.
 			case ENHResErrorEBUS:
-				return 0, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				return InitResult{}, fmt.Errorf("enh init ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
 			case ENHResErrorHost:
-				return 0, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
+				return InitResult{}, fmt.Errorf("enh init host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
 			}
 		}
 		if parseErr != nil {
 			t.parser.Reset()
-			return 0, parseErr
+			return InitResult{}, parseErr
 		}
 	}
 }
@@ -200,6 +332,9 @@ func (t *ENHTransport) initRecvLocked() (byte, error) {
 // If dialFunc is nil (no reconnect capability), falls back to parser-only
 // reset for backward compatibility.
 func (t *ENHTransport) reconnectLocked() error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	if t.dialFunc == nil {
 		t.resetStateLocked()
 		return nil
@@ -216,13 +351,31 @@ func (t *ENHTransport) reconnectLocked() error {
 	if tcpConn, ok := newConn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 	}
+	// Re-check closed after dial — Close() may have run while we were
+	// blocked in dialFunc. If so, close the freshly dialed conn and bail.
+	if t.closed.Load() {
+		_ = newConn.Close()
+		return fmt.Errorf("enh transport closed during reconnect: %w", ebuserrors.ErrTransportClosed)
+	}
 	// Hold writeMu for the entire swap+init-send sequence to prevent
 	// concurrent Write() from sending application bytes on the new
 	// connection before INIT completes. Lock ordering: readMu (held by
 	// caller) before writeMu.
 	t.writeMu.Lock()
-	_ = t.conn.Close()
+	t.connMu.Lock()
+	// Final closed check under locks — eliminates TOCTOU between the
+	// post-dial check and the actual swap. If Close() ran after our
+	// earlier check, abort and close the freshly dialed conn.
+	if t.closed.Load() {
+		t.connMu.Unlock()
+		t.writeMu.Unlock()
+		_ = newConn.Close()
+		return fmt.Errorf("enh transport closed during reconnect: %w", ebuserrors.ErrTransportClosed)
+	}
+	oldConn := t.conn
 	t.conn = newConn
+	t.connMu.Unlock()
+	_ = oldConn.Close()
 	t.resetStateLocked()
 	sendErr := t.initSendLocked(0x01)
 	if sendErr != nil {
@@ -233,7 +386,7 @@ func (t *ENHTransport) reconnectLocked() error {
 	t.writeMu.Unlock()
 
 	// Read INIT response (readMu held by caller).
-	if _, err := t.initRecvLocked(); err != nil {
+	if _, err := t.initRecvResultLocked(); err != nil {
 		// INIT recv failed but newConn is still a valid TCP connection —
 		// we successfully sent the INIT request. Keep newConn in place so
 		// subsequent operations get timeout errors (retryable) instead of
@@ -251,6 +404,9 @@ func (t *ENHTransport) reconnectLocked() error {
 //
 // Returns ErrTransportClosed if no DialFunc was configured.
 func (t *ENHTransport) Reconnect() error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 	if t.dialFunc == nil {
@@ -260,6 +416,9 @@ func (t *ENHTransport) Reconnect() error {
 }
 
 func (t *ENHTransport) ReadByte() (byte, error) {
+	if t.closed.Load() {
+		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -278,10 +437,16 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			if ev.Kind == StreamEventByte {
 				return ev.Byte, nil
 			}
-			// Skip non-byte events (StreamEventStarted, StreamEventFailed).
-			// These are intentionally dropped in ReadByte — event-aware
-			// consumers should use ReadEvent instead, which returns all
-			// event types.
+			// Skip non-byte events (StreamEventStarted, StreamEventFailed,
+			// StreamEventReset) in ReadByte — event-aware consumers should
+			// use ReadEvent instead.
+		}
+
+		// Surface deferred parse error after pendingEvents is fully drained.
+		if t.deferredErr != nil {
+			err := t.deferredErr
+			t.deferredErr = nil
+			return 0, err
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
@@ -297,6 +462,9 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 // started/failed) to passive consumers while preserving ReadByte
 // compatibility for active callers.
 func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
+	if t.closed.Load() {
+		return StreamEvent{}, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -310,6 +478,13 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 			ev := t.pendingEvents[0]
 			t.pendingEvents = t.pendingEvents[1:]
 			return ev, nil
+		}
+
+		// Surface deferred parse error after pendingEvents is fully drained.
+		if t.deferredErr != nil {
+			err := t.deferredErr
+			t.deferredErr = nil
+			return StreamEvent{}, err
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
@@ -326,6 +501,9 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 // single conn.Write call for atomicity — TCP may fragment, but the retry
 // loop ensures the complete buffer is delivered.
 func (t *ENHTransport) Write(payload []byte) (int, error) {
+	if t.closed.Load() {
+		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
@@ -368,6 +546,9 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 // Any received ENHResReceived bytes observed while waiting are queued so that subsequent ReadByte
 // calls can consume them.
 func (t *ENHTransport) StartArbitration(initiator byte) error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -403,6 +584,11 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
+			if isTimeout(err) {
+				t.parser.Reset() // Clear any pending byte1 from partial frame
+				t.deferredErr = nil
+				t.awaitingStart.Store(false)
+			}
 			return t.mapReadError(err)
 		}
 		if n == 0 {
@@ -463,6 +649,17 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			// sendRawWithEcho, causing echo mismatch errors.
 			t.parser.Reset()
 			t.pendingEvents = nil
+			t.deferredErr = nil
+			t.awaitingStart.Store(false)
+			// On successful grant, open the post-grant pre-echo window
+			// so idle SYN bytes arriving between STARTED and our first
+			// write's echo are suppressed. On failure/error, clear it
+			// defensively.
+			if arbitrationErr == nil {
+				t.openPostGrantPreEchoWindow()
+			} else {
+				t.closePostGrantPreEchoWindow()
+			}
 			return arbitrationErr
 		}
 
@@ -470,6 +667,8 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		// corrupt trailing byte should not mask a valid STARTED/FAILED.
 		if parseErr != nil {
 			t.parser.Reset()
+			t.deferredErr = nil
+			t.awaitingStart.Store(false)
 			return parseErr
 		}
 	}
@@ -486,17 +685,78 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 // Only writeMu is held; readMu is NOT acquired so a concurrent ReadEvent
 // loop can consume the response without deadlock.
 func (t *ENHTransport) RequestStart(initiator byte) error {
+	if t.closed.Load() {
+		return fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	seq := EncodeENH(ENHReqStart, initiator)
 	if err := t.setWriteDeadline(); err != nil {
 		return t.mapWriteError(err)
 	}
-	_, err := t.conn.Write(seq[:])
+	// Open the arbitration window BEFORE conn.Write so STARTED emitted by
+	// a fast adapter (between write-completion and our store) is correctly
+	// handled by fillPendingLocked's STARTED case — which clears the flag.
+	// Setting AFTER Write creates a race: STARTED arrives while flag=false,
+	// gets processed normally, then our late Store(true) opens a FALSE
+	// window causing post-grant RECEIVED bytes to be dropped until deadline.
+	// On Write failure we roll back with Store(false) so no false window
+	// persists after a blocked/failed write.
+	t.arbitrationDeadline.Store(time.Now().Add(arbitrationWindowTimeout).UnixNano())
+	t.awaitingStartInitiator.Store(uint32(initiator))
+	t.awaitingStart.Store(true)
+	n, err := t.conn.Write(seq[:])
 	if err != nil {
+		t.awaitingStart.Store(false)
+		t.arbitrationDeadline.Store(0)
 		return t.mapWriteError(err)
 	}
+	if n != len(seq) {
+		t.awaitingStart.Store(false)
+		t.arbitrationDeadline.Store(0)
+		return fmt.Errorf("enh request start short write (%d/%d): %w", n, len(seq), ebuserrors.ErrInvalidPayload)
+	}
 	return nil
+}
+
+// arbitrationWindowExpired checks if the async arbitration window's
+// deadline has passed. Returns true when the window must be force-closed
+// even though no STARTED/FAILED has arrived.
+func (t *ENHTransport) arbitrationWindowExpired() bool {
+	deadline := t.arbitrationDeadline.Load()
+	if deadline == 0 {
+		return false
+	}
+	return time.Now().UnixNano() >= deadline
+}
+
+// openPostGrantPreEchoWindow sets the postGrantPreEcho flag + deadline.
+// Called from STARTED handling on all code paths (blocking StartArbitration,
+// fillPendingLocked, RequestInfo) so the SYN-suppression window is opened
+// consistently with the deadline that bounds it.
+func (t *ENHTransport) openPostGrantPreEchoWindow() {
+	t.postGrantPreEchoDeadline.Store(time.Now().Add(postGrantPreEchoTimeout).UnixNano())
+	t.postGrantPreEcho.Store(true)
+}
+
+// closePostGrantPreEchoWindow clears the flag + deadline atomically.
+// Called when the real echo arrives (first non-SYN), on FAILED, or on any
+// lifecycle reset boundary.
+func (t *ENHTransport) closePostGrantPreEchoWindow() {
+	t.postGrantPreEcho.Store(false)
+	t.postGrantPreEchoDeadline.Store(0)
+}
+
+// postGrantPreEchoExpired reports whether the post-grant pre-echo window
+// deadline has passed. Returns true even if the flag is still set — the
+// caller should close the window and deliver the byte rather than
+// suppress it.
+func (t *ENHTransport) postGrantPreEchoExpired() bool {
+	deadline := t.postGrantPreEchoDeadline.Load()
+	if deadline == 0 {
+		return false
+	}
+	return time.Now().UnixNano() >= deadline
 }
 
 // RequestInfo sends an INFO request for the given ID and returns the raw
@@ -505,55 +765,70 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 //
 // Returns ErrTimeout if the response does not arrive within readTimeout.
 // Returns ErrAdapterReset if a RESETTED frame is received mid-exchange.
-func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
-	t.readMu.Lock()
-	defer t.readMu.Unlock()
+// requestInfoFail performs the on-error cleanup for RequestInfo while both
+// readMu and writeMu are still held by the caller. This is intentionally
+// NOT a deferred function — deferred execution orders with writeMu.Unlock
+// create a race window where a blocked RequestStart can acquire writeMu,
+// set awaitingStart=true, and have that state stomped by the cleanup.
+// Keeping this synchronous and explicit, called before each error return
+// and BEFORE releasing writeMu, eliminates the race entirely.
+func (t *ENHTransport) requestInfoFail(err error) error {
+	t.parser.Reset()
+	t.deferredErr = nil
+	t.awaitingStart.Store(false)
+	t.arbitrationDeadline.Store(0)
+	t.closePostGrantPreEchoWindow()
+	// Preserve buffered events on timeout/error so they are not silently
+	// dropped. Clear pending on fatal transport errors and adapter resets
+	// where the parser state is unrecoverable or events from the same TCP
+	// segment after RESETTED would be stale.
+	if errors.Is(err, ebuserrors.ErrTransportClosed) || errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.pendingEvents = nil
+	}
+	return err
+}
 
-	var err error
-	readDeadline := time.Time{}
-	defer func() {
-		if err != nil {
-			t.parser.Reset()
-			// Preserve buffered events on timeout/error so they are not
-			// silently dropped. Clear pending on fatal transport errors and
-			// adapter resets where the parser state is unrecoverable or events
-			// from the same TCP segment after RESETTED would be stale.
-			if errors.Is(err, ebuserrors.ErrTransportClosed) || errors.Is(err, ebuserrors.ErrAdapterReset) {
-				t.pendingEvents = nil
-			}
-		}
-	}()
+func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
+	if t.closed.Load() {
+		return nil, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
+	t.readMu.Lock()
+	t.writeMu.Lock()
 
 	// Send the INFO request.
-	t.writeMu.Lock()
 	seq := EncodeENH(ENHReqInfo, byte(id))
 	written := 0
 	for written < len(seq) {
-		if err = t.setWriteDeadline(); err != nil {
+		if err := t.setWriteDeadline(); err != nil {
+			wrapped := t.requestInfoFail(t.mapWriteError(err))
 			t.writeMu.Unlock()
-			err = t.mapWriteError(err)
-			return nil, err
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
-		var n int
-		n, err = t.conn.Write(seq[written:])
+		n, err := t.conn.Write(seq[written:])
 		written += n
 		if err != nil {
+			wrapped := t.requestInfoFail(t.mapWriteError(err))
 			t.writeMu.Unlock()
-			err = t.mapWriteError(err)
-			return nil, err
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
 		if n == 0 {
 			break
 		}
 	}
-	t.writeMu.Unlock()
 	if written != len(seq) {
-		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
+		err := t.requestInfoFail(fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload))
+		t.writeMu.Unlock()
+		t.readMu.Unlock()
 		return nil, err
 	}
-	if t.readTimeout > 0 {
-		readDeadline = time.Now().Add(t.readTimeout)
+
+	infoTimeout := t.readTimeout
+	if infoTimeout <= 0 {
+		infoTimeout = 2 * time.Second // Fallback matches Init default
 	}
+	readDeadline := time.Now().Add(infoTimeout)
 
 	// Read response: first INFO frame has length, then N data frames.
 	payloadLen := -1
@@ -562,25 +837,25 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	resetBeforeCompletion := false
 
 	for {
-		if !readDeadline.IsZero() && time.Now().After(readDeadline) {
-			err = fmt.Errorf("enh info exchange deadline exceeded: %w", ebuserrors.ErrTimeout)
+		if time.Now().After(readDeadline) {
+			err := t.requestInfoFail(fmt.Errorf("enh info exchange deadline exceeded: %w", ebuserrors.ErrTimeout))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
 			return nil, err
 		}
-		if readDeadline.IsZero() {
-			err = t.conn.SetReadDeadline(time.Time{})
-		} else {
-			err = t.conn.SetReadDeadline(readDeadline)
-		}
-		if err != nil {
-			err = t.mapReadError(err)
-			return nil, err
+		if err := t.conn.SetReadDeadline(readDeadline); err != nil {
+			wrapped := t.requestInfoFail(t.mapReadError(err))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
 
-		var n int
-		n, err = t.conn.Read(t.buffer)
+		n, err := t.conn.Read(t.buffer)
 		if err != nil {
-			err = t.mapReadError(err)
-			return nil, err
+			wrapped := t.requestInfoFail(t.mapReadError(err))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
 		if n == 0 {
 			continue
@@ -612,49 +887,166 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					}
 				}
 			case ENHResReceived:
-				// Bus byte received during INFO — queue it.
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				// Bus byte received during INFO. If an async arbitration
+				// window is open, drop pre-grant bytes (same semantics as
+				// fillPendingLocked awaitingStart gate). Honor the window
+				// deadline so a lost STARTED/FAILED does not starve bytes
+				// for the full INFO timeout — only for the 500ms arbitration
+				// budget. After expiry, bytes fall through to normal queue.
+				if t.awaitingStart.Load() {
+					if t.arbitrationWindowExpired() {
+						t.awaitingStart.Store(false)
+						t.arbitrationDeadline.Store(0)
+						// Fall through: deliver this byte to pendingEvents.
+					} else {
+						continue
+					}
+				}
+				// Post-grant pre-echo window: suppress idle SYN bytes that
+				// arrive between arbitration grant and first real echo.
+				// Same pattern as fillPendingLocked — parity required so
+				// INFO-interleave path does not leak idle 0xAA as echo.
+				// Honor the deadline so a degenerate first-echo-is-0xAA
+				// case does not stall the read path indefinitely.
+				if t.postGrantPreEcho.Load() {
+					if t.postGrantPreEchoExpired() {
+						t.closePostGrantPreEchoWindow()
+						// Fall through: deliver this byte.
+					} else if msg.Data == ebusSymbolSyn {
+						continue
+					} else {
+						t.closePostGrantPreEchoWindow()
+					}
+				}
+				if len(t.pendingEvents) < maxPendingEvents {
+					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				}
+				// Drop when at cap — INFO is bounded by deadline anyway.
+			case ENHResStarted:
+				// Only a STARTED matching the expected initiator is OUR
+				// grant. Mismatched STARTED (another device won) keeps
+				// awaitingStart open — same policy as fillPendingLocked.
+				if t.awaitingStart.Load() && byte(t.awaitingStartInitiator.Load()) != msg.Data {
+					t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+					break
+				}
+				// Matching STARTED — close arbitration window, open
+				// post-grant pre-echo window, queue event.
+				t.awaitingStart.Store(false)
+				t.arbitrationDeadline.Store(0)
+				t.openPostGrantPreEchoWindow()
+				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			case ENHResFailed:
+				// FAILED = arbitration lost — no echo will follow, so
+				// don't open the pre-echo window (would suppress legit
+				// idle SYNs from the bus during collision backoff).
+				t.awaitingStart.Store(false)
+				t.arbitrationDeadline.Store(0)
+				t.closePostGrantPreEchoWindow()
+				t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
 				t.surfaceResetLocked()
 				if !payloadComplete {
 					resetBeforeCompletion = true
 				}
 			case ENHResErrorEBUS:
-				return nil, fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				err := t.requestInfoFail(fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload))
+				t.writeMu.Unlock()
+				t.readMu.Unlock()
+				return nil, err
 			case ENHResErrorHost:
-				return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
+				err := t.requestInfoFail(fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError))
+				t.writeMu.Unlock()
+				t.readMu.Unlock()
+				return nil, err
 			}
 		}
 
 		if resetBeforeCompletion {
-			err = fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrAdapterReset)
+			err := t.requestInfoFail(fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrAdapterReset))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
 			return nil, err
 		}
 		if payloadComplete {
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
 			return payload, nil
 		}
 		// Handle parse error only after processing valid messages.
 		if parseErr != nil {
-			t.parser.Reset()
-			return nil, parseErr
+			err := t.requestInfoFail(parseErr)
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, err
 		}
 	}
 }
 
-// Close closes the underlying connection. We snapshot t.conn under writeMu
-// to synchronize with reconnectLocked (which replaces t.conn under the same
-// lock), then close the snapshot outside the lock so a stalled Write does
-// not block shutdown. net.Conn.Close unblocks any pending Read or Write.
+// Close closes the underlying connection. We set the closed flag first so
+// all public methods bail out immediately, then snapshot the conn pointer
+// under connMu (not writeMu — a stalled Write holds writeMu and we must
+// not block behind it). net.Conn.Close is concurrent-safe and unblocks
+// any pending Read or Write.
 func (t *ENHTransport) Close() error {
-	t.writeMu.Lock()
+	t.closed.Store(true)
+	// Clear transport-state flags defensively (atomic — no lock needed).
+	// Any post-Close read is rejected by the closed flag; clearing these
+	// avoids stale state leaking if the transport is somehow reused.
+	t.awaitingStart.Store(false)
+	t.arbitrationDeadline.Store(0)
+	t.closePostGrantPreEchoWindow()
+	t.connMu.Lock()
 	conn := t.conn
-	t.writeMu.Unlock()
+	t.connMu.Unlock()
 	return conn.Close()
+}
+
+// appendControlEventLocked queues a control event (STARTED/FAILED/Reset)
+// that MUST NOT be silently dropped. If the pendingEvents cap is reached,
+// the oldest StreamEventByte is evicted to make room. Control events
+// preserve ordering relative to each other; byte ordering is preserved
+// among non-evicted bytes. Caller must hold readMu.
+func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
+	if len(t.pendingEvents) >= maxPendingEvents {
+		// Evict oldest byte event first (data is recoverable; gateway
+		// re-reads bus state). If no byte event exists (queue is all
+		// control events — pathological, e.g. repeated STARTED/FAILED/
+		// RESETTED under adapter fault), evict the oldest control event.
+		// This preserves the bounded-backpressure guarantee strictly
+		// while keeping the most recent control event (always more
+		// relevant than a stale one from an earlier arbitration cycle).
+		evicted := false
+		for i, existing := range t.pendingEvents {
+			if existing.Kind == StreamEventByte {
+				t.pendingEvents = append(t.pendingEvents[:i], t.pendingEvents[i+1:]...)
+				evicted = true
+				break
+			}
+		}
+		if !evicted {
+			// All control events — drop the oldest to bound memory.
+			t.pendingEvents = t.pendingEvents[1:]
+		}
+	}
+	t.pendingEvents = append(t.pendingEvents, ev)
 }
 
 func (t *ENHTransport) resetStateLocked() {
 	t.parser.Reset()
 	t.pendingEvents = nil
+	// Clear any deferred parse error — state discard means previously
+	// deferred errors from before this boundary are stale and must not
+	// leak into subsequent operations.
+	t.deferredErr = nil
+	// Clear async arbitration window — any pending RequestStart is
+	// invalidated by the reset (connection swap or lifecycle boundary).
+	t.awaitingStart.Store(false)
+	t.arbitrationDeadline.Store(0)
+	// Clear post-grant pre-echo window — lifecycle reset means any
+	// in-flight arbitration-echo correlation is broken; next write will
+	// open a fresh window if applicable.
+	t.closePostGrantPreEchoWindow()
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -671,6 +1063,11 @@ func (t *ENHTransport) fillPendingLocked() error {
 	if err != nil {
 		if isTimeout(err) {
 			t.parser.Reset() // EG9: clear any pending byte1 from partial frame
+			// Close async arbitration window on read timeout — if STARTED/
+			// FAILED didn't arrive, the RequestStart caller should treat
+			// this as a timed-out arbitration. Leaving awaitingStart set
+			// would silently drop RECEIVED bytes on subsequent reads.
+			t.awaitingStart.Store(false)
 		}
 		return t.mapReadError(err)
 	}
@@ -685,40 +1082,136 @@ func (t *ENHTransport) fillPendingLocked() error {
 	for _, msg := range msgs {
 		switch msg.Command {
 		case ENHResReceived:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+			// Drop RECEIVED bytes that arrive inside the async arbitration
+			// window — they are pre-grant bus traffic, not our echoes. The
+			// blocking StartArbitration clears pendingEvents after grant;
+			// this is the async-path equivalent (see awaitingStart doc).
+			// Force-close the window if its deadline expired (STARTED/
+			// FAILED was lost on a busy bus); remaining RECEIVED bytes
+			// from that point are delivered normally.
+			if t.awaitingStart.Load() {
+				if t.arbitrationWindowExpired() {
+					t.awaitingStart.Store(false)
+					t.arbitrationDeadline.Store(0)
+					// Fall through: deliver this byte to pendingEvents.
+				} else {
+					continue
+				}
+			}
+			// Post-grant pre-echo window: suppress idle SYN bytes that
+			// arrive between arbitration grant and the first real echo
+			// of our write. The first non-SYN byte closes the window so
+			// later legitimate 0xAA data bytes are delivered normally.
+			// The deadline closes the window if the first real echo
+			// happens to be 0xAA (would otherwise be suppressed forever).
+			// See postGrantPreEcho field doc.
+			if t.postGrantPreEcho.Load() {
+				if t.postGrantPreEchoExpired() {
+					t.closePostGrantPreEchoWindow()
+					// Fall through: deliver this byte.
+				} else if msg.Data == ebusSymbolSyn {
+					continue
+				} else {
+					t.closePostGrantPreEchoWindow()
+				}
+			}
+			if len(t.pendingEvents) < maxPendingEvents {
+				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+			}
 		case ENHResStarted:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+			// If an async arbitration window is open, only a STARTED that
+			// matches the expected initiator is OUR grant. STARTED with a
+			// different initiator means another device won arbitration (or
+			// a stale response from a prior session); keep the window open
+			// and let the arbitration deadline / real STARTED handle closure.
+			// Without this check, a mismatched STARTED would drop the
+			// pre-grant filter and subsequent RECEIVED bytes would be
+			// queued as if arbitration was granted — false echoes.
+			//
+			// Control events MUST NEVER be dropped — observers still see
+			// the STARTED via the never-drop path so they can correlate.
+			if t.awaitingStart.Load() && byte(t.awaitingStartInitiator.Load()) != msg.Data {
+				// Mismatch — keep awaitingStart open, queue event only.
+				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+				break
+			}
+			// Matching STARTED (or no window open) — close arbitration
+			// window, open post-grant pre-echo window, queue event.
+			t.awaitingStart.Store(false)
+			t.arbitrationDeadline.Store(0)
+			t.openPostGrantPreEchoWindow()
+			// Control events MUST NEVER be dropped — gateway/adaptermux
+			// wait for exactly one STARTED or FAILED per arbitration cycle.
+			// If the queue is full of byte events, evict the oldest byte
+			// events to make room. Control event ordering is preserved.
+			t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 		case ENHResFailed:
-			t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
+			// FAILED = arbitration lost; no echo will follow. Clear
+			// postGrantPreEcho (defensively) and do not open the window.
+			t.awaitingStart.Store(false)
+			t.arbitrationDeadline.Store(0)
+			t.closePostGrantPreEchoWindow()
+			t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
 			// Unsolicited INFO frames in the steady-state read are safely ignored.
 		case ENHResResetted:
+			// Always surface the reset boundary exactly once, regardless of
+			// whether the transport performs a TCP reconnect
+			// (XR_ENH_RESETTED_AlwaysSurfacesBoundary). The delivery channel
+			// differs between modes:
+			//   dialFunc != nil: reconnectLocked clears pendingEvents, so
+			//     the boundary is signaled via t.resets++ (ReadEvent converts
+			//     this into one StreamEventReset).
+			//   dialFunc == nil: no reconnect, pendingEvents is preserved,
+			//     so we queue one StreamEventReset directly.
 			if t.dialFunc != nil {
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					return fmt.Errorf("enh adapter reset during read, reconnect failed: %w", ebuserrors.ErrTransportClosed)
 				}
 				t.resets++
-				// Reconnected to fresh TCP — remaining msgs were
-				// parsed from the old stream and are stale.
+				// Reconnected to fresh TCP — remaining msgs in this batch
+				// were parsed from the old stream and are stale.
 				return nil
 			}
-			// Adapter-direct mode (no dialFunc): the adapter periodically
-			// sends RESETTED as a bus-level event. Do NOT signal this as
-			// ErrAdapterReset — that causes handleReset() which drains the
-			// active channel, cancels pending arbitrations, and disrupts
-			// the mux state machine. In adapter-direct mode the mux owns
-			// the TCP connection lifecycle and RESETTED is informational
-			// only — continue processing remaining msgs from the same batch.
+			// Adapter-direct mode: queue one StreamEventReset for ReadEvent
+			// consumers using the control-event path (never dropped under
+			// byte flood). Remaining msgs in the same batch continue to be
+			// processed — bus-level data after RESETTED is still valid.
+			// Clear post-grant pre-echo window: any in-flight arbitration
+			// correlation is invalidated by the adapter reset.
+			t.closePostGrantPreEchoWindow()
+			t.appendControlEventLocked(StreamEvent{Kind: StreamEventReset, Data: msg.Data})
 		}
 	}
 	if parseErr != nil {
 		if errors.Is(parseErr, ebuserrors.ErrInvalidPayload) {
-			// Parser desync: orphan byte2, missing byte2, or invalid command.
-			// Reset the parser to re-synchronize on the next valid byte1.
-			// Valid messages before the desync point have already been queued above.
+			// Parser desync: orphan byte2, missing byte2, or unknown command.
+			// Reset parser to re-synchronize on the next valid byte1.
 			t.parser.Reset()
-			return nil
+			// Always close the async arbitration window on a parse error —
+			// a malformed frame before STARTED/FAILED arrives means the
+			// START response is compromised and would never be recognized.
+			// Leaving awaitingStart=true would silently drop all subsequent
+			// RECEIVED bytes. Clear unconditionally, not only when observed
+			// set at this specific moment.
+			wasAwaiting := t.awaitingStart.Load()
+			t.awaitingStart.Store(false)
+			// During async arbitration, surface the error immediately — the
+			// RequestStart caller is waiting for a crisp STARTED/FAILED
+			// outcome, not a parse error delayed behind a byte backlog.
+			if wasAwaiting {
+				return parseErr
+			}
+			// Steady-state read: if valid messages were queued in this batch,
+			// defer the error so callers drain the queue first (no lost
+			// data), then surface the explicit protocol error on a subsequent
+			// call (XR_ENH_UnknownCommand_LivePath_ExplicitError).
+			if len(msgs) > 0 {
+				t.deferredErr = parseErr
+				return nil
+			}
+			return parseErr
 		}
 		return parseErr
 	}

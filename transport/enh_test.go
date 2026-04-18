@@ -166,22 +166,20 @@ func TestENHParser_ParseMixedValidAndCorrupt(t *testing.T) {
 	t.Parallel()
 
 	var parser transport.ENHParser
-	// Build a stream: valid data byte (0x10), then orphan byte2 (0x80, corrupt), then valid data byte (0x20).
+	// Stream: valid 0x10, orphan byte2 0x80 (corrupt), valid 0x20.
+	// Parse stops at first error — 0x20 after the violation is NOT delivered.
+	// Caller surfaces the error and re-parses the remaining buffer if needed.
 	data := []byte{0x10, 0x80, 0x20}
 
 	msgs, err := parser.Parse(data)
-	// Should return both valid messages AND the error.
 	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
 		t.Fatalf("Parse error = %v; want ErrInvalidPayload", err)
 	}
-	if len(msgs) != 2 {
-		t.Fatalf("Parse messages = %d; want 2 (valid bytes before and after corrupt)", len(msgs))
+	if len(msgs) != 1 {
+		t.Fatalf("Parse messages = %d; want 1 (only bytes before violation)", len(msgs))
 	}
 	if msgs[0].Data != 0x10 {
 		t.Fatalf("msg[0].Data = 0x%02x; want 0x10", msgs[0].Data)
-	}
-	if msgs[1].Data != 0x20 {
-		t.Fatalf("msg[1].Data = 0x%02x; want 0x20", msgs[1].Data)
 	}
 }
 
@@ -189,19 +187,16 @@ func TestENHParser_ParseCorruptThenValid(t *testing.T) {
 	t.Parallel()
 
 	var parser transport.ENHParser
-	// byte1 (0xC0) followed by invalid byte2 (0x01, not 0x80 mask) — corrupt frame.
-	// Then a valid data byte 0x42.
+	// byte1 (0xC0) followed by invalid byte2 (0x01) — corrupt frame.
+	// 0x42 after the violation is NOT delivered (Parse stops at first error).
 	data := []byte{0xC0, 0x01, 0x42}
 
 	msgs, err := parser.Parse(data)
 	if !errors.Is(err, ebuserrors.ErrInvalidPayload) {
 		t.Fatalf("Parse error = %v; want ErrInvalidPayload", err)
 	}
-	if len(msgs) != 1 {
-		t.Fatalf("Parse messages = %d; want 1", len(msgs))
-	}
-	if msgs[0].Data != 0x42 {
-		t.Fatalf("msg[0].Data = 0x%02x; want 0x42", msgs[0].Data)
+	if len(msgs) != 0 {
+		t.Fatalf("Parse messages = %d; want 0 (no bytes before violation)", len(msgs))
 	}
 }
 
