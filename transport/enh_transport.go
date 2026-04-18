@@ -682,73 +682,69 @@ func (t *ENHTransport) arbitrationWindowExpired() bool {
 //
 // Returns ErrTimeout if the response does not arrive within readTimeout.
 // Returns ErrAdapterReset if a RESETTED frame is received mid-exchange.
+// requestInfoFail performs the on-error cleanup for RequestInfo while both
+// readMu and writeMu are still held by the caller. This is intentionally
+// NOT a deferred function — deferred execution orders with writeMu.Unlock
+// create a race window where a blocked RequestStart can acquire writeMu,
+// set awaitingStart=true, and have that state stomped by the cleanup.
+// Keeping this synchronous and explicit, called before each error return
+// and BEFORE releasing writeMu, eliminates the race entirely.
+func (t *ENHTransport) requestInfoFail(err error) error {
+	t.parser.Reset()
+	t.deferredErr = nil
+	t.awaitingStart.Store(false)
+	t.arbitrationDeadline.Store(0)
+	// Preserve buffered events on timeout/error so they are not silently
+	// dropped. Clear pending on fatal transport errors and adapter resets
+	// where the parser state is unrecoverable or events from the same TCP
+	// segment after RESETTED would be stale.
+	if errors.Is(err, ebuserrors.ErrTransportClosed) || errors.Is(err, ebuserrors.ErrAdapterReset) {
+		t.pendingEvents = nil
+	}
+	return err
+}
+
 func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	if t.closed.Load() {
 		return nil, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
 	}
 	t.readMu.Lock()
-	defer t.readMu.Unlock()
-
-	// Hold writeMu for the entire INFO exchange (write + read) to prevent
-	// concurrent Write/RequestStart from interleaving bytes on the TCP
-	// stream during the response read phase. Close() does not need writeMu
-	// (uses connMu), so this does not block shutdown.
-	//
-	// IMPORTANT: writeMu is acquired and its Unlock deferred BEFORE the
-	// error-cleanup defer below. Go defers run LIFO — so on return, the
-	// cleanup defer runs FIRST (while writeMu is still held) and
-	// writeMu.Unlock runs SECOND. This prevents a race where a blocked
-	// RequestStart could acquire writeMu between the cleanup and unlock,
-	// set awaitingStart=true, and then have that state stomped back to
-	// false by the cleanup.
 	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-
-	var err error
-	var readDeadline time.Time
-	defer func() {
-		if err != nil {
-			t.parser.Reset()
-			t.deferredErr = nil
-			t.awaitingStart.Store(false)
-			// Preserve buffered events on timeout/error so they are not
-			// silently dropped. Clear pending on fatal transport errors and
-			// adapter resets where the parser state is unrecoverable or events
-			// from the same TCP segment after RESETTED would be stale.
-			if errors.Is(err, ebuserrors.ErrTransportClosed) || errors.Is(err, ebuserrors.ErrAdapterReset) {
-				t.pendingEvents = nil
-			}
-		}
-	}()
 
 	// Send the INFO request.
 	seq := EncodeENH(ENHReqInfo, byte(id))
 	written := 0
 	for written < len(seq) {
-		if err = t.setWriteDeadline(); err != nil {
-			err = t.mapWriteError(err)
-			return nil, err
+		if err := t.setWriteDeadline(); err != nil {
+			wrapped := t.requestInfoFail(t.mapWriteError(err))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
-		var n int
-		n, err = t.conn.Write(seq[written:])
+		n, err := t.conn.Write(seq[written:])
 		written += n
 		if err != nil {
-			err = t.mapWriteError(err)
-			return nil, err
+			wrapped := t.requestInfoFail(t.mapWriteError(err))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
 		if n == 0 {
 			break
 		}
 	}
 	if written != len(seq) {
-		err = fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload)
+		err := t.requestInfoFail(fmt.Errorf("enh info request write incomplete: %w", ebuserrors.ErrInvalidPayload))
+		t.writeMu.Unlock()
+		t.readMu.Unlock()
 		return nil, err
 	}
+
 	infoTimeout := t.readTimeout
 	if infoTimeout <= 0 {
 		infoTimeout = 2 * time.Second // Fallback matches Init default
 	}
-	readDeadline = time.Now().Add(infoTimeout)
+	readDeadline := time.Now().Add(infoTimeout)
 
 	// Read response: first INFO frame has length, then N data frames.
 	payloadLen := -1
@@ -758,20 +754,24 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 
 	for {
 		if time.Now().After(readDeadline) {
-			err = fmt.Errorf("enh info exchange deadline exceeded: %w", ebuserrors.ErrTimeout)
+			err := t.requestInfoFail(fmt.Errorf("enh info exchange deadline exceeded: %w", ebuserrors.ErrTimeout))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
 			return nil, err
 		}
-		err = t.conn.SetReadDeadline(readDeadline)
-		if err != nil {
-			err = t.mapReadError(err)
-			return nil, err
+		if err := t.conn.SetReadDeadline(readDeadline); err != nil {
+			wrapped := t.requestInfoFail(t.mapReadError(err))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
 
-		var n int
-		n, err = t.conn.Read(t.buffer)
+		n, err := t.conn.Read(t.buffer)
 		if err != nil {
-			err = t.mapReadError(err)
-			return nil, err
+			wrapped := t.requestInfoFail(t.mapReadError(err))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, wrapped
 		}
 		if n == 0 {
 			continue
@@ -820,9 +820,11 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				// control event via the never-drop path so event-aware
 				// consumers see it.
 				t.awaitingStart.Store(false)
+				t.arbitrationDeadline.Store(0)
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 			case ENHResFailed:
 				t.awaitingStart.Store(false)
+				t.arbitrationDeadline.Store(0)
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
 				t.surfaceResetLocked()
@@ -830,25 +832,35 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					resetBeforeCompletion = true
 				}
 			case ENHResErrorEBUS:
-				return nil, fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload)
+				err := t.requestInfoFail(fmt.Errorf("enh info ebus error 0x%02x: %w", msg.Data, ebuserrors.ErrInvalidPayload))
+				t.writeMu.Unlock()
+				t.readMu.Unlock()
+				return nil, err
 			case ENHResErrorHost:
-				return nil, fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError)
+				err := t.requestInfoFail(fmt.Errorf("enh info host error 0x%02x: %w", msg.Data, ebuserrors.ErrAdapterHostError))
+				t.writeMu.Unlock()
+				t.readMu.Unlock()
+				return nil, err
 			}
 		}
 
 		if resetBeforeCompletion {
-			err = fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrAdapterReset)
+			err := t.requestInfoFail(fmt.Errorf("enh adapter resetted during info request: %w", ebuserrors.ErrAdapterReset))
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
 			return nil, err
 		}
 		if payloadComplete {
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
 			return payload, nil
 		}
 		// Handle parse error only after processing valid messages.
 		if parseErr != nil {
-			t.parser.Reset()
-			t.deferredErr = nil
-			t.awaitingStart.Store(false)
-			return nil, parseErr
+			err := t.requestInfoFail(parseErr)
+			t.writeMu.Unlock()
+			t.readMu.Unlock()
+			return nil, err
 		}
 	}
 }
