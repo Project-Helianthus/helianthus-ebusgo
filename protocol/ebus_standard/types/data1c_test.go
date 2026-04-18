@@ -114,3 +114,27 @@ func TestDATA1c_EncodeOutOfRange(t *testing.T) {
 		t.Fatalf("want out_of_range for 200, got %+v", err)
 	}
 }
+
+func TestDATA1c_EncodeRejectsNonFinite(t *testing.T) {
+	codec := DATA1c{}
+	cases := []struct {
+		name string
+		in   float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+	}
+	for _, tc := range cases {
+		got, err := codec.Encode(tc.in)
+		if err == nil {
+			t.Fatalf("%s: want error, got bytes %v", tc.name, got)
+		}
+		if err.Code != ErrCodeOutOfRange {
+			t.Fatalf("%s: want out_of_range, got %+v", tc.name, err)
+		}
+		if got != nil {
+			t.Fatalf("%s: must not return bytes on non-finite input, got %v", tc.name, got)
+		}
+	}
+}

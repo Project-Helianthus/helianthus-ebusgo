@@ -40,6 +40,9 @@ func (DATA1c) Encode(value any) ([]byte, *DecodeError) {
 	if !ok {
 		return nil, newDecodeError(ErrCodeInvalidArgument, "DATA1c.Encode requires a numeric value")
 	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil, newDecodeError(ErrCodeOutOfRange, "DATA1c value must be finite (NaN/Inf rejected)")
+	}
 	if f < 0 {
 		return nil, newDecodeError(ErrCodeOutOfRange, "DATA1c value must be non-negative")
 	}
