@@ -12,10 +12,43 @@ type RawPayload struct {
 
 // Decode copies payload[:len(payload)] into Raw after enforcing bounds.
 func (r RawPayload) Decode(payload []byte) Value {
-	panic("ebus_standard/types.RawPayload.Decode: not implemented")
+	n := len(payload)
+	if n < r.MinLen {
+		return Value{Raw: cloneBytes(payload), Err: newDecodeError(ErrCodeTruncatedPayload, "raw payload shorter than MinLen")}
+	}
+	if r.MaxLen > 0 && n > r.MaxLen {
+		return Value{Raw: cloneBytes(payload), Err: newDecodeError(ErrCodeOverlongPayload, "raw payload longer than MaxLen")}
+	}
+	raw := cloneBytes(payload)
+	// Value carries a separate defensive copy so that consumers mutating it
+	// cannot disturb Value.Raw.
+	var val []byte
+	if raw != nil {
+		val = append([]byte(nil), raw...)
+	}
+	return Value{
+		Raw:   raw,
+		Value: val,
+		Valid: true,
+	}
 }
 
 // Encode validates length bounds and returns a defensive copy.
 func (r RawPayload) Encode(value any) ([]byte, *DecodeError) {
-	panic("ebus_standard/types.RawPayload.Encode: not implemented")
+	var data []byte
+	switch v := value.(type) {
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	default:
+		return nil, newDecodeError(ErrCodeInvalidArgument, "RawPayload.Encode requires []byte or string")
+	}
+	if len(data) < r.MinLen {
+		return nil, newDecodeError(ErrCodeTruncatedPayload, "raw payload shorter than MinLen")
+	}
+	if r.MaxLen > 0 && len(data) > r.MaxLen {
+		return nil, newDecodeError(ErrCodeOverlongPayload, "raw payload longer than MaxLen")
+	}
+	return cloneBytes(data), nil
 }
