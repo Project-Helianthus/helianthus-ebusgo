@@ -1,0 +1,97 @@
+package types
+
+import (
+	"bytes"
+	"testing"
+)
+
+func TestRawPayload_DecodePositive(t *testing.T) {
+	r := RawPayload{MinLen: 1, MaxLen: 8}
+	in := []byte{0x01, 0x02, 0x03}
+	got := r.Decode(in)
+	if !got.Valid {
+		t.Fatalf("unexpected invalid: %+v", got)
+	}
+	if !bytes.Equal(got.Raw, in) {
+		t.Fatalf("raw mismatch: %v vs %v", got.Raw, in)
+	}
+	v, ok := got.Value.([]byte)
+	if !ok {
+		t.Fatalf("want []byte, got %T", got.Value)
+	}
+	if !bytes.Equal(v, in) {
+		t.Fatalf("value mismatch: %v", v)
+	}
+}
+
+func TestRawPayload_DecodeZeroLengthPermitted(t *testing.T) {
+	r := RawPayload{MinLen: 0, MaxLen: 4}
+	got := r.Decode(nil)
+	if !got.Valid {
+		t.Fatalf("zero-length must decode: %+v", got)
+	}
+	if len(got.Raw) != 0 {
+		t.Fatalf("raw must be empty, got %v", got.Raw)
+	}
+}
+
+func TestRawPayload_DecodeZeroLengthForbidden(t *testing.T) {
+	r := RawPayload{MinLen: 1, MaxLen: 4}
+	got := r.Decode(nil)
+	if got.Err == nil || got.Err.Code != ErrCodeTruncatedPayload {
+		t.Fatalf("want truncated_payload, got %+v", got.Err)
+	}
+}
+
+func TestRawPayload_DecodeOverlong(t *testing.T) {
+	r := RawPayload{MinLen: 1, MaxLen: 3}
+	got := r.Decode([]byte{1, 2, 3, 4})
+	if got.Err == nil || got.Err.Code != ErrCodeOverlongPayload {
+		t.Fatalf("want overlong_payload, got %+v", got.Err)
+	}
+}
+
+func TestRawPayload_DecodeRawIsDefensiveCopy(t *testing.T) {
+	r := RawPayload{MinLen: 1, MaxLen: 4}
+	in := []byte{0x10, 0x20}
+	got := r.Decode(in)
+	if !got.Valid {
+		t.Fatalf("unexpected invalid")
+	}
+	in[0] = 0xFF
+	if got.Raw[0] != 0x10 {
+		t.Fatalf("Raw must be defensive copy, got %#x", got.Raw[0])
+	}
+}
+
+func TestRawPayload_EncodePositive(t *testing.T) {
+	r := RawPayload{MinLen: 1, MaxLen: 4}
+	out, err := r.Encode([]byte{1, 2, 3})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !bytes.Equal(out, []byte{1, 2, 3}) {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestRawPayload_EncodeTooShort(t *testing.T) {
+	r := RawPayload{MinLen: 2, MaxLen: 4}
+	if _, err := r.Encode([]byte{1}); err == nil || err.Code != ErrCodeTruncatedPayload {
+		t.Fatalf("want truncated, got %+v", err)
+	}
+}
+
+func TestRawPayload_EncodeTooLong(t *testing.T) {
+	r := RawPayload{MinLen: 1, MaxLen: 2}
+	if _, err := r.Encode([]byte{1, 2, 3}); err == nil || err.Code != ErrCodeOverlongPayload {
+		t.Fatalf("want overlong, got %+v", err)
+	}
+}
+
+func TestRawPayload_EncodeWrongType(t *testing.T) {
+	r := RawPayload{MinLen: 0, MaxLen: 4}
+	if _, err := r.Encode(42); err == nil || err.Code != ErrCodeInvalidArgument {
+		t.Fatalf("want invalid_argument, got %+v", err)
+	}
+}
