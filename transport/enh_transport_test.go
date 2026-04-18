@@ -3853,3 +3853,53 @@ func TestENHTransport_RequestInfo_PostGrantSYNSuppressed(t *testing.T) {
 		t.Fatalf("ReadByte = 0x%02x; want 0x15 (idle SYN leaked via INFO path!)", b)
 	}
 }
+
+// TestENHTransport_PostGrantWindow_DeadlineExpiresWithSYNEcho verifies
+// the degenerate case where the first real echo after STARTED happens
+// to be 0xAA. Without the deadline, that echo would be suppressed
+// forever (window stays open waiting for a non-SYN byte), and ReadByte
+// would stall. With the deadline, the window expires, the 0xAA is
+// delivered as data, and the read path progresses. Copilot P1
+// (3105413090) on PR #135.
+func TestENHTransport_PostGrantWindow_DeadlineExpiresWithSYNEcho(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	initiator := byte(0x71)
+
+	// Batch 1: STARTED (opens postGrantPreEcho).
+	// Sleep past the 50ms deadline.
+	// Batch 2: RECEIVED(0xAA) — must be delivered, not suppressed.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		_, _ = server.Write(started[:])
+
+		// Sleep past 50ms postGrantPreEchoTimeout.
+		time.Sleep(100 * time.Millisecond)
+
+		// After deadline, 0xAA should be delivered as data.
+		syn := transport.EncodeENH(transport.ENHResReceived, 0xAA)
+		_, _ = server.Write(syn[:])
+	}()
+
+	if err := enh.StartArbitration(initiator); err != nil {
+		t.Fatalf("StartArbitration error = %v", err)
+	}
+
+	// ReadByte should return 0xAA — the deadline expired, so the window
+	// closed and the byte passes through as legitimate data.
+	got, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte = %v; want 0xAA (deadline should have expired)", err)
+	}
+	if got != 0xAA {
+		t.Fatalf("ReadByte = 0x%02x; want 0xAA", got)
+	}
+}

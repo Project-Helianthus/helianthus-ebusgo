@@ -30,6 +30,21 @@ const maxPendingEvents = 256
 // RECEIVED keeps arriving.
 const arbitrationWindowTimeout = 500 * time.Millisecond
 
+// postGrantPreEchoTimeout bounds the post-grant pre-echo window opened by
+// STARTED. Inside this window, RECEIVED(0xAA) bytes are treated as idle
+// SYN from the eBUS wire and suppressed so they don't leak as echoes of
+// the bus layer's first write. The window closes on: (a) the first
+// non-SYN RECEIVED (the real echo, normal case), or (b) this deadline.
+//
+// Deadline prevents a degenerate case where the first legitimate echo
+// happens to be 0xAA (for example, a frame whose first post-arbitration
+// byte is 0xAA) — without a deadline, that echo would be suppressed,
+// the window would never close, and the write path would stall. 50ms is
+// well above TCP latency between STARTED and our first Write returning
+// from conn.Write, but short enough to not materially affect protocol
+// timing (a full eBUS transaction is bounded by larger timeouts).
+const postGrantPreEchoTimeout = 50 * time.Millisecond
+
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
 
@@ -94,18 +109,23 @@ type ENHTransport struct {
 	// arbitration window. While set, fillPendingLocked suppresses any
 	// RECEIVED(0xAA) idle SYN bytes that arrive on the wire between the
 	// arbitration grant and the first real echo from our next write.
-	// Cleared on the first non-SYN RECEIVED byte (the real echo), or on
-	// parser reset / reconnect / error lifecycle boundaries.
+	// Cleared on: (a) the first non-SYN RECEIVED byte (the real echo,
+	// normal case), (b) postGrantPreEchoDeadline expiry, (c) parser
+	// reset / reconnect / error lifecycle boundaries.
 	//
 	// Root cause: eBUS wire goes idle (0xAA SYN) after STARTED is sent
 	// by the adapter; our bus layer then writes the first byte (DST),
 	// but the adapter may emit RECEIVED(0xAA) for idle ticks before
 	// echoing our write. sendRawWithEcho reads the queued 0xAA thinking
 	// it's the echo of DST → echo mismatch error. Suppressing idle SYN
-	// during this brief window eliminates the mismatch without affecting
-	// legitimate 0xAA data bytes within a transaction (which arrive
-	// after the first non-SYN RECEIVED clears this flag).
-	postGrantPreEcho atomic.Bool
+	// during this brief window eliminates the mismatch.
+	//
+	// Deadline covers the degenerate case where the first legit echo
+	// happens to be 0xAA — without it, that echo would be suppressed,
+	// the window would never close, and reads would stall. See
+	// postGrantPreEchoTimeout for timing rationale.
+	postGrantPreEcho         atomic.Bool
+	postGrantPreEchoDeadline atomic.Int64
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -628,9 +648,9 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			// write's echo are suppressed. On failure/error, clear it
 			// defensively.
 			if arbitrationErr == nil {
-				t.postGrantPreEcho.Store(true)
+				t.openPostGrantPreEchoWindow()
 			} else {
-				t.postGrantPreEcho.Store(false)
+				t.closePostGrantPreEchoWindow()
 			}
 			return arbitrationErr
 		}
@@ -701,6 +721,35 @@ func (t *ENHTransport) arbitrationWindowExpired() bool {
 	return time.Now().UnixNano() >= deadline
 }
 
+// openPostGrantPreEchoWindow sets the postGrantPreEcho flag + deadline.
+// Called from STARTED handling on all code paths (blocking StartArbitration,
+// fillPendingLocked, RequestInfo) so the SYN-suppression window is opened
+// consistently with the deadline that bounds it.
+func (t *ENHTransport) openPostGrantPreEchoWindow() {
+	t.postGrantPreEchoDeadline.Store(time.Now().Add(postGrantPreEchoTimeout).UnixNano())
+	t.postGrantPreEcho.Store(true)
+}
+
+// closePostGrantPreEchoWindow clears the flag + deadline atomically.
+// Called when the real echo arrives (first non-SYN), on FAILED, or on any
+// lifecycle reset boundary.
+func (t *ENHTransport) closePostGrantPreEchoWindow() {
+	t.postGrantPreEcho.Store(false)
+	t.postGrantPreEchoDeadline.Store(0)
+}
+
+// postGrantPreEchoExpired reports whether the post-grant pre-echo window
+// deadline has passed. Returns true even if the flag is still set — the
+// caller should close the window and deliver the byte rather than
+// suppress it.
+func (t *ENHTransport) postGrantPreEchoExpired() bool {
+	deadline := t.postGrantPreEchoDeadline.Load()
+	if deadline == 0 {
+		return false
+	}
+	return time.Now().UnixNano() >= deadline
+}
+
 // RequestInfo sends an INFO request for the given ID and returns the raw
 // response payload. The exchange is transport-exclusive: both readMu and writeMu
 // are held for the duration to prevent interleaving with bus operations.
@@ -719,7 +768,7 @@ func (t *ENHTransport) requestInfoFail(err error) error {
 	t.deferredErr = nil
 	t.awaitingStart.Store(false)
 	t.arbitrationDeadline.Store(0)
-	t.postGrantPreEcho.Store(false)
+	t.closePostGrantPreEchoWindow()
 	// Preserve buffered events on timeout/error so they are not silently
 	// dropped. Clear pending on fatal transport errors and adapter resets
 	// where the parser state is unrecoverable or events from the same TCP
@@ -848,11 +897,17 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				// arrive between arbitration grant and first real echo.
 				// Same pattern as fillPendingLocked — parity required so
 				// INFO-interleave path does not leak idle 0xAA as echo.
+				// Honor the deadline so a degenerate first-echo-is-0xAA
+				// case does not stall the read path indefinitely.
 				if t.postGrantPreEcho.Load() {
-					if msg.Data == ebusSymbolSyn {
+					if t.postGrantPreEchoExpired() {
+						t.closePostGrantPreEchoWindow()
+						// Fall through: deliver this byte.
+					} else if msg.Data == ebusSymbolSyn {
 						continue
+					} else {
+						t.closePostGrantPreEchoWindow()
 					}
-					t.postGrantPreEcho.Store(false)
 				}
 				if len(t.pendingEvents) < maxPendingEvents {
 					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
@@ -867,7 +922,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				// to suppress idle SYN between grant and first real echo.
 				t.awaitingStart.Store(false)
 				t.arbitrationDeadline.Store(0)
-				t.postGrantPreEcho.Store(true)
+				t.openPostGrantPreEchoWindow()
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 			case ENHResFailed:
 				// FAILED = arbitration lost — no echo will follow, so
@@ -875,7 +930,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				// idle SYNs from the bus during collision backoff).
 				t.awaitingStart.Store(false)
 				t.arbitrationDeadline.Store(0)
-				t.postGrantPreEcho.Store(false)
+				t.closePostGrantPreEchoWindow()
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
 				t.surfaceResetLocked()
@@ -928,7 +983,7 @@ func (t *ENHTransport) Close() error {
 	// avoids stale state leaking if the transport is somehow reused.
 	t.awaitingStart.Store(false)
 	t.arbitrationDeadline.Store(0)
-	t.postGrantPreEcho.Store(false)
+	t.closePostGrantPreEchoWindow()
 	t.connMu.Lock()
 	conn := t.conn
 	t.connMu.Unlock()
@@ -979,7 +1034,7 @@ func (t *ENHTransport) resetStateLocked() {
 	// Clear post-grant pre-echo window — lifecycle reset means any
 	// in-flight arbitration-echo correlation is broken; next write will
 	// open a fresh window if applicable.
-	t.postGrantPreEcho.Store(false)
+	t.closePostGrantPreEchoWindow()
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -1033,14 +1088,20 @@ func (t *ENHTransport) fillPendingLocked() error {
 			}
 			// Post-grant pre-echo window: suppress idle SYN bytes that
 			// arrive between arbitration grant and the first real echo
-			// of our write. The first non-SYN byte is the real echo and
-			// closes the window so later legitimate 0xAA data bytes are
-			// delivered normally. See postGrantPreEcho field doc.
+			// of our write. The first non-SYN byte closes the window so
+			// later legitimate 0xAA data bytes are delivered normally.
+			// The deadline closes the window if the first real echo
+			// happens to be 0xAA (would otherwise be suppressed forever).
+			// See postGrantPreEcho field doc.
 			if t.postGrantPreEcho.Load() {
-				if msg.Data == ebusSymbolSyn {
+				if t.postGrantPreEchoExpired() {
+					t.closePostGrantPreEchoWindow()
+					// Fall through: deliver this byte.
+				} else if msg.Data == ebusSymbolSyn {
 					continue
+				} else {
+					t.closePostGrantPreEchoWindow()
 				}
-				t.postGrantPreEcho.Store(false)
 			}
 			if len(t.pendingEvents) < maxPendingEvents {
 				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
@@ -1052,7 +1113,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// grant and first real echo.
 			t.awaitingStart.Store(false)
 			t.arbitrationDeadline.Store(0)
-			t.postGrantPreEcho.Store(true)
+			t.openPostGrantPreEchoWindow()
 			// Control events MUST NEVER be dropped — gateway/adaptermux
 			// wait for exactly one STARTED or FAILED per arbitration cycle.
 			// If the queue is full of byte events, evict the oldest byte
@@ -1063,7 +1124,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// postGrantPreEcho (defensively) and do not open the window.
 			t.awaitingStart.Store(false)
 			t.arbitrationDeadline.Store(0)
-			t.postGrantPreEcho.Store(false)
+			t.closePostGrantPreEchoWindow()
 			t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
@@ -1093,7 +1154,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// processed — bus-level data after RESETTED is still valid.
 			// Clear post-grant pre-echo window: any in-flight arbitration
 			// correlation is invalidated by the adapter reset.
-			t.postGrantPreEcho.Store(false)
+			t.closePostGrantPreEchoWindow()
 			t.appendControlEventLocked(StreamEvent{Kind: StreamEventReset, Data: msg.Data})
 		}
 	}
