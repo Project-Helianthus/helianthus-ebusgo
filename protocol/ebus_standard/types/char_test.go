@@ -2,6 +2,7 @@ package types
 
 import (
 	"bytes"
+	"math"
 	"testing"
 )
 
@@ -64,6 +65,26 @@ func TestCHARSigned_EncodeRange(t *testing.T) {
 	}
 	if _, err := codec.Encode(-129); err == nil || err.Code != ErrCodeOutOfRange {
 		t.Fatalf("want out_of_range, got %+v", err)
+	}
+}
+
+func TestCHARSigned_EncodeRejectsUintOverflow(t *testing.T) {
+	// uint values above math.MaxInt64 must not wrap through int64 to valid
+	// signed bytes. toInt64 must reject them, and CHARSigned.Encode must
+	// surface an invalid_argument error rather than emit bytes.
+	codec := CHARSigned{}
+	huge := uint(math.MaxInt64) + 1 // only meaningful on 64-bit; on 32-bit uint MaxInt64+1 overflows to 0, still rejected as out-of-range below
+	got, err := codec.Encode(huge)
+	if err == nil {
+		t.Fatalf("want error for uint > MaxInt64, got bytes %v", got)
+	}
+	if got != nil {
+		t.Fatalf("must not return bytes on overflow, got %v", got)
+	}
+	// Either invalid_argument (toInt64 rejects) or out_of_range (32-bit path)
+	// is acceptable; silently emitting a byte is not.
+	if err.Code != ErrCodeInvalidArgument && err.Code != ErrCodeOutOfRange {
+		t.Fatalf("want invalid_argument or out_of_range, got %+v", err)
 	}
 }
 

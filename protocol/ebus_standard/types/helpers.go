@@ -1,5 +1,7 @@
 package types
 
+import "math"
+
 // toInt64 normalises common Go integer types to int64. Floats and strings
 // are rejected so that encode rules remain strict.
 func toInt64(v any) (int64, bool) {
@@ -15,6 +17,9 @@ func toInt64(v any) (int64, bool) {
 	case int64:
 		return t, true
 	case uint:
+		if uint64(t) > math.MaxInt64 {
+			return 0, false
+		}
 		return int64(t), true
 	case uint8:
 		return int64(t), true
