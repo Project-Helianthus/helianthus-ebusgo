@@ -805,9 +805,18 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 			case ENHResReceived:
 				// Bus byte received during INFO. If an async arbitration
 				// window is open, drop pre-grant bytes (same semantics as
-				// fillPendingLocked awaitingStart gate).
+				// fillPendingLocked awaitingStart gate). Honor the window
+				// deadline so a lost STARTED/FAILED does not starve bytes
+				// for the full INFO timeout — only for the 500ms arbitration
+				// budget. After expiry, bytes fall through to normal queue.
 				if t.awaitingStart.Load() {
-					continue
+					if t.arbitrationWindowExpired() {
+						t.awaitingStart.Store(false)
+						t.arbitrationDeadline.Store(0)
+						// Fall through: deliver this byte to pendingEvents.
+					} else {
+						continue
+					}
 				}
 				if len(t.pendingEvents) < maxPendingEvents {
 					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})

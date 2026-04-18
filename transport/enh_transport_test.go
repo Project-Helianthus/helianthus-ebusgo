@@ -3504,3 +3504,75 @@ func TestENHTransport_RequestInfoCleanupBeforeWriteMuUnlock(t *testing.T) {
 		t.Fatalf("ReadByte error = %v; want ErrTimeout (pre-grant filter active)", err)
 	}
 }
+
+// TestENHTransport_RequestInfo_ArbitrationWindowExpires verifies that
+// RequestInfo's awaitingStart gate honors the arbitration window deadline.
+// Without the deadline check, RequestInfo drops RECEIVED bytes for the
+// entire INFO timeout (up to 2s) when STARTED/FAILED is lost — much
+// longer than the 500ms arbitration budget enforced in fillPendingLocked.
+// Copilot P2 (3105228034) on PR #135.
+func TestENHTransport_RequestInfo_ArbitrationWindowExpires(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	// INFO timeout 3s so we clearly distinguish arbitration window
+	// expiry (500ms) from INFO timeout.
+	enh := transport.NewENHTransport(client, 3*time.Second, 3*time.Second)
+
+	// Server:
+	// 1. Consume START request (from RequestStart).
+	// 2. Consume INFO request.
+	// 3. Sleep past arbitration window (700ms) — no STARTED/FAILED ever.
+	// 4. Send RECEIVED(0xC3) — must pass through RequestInfo's gate.
+	// 5. Complete the INFO response.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf) // START
+		_, _ = io.ReadFull(server, buf) // INFO
+
+		time.Sleep(700 * time.Millisecond)
+
+		// Post-expiry RECEIVED + valid INFO response.
+		recv := transport.EncodeENH(transport.ENHResReceived, 0xC3)
+		length := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		data := transport.EncodeENH(transport.ENHResInfo, 0x42)
+		payload := append([]byte(nil), recv[:]...)
+		payload = append(payload, length[:]...)
+		payload = append(payload, data[:]...)
+		_, _ = server.Write(payload)
+	}()
+
+	if err := enh.RequestStart(0x10); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	infoStart := time.Now()
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	infoElapsed := time.Since(infoStart)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v", err)
+	}
+	if len(got) != 1 || got[0] != 0x42 {
+		t.Fatalf("RequestInfo payload = %v; want [0x42]", got)
+	}
+
+	// RequestInfo should complete quickly after the server's write
+	// (well under the 3s INFO timeout). Generous bound of 2s.
+	if infoElapsed >= 2*time.Second {
+		t.Fatalf("RequestInfo took %v; want < 2s (window deadline should have expired at 500ms)", infoElapsed)
+	}
+
+	// After RequestInfo completes, the 0xC3 RECEIVED byte must be
+	// deliverable via ReadByte — it was queued post-expiry because the
+	// arbitration window had already closed when it was processed.
+	b, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after RequestInfo = %v; want 0xC3 (post-expiry byte queued)", err)
+	}
+	if b != 0xC3 {
+		t.Fatalf("ReadByte = 0x%02x; want 0xC3", b)
+	}
+}
