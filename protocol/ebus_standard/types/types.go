@@ -20,16 +20,16 @@ package types
 type ErrorCode string
 
 const (
-	ErrCodeTruncatedPayload       ErrorCode = "truncated_payload"
-	ErrCodeOverlongPayload        ErrorCode = "overlong_payload"
-	ErrCodeOutOfRange             ErrorCode = "out_of_range"
-	ErrCodeInvalidNibble          ErrorCode = "invalid_nibble"
-	ErrCodeAmbiguousSelector      ErrorCode = "ambiguous_selector_branch"
-	ErrCodeUnknownSelector        ErrorCode = "unknown_selector_branch"
-	ErrCodeInvalidRoundTrip       ErrorCode = "invalid_round_trip"
-	ErrCodeEncodesReplacement     ErrorCode = "encodes_replacement_value"
-	ErrCodeFixedWidthExceeded     ErrorCode = "fixed_width_exceeded"
-	ErrCodeInvalidArgument        ErrorCode = "invalid_argument"
+	ErrCodeTruncatedPayload   ErrorCode = "truncated_payload"
+	ErrCodeOverlongPayload    ErrorCode = "overlong_payload"
+	ErrCodeOutOfRange         ErrorCode = "out_of_range"
+	ErrCodeInvalidNibble      ErrorCode = "invalid_nibble"
+	ErrCodeAmbiguousSelector  ErrorCode = "ambiguous_selector_branch"
+	ErrCodeUnknownSelector    ErrorCode = "unknown_selector_branch"
+	ErrCodeInvalidRoundTrip   ErrorCode = "invalid_round_trip"
+	ErrCodeEncodesReplacement ErrorCode = "encodes_replacement_value"
+	ErrCodeFixedWidthExceeded ErrorCode = "fixed_width_exceeded"
+	ErrCodeInvalidArgument    ErrorCode = "invalid_argument"
 )
 
 // DecodeError is the structured error type for 02-l7-types.md decode failures.

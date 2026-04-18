@@ -69,9 +69,9 @@ func (c BCDComposite) Decode(payload []byte) Value {
 	raw := cloneBytes(payload)
 	parts := make([]Value, width)
 	var (
-		firstErr        *DecodeError
-		anyReplacement  bool
-		anyInvalid      bool
+		firstErr       *DecodeError
+		anyReplacement bool
+		anyInvalid     bool
 	)
 	for i := 0; i < width; i++ {
 		partRaw := []byte{raw[i]}

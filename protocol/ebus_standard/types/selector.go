@@ -52,11 +52,11 @@ type SelectorResult struct {
 //     against payload-buffer truncation before invoking Match.
 //  3. Zero matches:
 //     - If at least one branch's window contains LengthPrefix but Match
-//       rejected, return unknown_selector_branch.
+//     rejected, return unknown_selector_branch.
 //     - If LengthPrefix is shorter than every branch's MinLen, return
-//       truncated_payload.
+//     truncated_payload.
 //     - If LengthPrefix exceeds every branch's MaxLen (and none allow raw
-//       tail), return overlong_payload.
+//     tail), return overlong_payload.
 //     - Otherwise return unknown_selector_branch.
 //  4. Multiple matches → ambiguous_selector_branch.
 //  5. One match → payload-buffer length sanity check (truncation /
