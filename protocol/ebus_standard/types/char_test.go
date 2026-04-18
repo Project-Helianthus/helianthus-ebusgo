@@ -115,7 +115,8 @@ func TestCHARText_EncodePadsRight(t *testing.T) {
 }
 
 func TestCHARText_EncodeCustomPad(t *testing.T) {
-	c := CHARText{Width: 3, Pad: 0x00}
+	nul := byte(0x00)
+	c := CHARText{Width: 3, Pad: &nul}
 	got, err := c.Encode("A")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)

@@ -12,10 +12,27 @@ func (BYTE) Size() int { return 1 }
 
 // Decode parses a single unsigned byte.
 func (BYTE) Decode(payload []byte) Value {
-	panic("ebus_standard/types.BYTE.Decode: not implemented")
+	if len(payload) == 0 {
+		return Value{Raw: nil, Err: newDecodeError(ErrCodeTruncatedPayload, "BYTE requires 1 byte")}
+	}
+	if len(payload) > 1 {
+		return Value{Raw: cloneBytes(payload), Err: newDecodeError(ErrCodeOverlongPayload, "BYTE consumes exactly 1 byte")}
+	}
+	return Value{
+		Raw:   cloneBytes(payload),
+		Value: payload[0],
+		Valid: true,
+	}
 }
 
 // Encode serialises an integer in [0,255] as a single byte.
 func (BYTE) Encode(value any) ([]byte, *DecodeError) {
-	panic("ebus_standard/types.BYTE.Encode: not implemented")
+	i, ok := toInt64(value)
+	if !ok {
+		return nil, newDecodeError(ErrCodeInvalidArgument, "BYTE.Encode requires an integer")
+	}
+	if i < 0 || i > 255 {
+		return nil, newDecodeError(ErrCodeOutOfRange, "BYTE value must be in [0,255]")
+	}
+	return []byte{byte(i)}, nil
 }
