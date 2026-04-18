@@ -3903,3 +3903,81 @@ func TestENHTransport_PostGrantWindow_DeadlineExpiresWithSYNEcho(t *testing.T) {
 		t.Fatalf("ReadByte = 0x%02x; want 0xAA", got)
 	}
 }
+
+// TestENHTransport_RequestStart_MismatchedSTARTEDKeepsWindowOpen verifies
+// that fillPendingLocked does NOT close the awaitingStart window when a
+// STARTED with a different initiator arrives. Copilot P1 (3105430094):
+// async path must only grant on a matching STARTED. A STARTED(Y) after
+// RequestStart(X) where Y≠X means another device won arbitration (or a
+// stale response); the window must stay open until a matching STARTED,
+// FAILED, or deadline.
+func TestENHTransport_RequestStart_MismatchedSTARTEDKeepsWindowOpen(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	ourInitiator := byte(0x71)
+	otherInitiator := byte(0x30)
+
+	// Server:
+	// 1. Consume START request for 0x71.
+	// 2. Send STARTED(0x30) — mismatched. Should NOT close our window.
+	// 3. Send RECEIVED(0x55) — should be dropped as pre-grant (window still open).
+	// 4. Send STARTED(0x71) — our real grant. Closes window.
+	// 5. Send RECEIVED(0x42) — post-grant echo (normal delivery).
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		mismatched := transport.EncodeENH(transport.ENHResStarted, otherInitiator)
+		preGrantByte := transport.EncodeENH(transport.ENHResReceived, 0x55)
+		ourGrant := transport.EncodeENH(transport.ENHResStarted, ourInitiator)
+		postGrantByte := transport.EncodeENH(transport.ENHResReceived, 0x42)
+
+		payload := append([]byte(nil), mismatched[:]...)
+		payload = append(payload, preGrantByte[:]...)
+		payload = append(payload, ourGrant[:]...)
+		payload = append(payload, postGrantByte[:]...)
+		_, _ = server.Write(payload)
+	}()
+
+	if err := enh.RequestStart(ourInitiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	reader := interface{}(enh).(transport.StreamEventReader)
+
+	// Event 1: mismatched STARTED(0x30) observer event (window stays open).
+	ev, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent[0] error = %v", err)
+	}
+	if ev.Kind != transport.StreamEventStarted || ev.Data != otherInitiator {
+		t.Fatalf("ReadEvent[0] = %+v; want StreamEventStarted(0x%02x)", ev, otherInitiator)
+	}
+
+	// Event 2: matching STARTED(0x71) (the pre-grant 0x55 was dropped).
+	ev, err = reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent[1] error = %v", err)
+	}
+	if ev.Kind != transport.StreamEventStarted || ev.Data != ourInitiator {
+		t.Fatalf("ReadEvent[1] = %+v; want StreamEventStarted(0x%02x)", ev, ourInitiator)
+	}
+
+	// Event 3: post-grant byte 0x42.
+	ev, err = reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent[2] error = %v", err)
+	}
+	if ev.Kind != transport.StreamEventByte || ev.Byte != 0x42 {
+		t.Fatalf("ReadEvent[2] = %+v; want StreamEventByte(0x42)", ev)
+	}
+
+	// The 0x55 pre-grant byte between mismatched STARTED and our real
+	// STARTED must NOT be in the event stream — it was dropped because
+	// awaitingStart was still true.
+}

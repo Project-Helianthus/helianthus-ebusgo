@@ -99,6 +99,14 @@ type ENHTransport struct {
 	// StartArbitration clears pendingEvents after grant, but the async
 	// path needs this in-window drop to achieve the same invariant.
 	awaitingStart atomic.Bool
+	// awaitingStartInitiator holds the initiator byte RequestStart is
+	// waiting a grant for. STARTED frames with a different Data are
+	// NOT our grant (another device won or a stale response); the async
+	// path must keep awaitingStart open until a matching STARTED, FAILED,
+	// or the arbitration deadline expires. Stored as uint32 so we can
+	// use atomic.Uint32 (byte in low bits). Only valid when
+	// awaitingStart.Load() is true.
+	awaitingStartInitiator atomic.Uint32
 	// arbitrationDeadline is the absolute time after which awaitingStart
 	// is force-closed even if no STARTED/FAILED arrives. Prevents permanent
 	// starvation on a busy bus where RECEIVED keeps arriving (no read
@@ -695,6 +703,7 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 	// On Write failure we roll back with Store(false) so no false window
 	// persists after a blocked/failed write.
 	t.arbitrationDeadline.Store(time.Now().Add(arbitrationWindowTimeout).UnixNano())
+	t.awaitingStartInitiator.Store(uint32(initiator))
 	t.awaitingStart.Store(true)
 	n, err := t.conn.Write(seq[:])
 	if err != nil {
@@ -914,12 +923,15 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				}
 				// Drop when at cap — INFO is bounded by deadline anyway.
 			case ENHResStarted:
-				// Async arbitration grant observed while consuming INFO.
-				// Close the arbitration window so subsequent RECEIVED
-				// bytes are delivered (no silent deadlock). Queue the
-				// control event via the never-drop path so event-aware
-				// consumers see it. Open the post-grant pre-echo window
-				// to suppress idle SYN between grant and first real echo.
+				// Only a STARTED matching the expected initiator is OUR
+				// grant. Mismatched STARTED (another device won) keeps
+				// awaitingStart open — same policy as fillPendingLocked.
+				if t.awaitingStart.Load() && byte(t.awaitingStartInitiator.Load()) != msg.Data {
+					t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+					break
+				}
+				// Matching STARTED — close arbitration window, open
+				// post-grant pre-echo window, queue event.
 				t.awaitingStart.Store(false)
 				t.arbitrationDeadline.Store(0)
 				t.openPostGrantPreEchoWindow()
@@ -1107,10 +1119,24 @@ func (t *ENHTransport) fillPendingLocked() error {
 				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 			}
 		case ENHResStarted:
-			// Arbitration window closed — subsequent RECEIVED bytes are
-			// post-grant echoes and must be queued normally. Open the
-			// post-grant pre-echo window to suppress idle SYN between
-			// grant and first real echo.
+			// If an async arbitration window is open, only a STARTED that
+			// matches the expected initiator is OUR grant. STARTED with a
+			// different initiator means another device won arbitration (or
+			// a stale response from a prior session); keep the window open
+			// and let the arbitration deadline / real STARTED handle closure.
+			// Without this check, a mismatched STARTED would drop the
+			// pre-grant filter and subsequent RECEIVED bytes would be
+			// queued as if arbitration was granted — false echoes.
+			//
+			// Control events MUST NEVER be dropped — observers still see
+			// the STARTED via the never-drop path so they can correlate.
+			if t.awaitingStart.Load() && byte(t.awaitingStartInitiator.Load()) != msg.Data {
+				// Mismatch — keep awaitingStart open, queue event only.
+				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
+				break
+			}
+			// Matching STARTED (or no window open) — close arbitration
+			// window, open post-grant pre-echo window, queue event.
 			t.awaitingStart.Store(false)
 			t.arbitrationDeadline.Store(0)
 			t.openPostGrantPreEchoWindow()
