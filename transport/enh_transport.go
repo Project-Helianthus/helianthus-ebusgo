@@ -844,6 +844,16 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						continue
 					}
 				}
+				// Post-grant pre-echo window: suppress idle SYN bytes that
+				// arrive between arbitration grant and first real echo.
+				// Same pattern as fillPendingLocked — parity required so
+				// INFO-interleave path does not leak idle 0xAA as echo.
+				if t.postGrantPreEcho.Load() {
+					if msg.Data == ebusSymbolSyn {
+						continue
+					}
+					t.postGrantPreEcho.Store(false)
+				}
 				if len(t.pendingEvents) < maxPendingEvents {
 					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
 				}

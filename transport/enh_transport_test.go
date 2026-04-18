@@ -3787,3 +3787,69 @@ func TestENHTransport_PostGrantWindow_ClearedOnFailed(t *testing.T) {
 		t.Fatalf("ReadByte = 0x%02x; want 0xAA (legit bus SYN suppressed after FAILED)", got)
 	}
 }
+
+// TestENHTransport_RequestInfo_PostGrantSYNSuppressed verifies that the
+// post-grant pre-echo window also suppresses idle SYN inside RequestInfo's
+// ENHResReceived path — parity with fillPendingLocked. Scenario: STARTED
+// observed mid-INFO interleave, adapter emits idle RECEIVED(0xAA), then
+// real echo RECEIVED(0x15). Without the filter, 0xAA leaks to
+// pendingEvents and is returned as the first post-INFO ReadByte, causing
+// echo mismatch in the bus layer. Copilot P1 (3105394939) on PR #135.
+func TestENHTransport_RequestInfo_PostGrantSYNSuppressed(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	initiator := byte(0x71)
+
+	// RequestStart opens awaitingStart window. Then RequestInfo is called
+	// and consumes STARTED during its read loop → postGrantPreEcho opens.
+	// Server sends STARTED + 2 idle SYN + real echo 0x15, then completes
+	// the INFO response. The idle SYNs must be filtered by RequestInfo's
+	// ENHResReceived gate; only 0x15 should reach pendingEvents.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf) // consume START
+		_, _ = io.ReadFull(server, buf) // consume INFO
+
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		syn := transport.EncodeENH(transport.ENHResReceived, 0xAA)
+		echo := transport.EncodeENH(transport.ENHResReceived, 0x15)
+		length := transport.EncodeENH(transport.ENHResInfo, 0x01)
+		data := transport.EncodeENH(transport.ENHResInfo, 0x42)
+
+		payload := append([]byte(nil), started[:]...)
+		payload = append(payload, syn[:]...)  // pre-echo idle SYN 1
+		payload = append(payload, syn[:]...)  // pre-echo idle SYN 2
+		payload = append(payload, echo[:]...) // real echo (non-SYN)
+		payload = append(payload, length[:]...)
+		payload = append(payload, data[:]...)
+		_, _ = server.Write(payload)
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	got, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		t.Fatalf("RequestInfo error = %v", err)
+	}
+	if len(got) != 1 || got[0] != 0x42 {
+		t.Fatalf("RequestInfo payload = %v; want [0x42]", got)
+	}
+
+	// Post-INFO ReadByte must return 0x15 (the real echo queued during
+	// INFO), NOT 0xAA. If the SYN filter was missing, ReadByte would
+	// return 0xAA here and the bus layer's echo check would fail.
+	b, err := enh.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte after RequestInfo = %v; want 0x15 (idle SYN must be filtered in INFO path)", err)
+	}
+	if b != 0x15 {
+		t.Fatalf("ReadByte = 0x%02x; want 0x15 (idle SYN leaked via INFO path!)", b)
+	}
+}
