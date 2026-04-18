@@ -3425,3 +3425,82 @@ func TestENHTransport_RequestStart_STARTEDBeforeWindowSet(t *testing.T) {
 		}
 	}
 }
+
+// TestENHTransport_RequestInfoCleanupBeforeWriteMuUnlock verifies the
+// LIFO defer ordering in RequestInfo: the error-cleanup defer (which
+// clears awaitingStart) runs BEFORE writeMu.Unlock. Without this, a
+// blocked RequestStart could acquire writeMu between cleanup and
+// unlock, set awaitingStart=true, and then have that state stomped
+// back to false by the cleanup defer. Copilot P2 (3105099830) on PR #135.
+//
+// This test checks defer ordering indirectly by observing that after
+// RequestInfo errors out, a concurrently-initiated RequestStart's
+// awaitingStart flag survives (is not cleared by RequestInfo's cleanup).
+func TestENHTransport_RequestInfoCleanupBeforeWriteMuUnlock(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	// Short read timeout so RequestInfo fails quickly.
+	enh := transport.NewENHTransport(client, 50*time.Millisecond, 1*time.Second)
+
+	// Start RequestInfo — it will consume the INFO request and then
+	// time out waiting for a response. The server reads the request but
+	// never replies.
+	infoDone := make(chan struct{})
+	go func() {
+		defer close(infoDone)
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf) // consume INFO request
+		// Don't respond — RequestInfo will time out.
+	}()
+
+	// Run RequestInfo in background; it will error (timeout).
+	infoErr := make(chan error, 1)
+	go func() {
+		_, err := enh.RequestInfo(transport.AdapterInfoVersion)
+		infoErr <- err
+	}()
+
+	// Wait for RequestInfo to fail and release writeMu.
+	<-infoDone
+	select {
+	case err := <-infoErr:
+		if err == nil {
+			t.Fatal("RequestInfo did not time out")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RequestInfo did not return")
+	}
+
+	// Now do a RequestStart — it should successfully set awaitingStart.
+	// If the race existed, RequestInfo's cleanup defer would fire AFTER
+	// our Store(true), stomping the flag. We verify by observing that a
+	// post-RequestStart RECEIVED byte is dropped (awaitingStart still
+	// true → pre-grant filter active → ReadByte times out).
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf) // consume START request
+		// Send a RECEIVED byte — must be dropped as pre-grant.
+		recv := transport.EncodeENH(transport.ENHResReceived, 0x77)
+		_, _ = server.Write(recv[:])
+	}()
+
+	if err := enh.RequestStart(0x10); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	// ReadByte should time out within readTimeout (50ms). The 0x77 is
+	// consumed by fillPendingLocked but dropped by the awaitingStart
+	// gate. If the race existed, awaitingStart would be false (stomped
+	// by RequestInfo's defer) and 0x77 would be delivered immediately.
+	_, err := enh.ReadByte()
+	if err == nil {
+		t.Fatal("ReadByte returned value; want timeout (awaitingStart should filter 0x77 as pre-grant)")
+	}
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("ReadByte error = %v; want ErrTimeout (pre-grant filter active)", err)
+	}
+}

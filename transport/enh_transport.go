@@ -689,6 +689,21 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
+	// Hold writeMu for the entire INFO exchange (write + read) to prevent
+	// concurrent Write/RequestStart from interleaving bytes on the TCP
+	// stream during the response read phase. Close() does not need writeMu
+	// (uses connMu), so this does not block shutdown.
+	//
+	// IMPORTANT: writeMu is acquired and its Unlock deferred BEFORE the
+	// error-cleanup defer below. Go defers run LIFO — so on return, the
+	// cleanup defer runs FIRST (while writeMu is still held) and
+	// writeMu.Unlock runs SECOND. This prevents a race where a blocked
+	// RequestStart could acquire writeMu between the cleanup and unlock,
+	// set awaitingStart=true, and then have that state stomped back to
+	// false by the cleanup.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	var err error
 	var readDeadline time.Time
 	defer func() {
@@ -705,13 +720,6 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 			}
 		}
 	}()
-
-	// Hold writeMu for the entire INFO exchange (write + read) to prevent
-	// concurrent Write/RequestStart from interleaving bytes on the TCP
-	// stream during the response read phase. Close() does not need writeMu
-	// (uses connMu), so this does not block shutdown.
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
 
 	// Send the INFO request.
 	seq := EncodeENH(ENHReqInfo, byte(id))
