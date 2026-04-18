@@ -641,23 +641,27 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 	if err := t.setWriteDeadline(); err != nil {
 		return t.mapWriteError(err)
 	}
+	// Open the arbitration window BEFORE conn.Write so STARTED emitted by
+	// a fast adapter (between write-completion and our store) is correctly
+	// handled by fillPendingLocked's STARTED case — which clears the flag.
+	// Setting AFTER Write creates a race: STARTED arrives while flag=false,
+	// gets processed normally, then our late Store(true) opens a FALSE
+	// window causing post-grant RECEIVED bytes to be dropped until deadline.
+	// On Write failure we roll back with Store(false) so no false window
+	// persists after a blocked/failed write.
+	t.arbitrationDeadline.Store(time.Now().Add(arbitrationWindowTimeout).UnixNano())
+	t.awaitingStart.Store(true)
 	n, err := t.conn.Write(seq[:])
 	if err != nil {
+		t.awaitingStart.Store(false)
+		t.arbitrationDeadline.Store(0)
 		return t.mapWriteError(err)
 	}
 	if n != len(seq) {
+		t.awaitingStart.Store(false)
+		t.arbitrationDeadline.Store(0)
 		return fmt.Errorf("enh request start short write (%d/%d): %w", n, len(seq), ebuserrors.ErrInvalidPayload)
 	}
-	// Open the arbitration window AFTER the write succeeds. Setting it
-	// earlier risks a false window on a blocked/failed write, during
-	// which fillPendingLocked would drop legitimate RECEIVED bytes as
-	// pre-grant traffic even though the START request never reached the
-	// adapter. writeMu is held across Write and this store, so reads
-	// blocked waiting for data cannot observe a false window either.
-	// The deadline is set together with the flag so both are valid
-	// from the same instant.
-	t.arbitrationDeadline.Store(time.Now().Add(arbitrationWindowTimeout).UnixNano())
-	t.awaitingStart.Store(true)
 	return nil
 }
 

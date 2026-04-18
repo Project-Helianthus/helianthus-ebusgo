@@ -3334,3 +3334,94 @@ done:
 	}
 	t.Logf("drained %d STARTED events under flood (cap=256)", count)
 }
+
+// TestENHTransport_RequestStart_STARTEDBeforeWindowSet is the regression
+// test for the STARTED-before-window race. If `awaitingStart.Store(true)`
+// happens AFTER conn.Write, a fast adapter can emit STARTED + post-grant
+// RECEIVED bytes between the write returning and the flag being set:
+//  1. Write START to adapter
+//  2. Adapter responds with STARTED + immediately starts post-grant RECEIVED bytes
+//  3. fillPendingLocked processes STARTED with awaitingStart=false (just queues)
+//  4. fillPendingLocked processes RECEIVED with awaitingStart=false (delivered OK)
+//  5. RequestStart's late Store(true) opens a FALSE arbitration window
+//  6. Next batch of RECEIVED is dropped as "pre-grant" until the 500ms deadline
+//
+// The fix is to set awaitingStart BEFORE conn.Write so STARTED arriving
+// concurrently is handled by the STARTED case (which clears the flag).
+// This test injects STARTED + post-grant data into the read path and
+// asserts that all post-grant bytes are delivered without being dropped
+// by a false window.
+func TestENHTransport_RequestStart_STARTEDBeforeWindowSet(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 3*time.Second, 2*time.Second)
+	initiator := byte(0x31)
+
+	// Server side: respond with STARTED + 3 post-grant RECEIVED bytes
+	// in one tight batch, simulating a fast adapter. All bytes must
+	// be delivered — none dropped as pre-grant.
+	go func() {
+		buf := make([]byte, 2)
+		_, _ = io.ReadFull(server, buf)
+
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		recv1 := transport.EncodeENH(transport.ENHResReceived, 0xD1)
+		recv2 := transport.EncodeENH(transport.ENHResReceived, 0xD2)
+		recv3 := transport.EncodeENH(transport.ENHResReceived, 0xD3)
+		payload := append([]byte(nil), started[:]...)
+		payload = append(payload, recv1[:]...)
+		payload = append(payload, recv2[:]...)
+		payload = append(payload, recv3[:]...)
+		_, _ = server.Write(payload)
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	reader := interface{}(enh).(transport.StreamEventReader)
+
+	// First event: STARTED.
+	ev, err := reader.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent[0] error = %v", err)
+	}
+	if ev.Kind != transport.StreamEventStarted {
+		t.Fatalf("ReadEvent[0] = %+v; want StreamEventStarted", ev)
+	}
+	if ev.Data != initiator {
+		t.Fatalf("STARTED.Data = 0x%02x; want 0x%02x", ev.Data, initiator)
+	}
+
+	// All 3 post-grant RECEIVED bytes must be delivered in order.
+	// If awaitingStart was set AFTER Write and STARTED arrived before the
+	// store, these bytes would be dropped as "pre-grant" for up to 500ms
+	// (arbitrationWindowTimeout) before delivery resumed.
+	for i, want := range []byte{0xD1, 0xD2, 0xD3} {
+		evDeadline := time.After(500 * time.Millisecond)
+		type result struct {
+			ev  transport.StreamEvent
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			ev, err := reader.ReadEvent()
+			ch <- result{ev, err}
+		}()
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				t.Fatalf("ReadEvent[%d] error = %v; want StreamEventByte(0x%02x)", i+1, r.err, want)
+			}
+			if r.ev.Kind != transport.StreamEventByte || r.ev.Byte != want {
+				t.Fatalf("ReadEvent[%d] = %+v; want StreamEventByte(0x%02x) — bytes dropped as false pre-grant?", i+1, r.ev, want)
+			}
+		case <-evDeadline:
+			t.Fatalf("ReadEvent[%d] timed out waiting for 0x%02x — bytes dropped by false arbitration window", i+1, want)
+		}
+	}
+}
