@@ -109,11 +109,21 @@ func (h *TimingHarness) Elapsed() (time.Duration, bool) {
 	return h.ackEmitAt.Sub(h.inboundCRCAt), true
 }
 
-// WithinBudget returns true iff Elapsed() is present and <=
-// responderAckBudget.
+// WithinBudget returns true iff Elapsed() is present, non-negative, and
+// <= responderAckBudget.
+//
+// Fail-closed on negative durations: a negative elapsed (ackEmitAt <
+// inboundCRCAt) indicates out-of-order timestamps — concurrent
+// instrumentation, a clock that went backwards, or a test injecting
+// inverted marks. Treating such a value as "in budget" would mask a real
+// measurement-integrity bug, so WithinBudget returns false rather than
+// silently passing.
 func (h *TimingHarness) WithinBudget() bool {
 	elapsed, ok := h.Elapsed()
 	if !ok {
+		return false
+	}
+	if elapsed < 0 {
 		return false
 	}
 	return elapsed <= responderAckBudget

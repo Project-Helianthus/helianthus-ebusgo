@@ -16,7 +16,11 @@
 
 package responder
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+)
 
 // Expected state constant names, in declaration order. PR-B GREEN must
 // export these as a named-int type `State` with String() values matching
@@ -105,6 +109,9 @@ func TestM4c1_PRB_FSM_Transition_ResponseSentToAckReceived_OnInitiatorNack_Retry
 }
 
 func TestM4c1_PRB_FSM_Transition_ResponseSentToIdle_OnInitiatorNack_Exhausted(t *testing.T) {
+	// With MaxNackRetries=1 the FSM permits exactly one retry. The first
+	// NACK returns StateAckReceived (the single allowed retry); the second
+	// NACK exhausts the budget and returns StateIdle + ErrRetriesExhausted.
 	fsm := NewFSM()
 	fsm.MaxNackRetries = 1
 	if _, err := fsm.OnInboundFrame(true); err != nil {
@@ -113,11 +120,66 @@ func TestM4c1_PRB_FSM_Transition_ResponseSentToIdle_OnInitiatorNack_Exhausted(t 
 	if _, err := fsm.OnEmitResponse(); err != nil {
 		t.Fatalf("prime OnEmitResponse: %v", err)
 	}
+	// 1st NACK: within budget → retry (StateAckReceived).
 	s, err := fsm.OnInitiatorNack()
+	if err != nil {
+		t.Fatalf("M4c1 PR-B: OnInitiatorNack #1 within budget returned err: %v", err)
+	}
+	if s != StateAckReceived {
+		t.Fatalf("M4c1 PR-B: OnInitiatorNack #1 = %s, want StateAckReceived", s)
+	}
+	// Re-emit to return to ResponseSent.
+	if _, err := fsm.OnEmitResponse(); err != nil {
+		t.Fatalf("prime OnEmitResponse (2): %v", err)
+	}
+	// 2nd NACK: budget consumed → exhausted.
+	s, err = fsm.OnInitiatorNack()
 	if err == nil {
-		t.Fatalf("M4c1 PR-B: OnInitiatorNack with retries=1 should exhaust, got no err")
+		t.Fatalf("M4c1 PR-B: OnInitiatorNack #2 with budget=1 should exhaust, got no err")
 	}
 	if s != StateIdle {
 		t.Fatalf("M4c1 PR-B: ResponseSent→? on NACK (exhausted) = %s, want StateIdle", s)
+	}
+}
+
+// TestM4c1_PRB_FSM_OnInitiatorNack_RespectsExactBudget locks the retry-budget
+// invariant: with MaxNackRetries=N the FSM permits exactly N retries (each
+// returning StateAckReceived) and aborts on the (N+1)-th NACK with
+// ErrRetriesExhausted + StateIdle. Regression guard for the off-by-one that
+// pre-incremented f.retries before the budget check.
+func TestM4c1_PRB_FSM_OnInitiatorNack_RespectsExactBudget(t *testing.T) {
+	for _, N := range []int{1, 2, 3, 5} {
+		t.Run(fmt.Sprintf("N=%d", N), func(t *testing.T) {
+			fsm := NewFSM()
+			fsm.MaxNackRetries = N
+			if _, err := fsm.OnInboundFrame(true); err != nil {
+				t.Fatalf("prime OnInboundFrame: %v", err)
+			}
+			if _, err := fsm.OnEmitResponse(); err != nil {
+				t.Fatalf("prime OnEmitResponse: %v", err)
+			}
+			// N NACKs must all succeed with StateAckReceived; re-emit
+			// after each to return to StateResponseSent.
+			for i := 1; i <= N; i++ {
+				s, err := fsm.OnInitiatorNack()
+				if err != nil {
+					t.Fatalf("N=%d NACK #%d within budget returned err: %v", N, i, err)
+				}
+				if s != StateAckReceived {
+					t.Fatalf("N=%d NACK #%d = %s, want StateAckReceived", N, i, s)
+				}
+				if _, err := fsm.OnEmitResponse(); err != nil {
+					t.Fatalf("N=%d re-emit after NACK #%d: %v", N, i, err)
+				}
+			}
+			// (N+1)-th NACK: exhausted.
+			s, err := fsm.OnInitiatorNack()
+			if !errors.Is(err, ErrRetriesExhausted) {
+				t.Fatalf("N=%d NACK #%d want ErrRetriesExhausted, got err=%v", N, N+1, err)
+			}
+			if s != StateIdle {
+				t.Fatalf("N=%d NACK #%d = %s, want StateIdle", N, N+1, s)
+			}
+		})
 	}
 }

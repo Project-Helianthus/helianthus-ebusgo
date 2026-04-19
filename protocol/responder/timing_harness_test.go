@@ -60,6 +60,30 @@ func TestM4c1_PRB_TimingHarness_MeasuresCRCToAckElapsed(t *testing.T) {
 	}
 }
 
+// TestM4c1_PRB_TimingHarness_NegativeElapsed_IsInvalid locks the fail-closed
+// contract: inverted timestamps (ackEmitAt < inboundCRCAt) must NOT be
+// reported as within budget. Regression guard for the silent pass-through
+// where a signed raw Sub() result landed under the upper-bound check and
+// hid measurement-integrity bugs.
+func TestM4c1_PRB_TimingHarness_NegativeElapsed_IsInvalid(t *testing.T) {
+	// Inject inverted marks: ackEmitAt is BEFORE inboundCRCAt.
+	t0 := time.Unix(0, int64(5*time.Millisecond))
+	t1 := time.Unix(0, int64(1*time.Millisecond))
+	h := NewTimingHarness()
+	h.MarkInboundCRCOk(t0)
+	h.MarkAckEmit(t1)
+	elapsed, ok := h.Elapsed()
+	if !ok {
+		t.Fatalf("M4c1 PR-B: Elapsed() reported not-ok after both marks recorded")
+	}
+	if elapsed >= 0 {
+		t.Fatalf("M4c1 PR-B: inverted marks should produce negative elapsed, got %v", elapsed)
+	}
+	if h.WithinBudget() {
+		t.Fatalf("M4c1 PR-B: WithinBudget() = true with negative elapsed=%v — fail-closed invariant violated", elapsed)
+	}
+}
+
 func TestM4c1_PRB_TimingHarness_BudgetAssertion_Placeholder(t *testing.T) {
 	// Budget pinned to zero in RED; PR-B GREEN must replace
 	// responderAckBudgetPlaceholder with a real, bench-measured constant

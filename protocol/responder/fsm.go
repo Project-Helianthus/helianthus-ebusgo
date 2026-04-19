@@ -145,11 +145,15 @@ func (f *FSM) OnInitiatorNack() (State, error) {
 	if f.state != StateResponseSent {
 		return f.state, ErrInvalidTransition
 	}
-	f.retries++
+	// Invariant: MaxNackRetries=N permits exactly N retries. The N-th
+	// retry succeeds (returns StateAckReceived); the (N+1)-th NACK
+	// exhausts the budget. Compare BEFORE incrementing so that f.retries
+	// records the number of retries already consumed.
 	if f.retries >= f.MaxNackRetries {
 		f.state = StateIdle
 		return f.state, ErrRetriesExhausted
 	}
+	f.retries++
 	f.state = StateAckReceived
 	return f.state, nil
 }
