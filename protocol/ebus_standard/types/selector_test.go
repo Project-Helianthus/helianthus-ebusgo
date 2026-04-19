@@ -147,6 +147,42 @@ func TestLengthSelector_RawTailDoesNotBypassMaxLenOnLengthPrefix(t *testing.T) {
 	}
 }
 
+// Regression for Codex r3106369840: Select must guard against the declared
+// LengthPrefix exceeding the payload buffer BEFORE invoking a branch's Match
+// predicate. Otherwise a Match function that reads any byte up to
+// LengthPrefix-1 can panic on a short buffer instead of surfacing a proper
+// truncated_payload error.
+func TestLengthSelector_MatchGuardsAgainstLengthPrefixTruncation(t *testing.T) {
+	sel := LengthSelector{Branches: []Branch{
+		{
+			Name:   "reads_index_one",
+			MinLen: 1,
+			MaxLen: 2,
+			Match: func(in SelectorInput) bool {
+				// Declared LengthPrefix tells us byte[1] is valid; selector
+				// must ensure that holds before calling us. If it does not,
+				// this indexes out of range and panics.
+				return in.Payload[1] == 0x5A
+			},
+		},
+	}}
+	// LengthPrefix=2 declares two bytes of payload, but buffer holds 1 byte.
+	// Branch MinLen=1 passes the old guard; the declared-prefix guard must
+	// catch it and return truncated_payload instead of panicking.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Select panicked on short buffer: %v", r)
+		}
+	}()
+	res := sel.Select(SelectorInput{LengthPrefix: 2, Payload: []byte{0x5A}})
+	if res.Err == nil || res.Err.Code != ErrCodeTruncatedPayload {
+		t.Fatalf("want truncated_payload, got %+v", res)
+	}
+	if res.Selected != "" {
+		t.Fatalf("selected must be empty on error, got %q", res.Selected)
+	}
+}
+
 func TestLengthSelector_MatchPredicateDiscriminates(t *testing.T) {
 	sel := LengthSelector{Branches: []Branch{
 		{

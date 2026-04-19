@@ -110,6 +110,13 @@ func (s LengthSelector) Select(input SelectorInput) SelectorResult {
 			if len(input.Payload) < br.MinLen {
 				return SelectorResult{Err: newDecodeError(ErrCodeTruncatedPayload, "payload shorter than branch MinLen")}
 			}
+			// Predicates may read any byte up to the declared LengthPrefix
+			// (NN). If the buffer is shorter than the declared prefix, a
+			// Match function that indexes beyond len(Payload)-1 would panic.
+			// Surface truncated_payload before invoking the predicate.
+			if len(input.Payload) < input.LengthPrefix {
+				return SelectorResult{Err: newDecodeError(ErrCodeTruncatedPayload, "payload shorter than declared LengthPrefix")}
+			}
 			if !br.Match(input) {
 				continue
 			}
