@@ -50,19 +50,22 @@ func (DATA1c) Encode(value any) ([]byte, *DecodeError) {
 	if f > 127.0 {
 		// 127.5 would encode to 0xFF (replacement) — catch that specifically,
 		// everything strictly above is out of range.
-		if math.Abs(f-127.5) < 1e-9 {
+		if f == 127.5 {
 			return nil, newDecodeError(ErrCodeEncodesReplacement, "DATA1c 127.5 would encode to 0xFF replacement")
 		}
 		return nil, newDecodeError(ErrCodeOutOfRange, "DATA1c value must be <= 127 (or exactly 127.5 rejected as replacement)")
 	}
-	// Must round-trip exactly to a half-unit.
+	// Must round-trip EXACTLY to a half-unit under IEEE 754 representation.
+	// No epsilon: inputs like 1e-10 or 0.5000000001 must be rejected, not
+	// silently coerced to the nearest 0.5 increment. math.Modf returns the
+	// fractional part; any non-zero fractional part means f is not an exact
+	// multiple of 0.5.
 	raw := f * 2.0
-	rounded := math.Round(raw)
-	if math.Abs(raw-rounded) > 1e-9 {
+	if _, frac := math.Modf(raw); frac != 0 {
 		return nil, newDecodeError(ErrCodeInvalidRoundTrip, "DATA1c value does not align to a 0.5 half-unit")
 	}
-	if rounded == 0xFF {
+	if raw == 0xFF {
 		return nil, newDecodeError(ErrCodeEncodesReplacement, "DATA1c encoded byte would be 0xFF replacement")
 	}
-	return []byte{byte(rounded)}, nil
+	return []byte{byte(raw)}, nil
 }

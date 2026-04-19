@@ -97,6 +97,54 @@ func TestDATA1c_EncodeRejectsNonHalfUnit(t *testing.T) {
 	}
 }
 
+// Regression for Codex r3106398434: the half-unit validation MUST be exact
+// (no epsilon). Values like 1e-10 or 0.5000000001 are NOT valid 0.5
+// increments and must be rejected rather than silently coerced to the
+// nearest half-unit.
+func TestDATA1c_EncodeRejectsNearHalfUnit(t *testing.T) {
+	codec := DATA1c{}
+	rejectCases := []struct {
+		name string
+		in   float64
+	}{
+		{"1e-10", 1e-10},
+		{"0.5000000001", 0.5000000001},
+		{"0.4999999999", 0.4999999999},
+		{"1.0000000001", 1.0000000001},
+	}
+	for _, tc := range rejectCases {
+		got, err := codec.Encode(tc.in)
+		if err == nil {
+			t.Fatalf("%s: want invalid_round_trip, got bytes %v", tc.name, got)
+		}
+		if err.Code != ErrCodeInvalidRoundTrip {
+			t.Fatalf("%s: want invalid_round_trip, got %+v", tc.name, err)
+		}
+		if got != nil {
+			t.Fatalf("%s: must not return bytes on non-half-unit input, got %v", tc.name, got)
+		}
+	}
+
+	acceptCases := []struct {
+		name string
+		in   float64
+		want byte
+	}{
+		{"0.5", 0.5, 0x01},
+		{"1.0", 1.0, 0x02},
+		{"0.0", 0.0, 0x00},
+	}
+	for _, tc := range acceptCases {
+		got, err := codec.Encode(tc.in)
+		if err != nil {
+			t.Fatalf("%s: want accept, got err %+v", tc.name, err)
+		}
+		if len(got) != 1 || got[0] != tc.want {
+			t.Fatalf("%s: got %v want 0x%02X", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestDATA1c_EncodeRejectsReplacementByte(t *testing.T) {
 	// 127.5 would encode to raw 0xFF which is the replacement sentinel; reject.
 	_, err := DATA1c{}.Encode(127.5)
