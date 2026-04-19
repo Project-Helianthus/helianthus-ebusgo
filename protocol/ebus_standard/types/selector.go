@@ -124,15 +124,23 @@ func (s LengthSelector) Select(input SelectorInput) SelectorResult {
 		matches = append(matches, br)
 	}
 
+	// Payload-buffer truncation check is universal: if the buffer carries
+	// fewer bytes than the declared LengthPrefix, the frame is malformed
+	// regardless of how many (or which) branches matched. Checking this
+	// BEFORE the ambiguity branch prevents a truncated frame from being
+	// misclassified as ambiguous_selector_branch when two nil-Match (or
+	// predicate-accepting) branches happen to fit by length alone. See
+	// Codex r3106398435.
+	if len(matches) > 0 && len(input.Payload) < input.LengthPrefix {
+		return SelectorResult{Err: newDecodeError(ErrCodeTruncatedPayload, "payload shorter than declared length")}
+	}
+
 	switch len(matches) {
 	case 0:
 		return SelectorResult{Err: newDecodeError(ErrCodeUnknownSelector, "no branch matches selector inputs")}
 	case 1:
 		winner := matches[0]
-		// Buffer checks relative to winner.
-		if len(input.Payload) < input.LengthPrefix {
-			return SelectorResult{Err: newDecodeError(ErrCodeTruncatedPayload, "payload shorter than declared length")}
-		}
+		// Buffer upper-bound check relative to winner.
 		if !winner.AllowsRawTail && len(input.Payload) > input.LengthPrefix {
 			return SelectorResult{Err: newDecodeError(ErrCodeOverlongPayload, "payload buffer longer than declared LengthPrefix")}
 		}

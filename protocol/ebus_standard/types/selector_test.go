@@ -183,6 +183,28 @@ func TestLengthSelector_MatchGuardsAgainstLengthPrefixTruncation(t *testing.T) {
 	}
 }
 
+// Regression for Codex r3106398435: payload-buffer truncation must be
+// reported as truncated_payload even when two branches both match the
+// selector inputs by length/predicate. Otherwise a malformed/truncated
+// frame (declared LengthPrefix exceeds buffer) is misclassified as
+// ambiguous_selector_branch, driving incorrect downstream error handling.
+func TestLengthSelector_TruncatedPayloadBeatsAmbiguity(t *testing.T) {
+	// Two nil-Match branches both match by length alone; LengthPrefix=4 but
+	// the buffer only carries 1 byte. Expect truncated_payload, NOT
+	// ambiguous_selector_branch.
+	sel := LengthSelector{Branches: []Branch{
+		{Name: "a", MinLen: 1, MaxLen: 4},
+		{Name: "b", MinLen: 1, MaxLen: 4},
+	}}
+	res := sel.Select(SelectorInput{LengthPrefix: 4, Payload: []byte{0x01}})
+	if res.Err == nil || res.Err.Code != ErrCodeTruncatedPayload {
+		t.Fatalf("want truncated_payload, got %+v", res)
+	}
+	if res.Selected != "" {
+		t.Fatalf("selected must be empty on error, got %q", res.Selected)
+	}
+}
+
 func TestLengthSelector_MatchPredicateDiscriminates(t *testing.T) {
 	sel := LengthSelector{Branches: []Branch{
 		{
