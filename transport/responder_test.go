@@ -100,9 +100,7 @@ func lookupExportedType(name string) reflect.Type {
 	return responderExportRegistry[name]
 }
 
-// responderExportRegistry is populated by PR-A impl via an init() that
-// registers `ResponderTransport` (and any sibling responder types). Nil
-// until then; this is the RED-phase sentinel.
-//
-// M4c1: implementation stub, tests fail until impl.
-var responderExportRegistry map[string]reflect.Type
+// responderExportRegistry is declared and populated by the production
+// file transport/responder.go (PR-A GREEN phase). The RED-phase sentinel
+// that used to live here has been replaced by the real registry — see
+// responder.go init() for the population logic.

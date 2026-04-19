@@ -540,6 +540,29 @@ func (t *ENHTransport) Write(payload []byte) (int, error) {
 	return len(payload), nil
 }
 
+// SendResponderBytes emits a responder-direction byte sequence on the bus,
+// bypassing arbitration. This is the ENH transport's implementation of
+// ResponderTransport (M4c1 PR-A, decision doc m4b2-responder-go-no-go §6.1).
+//
+// Semantics:
+//   - The caller has already observed the initiator's telegram header via
+//     ReadByte / ReadEvent and determined that the telegram is addressed to
+//     the local responder slot. SendResponderBytes emits the reactive reply
+//     within the eBUS target-response window (budget pinned in PR-B).
+//   - Arbitration is owned by the remote initiator; this path MUST NOT
+//     call StartArbitration / RequestStart. The underlying wire send is
+//     the same raw-byte path used by Write (ENH request-byte pairs); no
+//     arbitration helper is touched.
+//   - Thread-safety matches Write: serialised under writeMu.
+//
+// The method is a thin delegation to Write so that responder emission
+// reuses the existing ENH encoding, write-deadline, and error-mapping
+// substrate — there is exactly one ENH byte-send implementation in the
+// tree, and the responder path shares it.
+func (t *ENHTransport) SendResponderBytes(payload []byte) (int, error) {
+	return t.Write(payload)
+}
+
 // StartArbitration requests bus ownership for the given initiator address.
 // It sends ENHReqStart(initiator) and blocks until ENHResStarted(initiator) or ENHResFailed(winner).
 //
