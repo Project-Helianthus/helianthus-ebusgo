@@ -121,8 +121,8 @@ func (s LengthSelector) Select(input SelectorInput) SelectorResult {
 		if len(input.Payload) < input.LengthPrefix {
 			return SelectorResult{Err: newDecodeError(ErrCodeTruncatedPayload, "payload shorter than declared length")}
 		}
-		if !winner.AllowsRawTail && len(input.Payload) > winner.MaxLen {
-			return SelectorResult{Err: newDecodeError(ErrCodeOverlongPayload, "payload buffer longer than branch MaxLen")}
+		if !winner.AllowsRawTail && len(input.Payload) > input.LengthPrefix {
+			return SelectorResult{Err: newDecodeError(ErrCodeOverlongPayload, "payload buffer longer than declared LengthPrefix")}
 		}
 		return SelectorResult{Selected: winner.Name}
 	default:

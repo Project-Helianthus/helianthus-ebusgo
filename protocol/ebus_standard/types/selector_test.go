@@ -94,6 +94,28 @@ func TestLengthSelector_OverlongPayload(t *testing.T) {
 	}
 }
 
+// Regression for Codex r3105815892: the non-raw-tail overlong check MUST
+// compare payload buffer length to the declared LengthPrefix (NN), not to
+// winner.MaxLen. Otherwise, when LengthPrefix < MaxLen, extra trailing bytes
+// leak past the declared prefix without triggering overlong_payload.
+func TestLengthSelector_OverlongAgainstLengthPrefixNotMaxLen(t *testing.T) {
+	sel := LengthSelector{Branches: []Branch{
+		{Name: "wide", MinLen: 1, MaxLen: 8},
+	}}
+	// LengthPrefix=2 (NN) fits the branch, but buffer carries 3 bytes.
+	// Old code checked len(Payload) > MaxLen (3 > 8 = false) and accepted the
+	// trailing byte. New code must reject it as overlong_payload.
+	res := sel.Select(SelectorInput{LengthPrefix: 2, Payload: []byte{0x01, 0x02, 0x03}})
+	if res.Err == nil || res.Err.Code != ErrCodeOverlongPayload {
+		t.Fatalf("want overlong_payload for NN<MaxLen with trailing bytes, got %+v", res)
+	}
+	// Positive: same branch, payload length equals LengthPrefix → accept.
+	res = sel.Select(SelectorInput{LengthPrefix: 2, Payload: []byte{0x01, 0x02}})
+	if res.Err != nil || res.Selected != "wide" {
+		t.Fatalf("positive case want wide, got %+v", res)
+	}
+}
+
 func TestLengthSelector_RawTailBranchAllowsExtra(t *testing.T) {
 	sel := LengthSelector{Branches: []Branch{
 		{Name: "with_tail", MinLen: 1, MaxLen: 1, AllowsRawTail: true},
