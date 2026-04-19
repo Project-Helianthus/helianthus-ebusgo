@@ -6,6 +6,7 @@
 package responder
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -53,7 +54,10 @@ func TestM4c1_PRB_LocalResponderAddressFilter_DropsNonLocalZZ(t *testing.T) {
 	fsm := NewFSM()
 	disp := NewLocalResponderDispatcher(0x71, fsm)
 	frame := DecodedFrame{Source: 0x03, Target: 0x10, Primary: 0x07, Secondary: 0x04}
-	accepted := disp.Handle(frame)
+	accepted, err := disp.Handle(frame)
+	if err != nil {
+		t.Fatalf("M4c1 PR-B: non-local ZZ surfaced error = %v, want nil (silent drop)", err)
+	}
 	if accepted {
 		t.Fatalf("M4c1 PR-B: LocalResponderDispatcher accepted non-local ZZ (want drop)")
 	}
@@ -62,5 +66,43 @@ func TestM4c1_PRB_LocalResponderAddressFilter_DropsNonLocalZZ(t *testing.T) {
 	}
 	if got := disp.Dropped(); got != 1 {
 		t.Fatalf("M4c1 PR-B: dropped counter = %d, want 1", got)
+	}
+}
+
+// TestM4c1_PRB_Dispatcher_Handle_PropagatesInvalidTransition asserts that
+// when a local-addressed frame arrives while the FSM is not in StateIdle
+// (e.g. duplicate/new inbound request before the previous exchange has
+// completed), Handle surfaces ErrInvalidTransition instead of silently
+// reporting `accepted=true`. Regression guard for Codex P1 finding on PR
+// #140 (handle discarded the FSM error).
+func TestM4c1_PRB_Dispatcher_Handle_PropagatesInvalidTransition(t *testing.T) {
+	fsm := NewFSM()
+	// Drive FSM out of StateIdle: Idle → AckReceived → ResponseSent.
+	if _, err := fsm.OnInboundFrame(true); err != nil {
+		t.Fatalf("setup: OnInboundFrame: %v", err)
+	}
+	if _, err := fsm.OnEmitResponse(); err != nil {
+		t.Fatalf("setup: OnEmitResponse: %v", err)
+	}
+	if got := fsm.State(); got != StateResponseSent {
+		t.Fatalf("setup: FSM state = %s, want StateResponseSent", got)
+	}
+
+	disp := NewLocalResponderDispatcher(0x71, fsm)
+	frame := DecodedFrame{Source: 0x03, Target: 0x71, Primary: 0x07, Secondary: 0x04}
+	accepted, err := disp.Handle(frame)
+	if accepted {
+		t.Fatalf("Handle accepted=true while FSM was StateResponseSent (want accepted=false)")
+	}
+	if err == nil {
+		t.Fatalf("Handle err = nil, want ErrInvalidTransition surfaced to caller")
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("Handle err = %v, want ErrInvalidTransition", err)
+	}
+	// Dropped counter MUST NOT increment on FSM rejection — the frame was
+	// local (ZZ matched), not filtered by the bus-hygiene drop path.
+	if got := disp.Dropped(); got != 0 {
+		t.Fatalf("dropped counter = %d, want 0 (FSM reject is not a ZZ-filter drop)", got)
 	}
 }

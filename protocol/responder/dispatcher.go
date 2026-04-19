@@ -48,25 +48,39 @@ func (d *LocalResponderDispatcher) Dropped() uint64 {
 	return d.dropped
 }
 
-// Handle routes a decoded frame. If frame.Target != localAddr the frame
-// is dropped silently (dropped counter increments). Otherwise the bound
-// FSM advances via OnInboundFrame(true). Returns `true` if the frame was
-// accepted for local handling, `false` if filtered out.
-func (d *LocalResponderDispatcher) Handle(frame DecodedFrame) bool {
+// Handle routes a decoded frame. Return semantics:
+//
+//   - (true, nil): frame.Target matched localAddr and the bound FSM
+//     accepted the transition (Idle → AckReceived).
+//   - (false, ErrInvalidTransition): frame.Target matched localAddr but
+//     the FSM rejected the transition (e.g. an out-of-order inbound
+//     arrived while the FSM was not in StateIdle). Surfaces the sentinel
+//     so callers can log/metric the protocol violation instead of
+//     silently treating the frame as accepted.
+//   - (false, nil): frame.Target did NOT match localAddr — the frame is
+//     dropped silently (dropped counter increments). This preserves the
+//     bus-hygiene invariant: a responder lane MUST NOT ACK non-local
+//     frames, and MUST NOT emit noise for them.
+//
+// A nil bound FSM behaves as (true, nil) after the ZZ match — useful for
+// exercising the filter in isolation.
+func (d *LocalResponderDispatcher) Handle(frame DecodedFrame) (bool, error) {
 	d.mu.Lock()
 	if frame.Target != d.localAddr {
 		d.dropped++
 		d.mu.Unlock()
-		return false
+		return false, nil
 	}
 	fsm := d.fsm
 	d.mu.Unlock()
 	if fsm != nil {
 		// CRC validity is the FrameDecoder's contract — a DecodedFrame
 		// in hand implies CRC passed.
-		_, _ = fsm.OnInboundFrame(true)
+		if _, err := fsm.OnInboundFrame(true); err != nil {
+			return false, err
+		}
 	}
-	return true
+	return true, nil
 }
 
 func init() {
