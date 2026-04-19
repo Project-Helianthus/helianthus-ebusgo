@@ -101,12 +101,24 @@ func (c CHARText) Decode(payload []byte) Value {
 	}
 	raw := cloneBytes(payload)
 
-	// Display: strip trailing 0x00 / 0x20 for display only; raw bytes remain
-	// authoritative. Non-printable bytes are escaped as \xHH so consumers can
-	// tell they were present.
+	// Display: strip trailing pad bytes for display only; raw bytes remain
+	// authoritative. Per 02-l7-types.md §CHAR rule 6, default padding is
+	// 0x00 / 0x20 when the catalog field does not declare a different pad.
+	// When c.Pad is explicitly set (e.g. 0xFF), that byte is ALSO treated as
+	// trailing padding for display purposes. Non-printable bytes not stripped
+	// as padding are escaped as \xHH so consumers can tell they were present.
 	end := len(raw)
-	for end > 0 && (raw[end-1] == 0x00 || raw[end-1] == 0x20) {
-		end--
+	for end > 0 {
+		b := raw[end-1]
+		if b == 0x00 || b == 0x20 {
+			end--
+			continue
+		}
+		if c.Pad != nil && b == *c.Pad {
+			end--
+			continue
+		}
+		break
 	}
 	var b strings.Builder
 	for _, by := range raw[:end] {

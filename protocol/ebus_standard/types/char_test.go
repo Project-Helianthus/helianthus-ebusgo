@@ -147,6 +147,30 @@ func TestCHARText_EncodeCustomPad(t *testing.T) {
 	}
 }
 
+// Regression for Codex r3105815894: when CHARText.Pad is explicitly set to a
+// non-default byte (e.g. 0xFF), the Decode display trim MUST also strip that
+// pad byte. Per 02-l7-types.md §CHAR rule 6/8, the catalog-declared pad byte
+// is padding and must not leak into the display string as escaped bytes.
+func TestCHARText_DecodeHonorsCustomPad(t *testing.T) {
+	ff := byte(0xFF)
+	c := CHARText{Width: 4, Pad: &ff}
+	got := c.Decode([]byte{'A', 'B', 0xFF, 0xFF})
+	if !got.Valid {
+		t.Fatalf("unexpected invalid, err=%v", got.Err)
+	}
+	s, ok := got.Value.(string)
+	if !ok {
+		t.Fatalf("want string display, got %T", got.Value)
+	}
+	if s != "AB" {
+		t.Fatalf("want display %q (0xFF pad stripped), got %q", "AB", s)
+	}
+	// Raw must remain authoritative regardless of display trim.
+	if !bytes.Equal(got.Raw, []byte{'A', 'B', 0xFF, 0xFF}) {
+		t.Fatalf("raw must be preserved, got %v", got.Raw)
+	}
+}
+
 func TestCHARText_EncodeOverflow(t *testing.T) {
 	c := CHARText{Width: 2}
 	if _, err := c.Encode("ABC"); err == nil || err.Code != ErrCodeFixedWidthExceeded {
