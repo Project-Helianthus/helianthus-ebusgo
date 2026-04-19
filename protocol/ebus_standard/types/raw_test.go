@@ -89,6 +89,40 @@ func TestRawPayload_EncodeTooLong(t *testing.T) {
 	}
 }
 
+// Regression for Codex r3106271525: MaxLen=0 must enforce a strict
+// zero-length cap (payload must be exactly zero bytes), not be treated as
+// "unbounded".
+func TestRawPayload_DecodeMaxLenZeroRejectsNonEmpty(t *testing.T) {
+	r := RawPayload{MinLen: 0, MaxLen: 0}
+	got := r.Decode([]byte{0x01})
+	if got.Err == nil || got.Err.Code != ErrCodeOverlongPayload {
+		t.Fatalf("want overlong_payload for non-empty input against MaxLen=0, got %+v", got.Err)
+	}
+	if got.Valid {
+		t.Fatalf("value must be invalid when Err is set")
+	}
+	// Zero-length payload against MaxLen=0 must still decode.
+	ok := r.Decode(nil)
+	if !ok.Valid || ok.Err != nil {
+		t.Fatalf("zero-length must decode against MaxLen=0, got %+v", ok)
+	}
+}
+
+func TestRawPayload_EncodeMaxLenZeroRejectsNonEmpty(t *testing.T) {
+	r := RawPayload{MinLen: 0, MaxLen: 0}
+	if _, err := r.Encode([]byte{0x01}); err == nil || err.Code != ErrCodeOverlongPayload {
+		t.Fatalf("want overlong_payload for non-empty encode against MaxLen=0, got %+v", err)
+	}
+	// Zero-length encode against MaxLen=0 must succeed.
+	out, err := r.Encode([]byte{})
+	if err != nil {
+		t.Fatalf("zero-length encode against MaxLen=0 must succeed, got %+v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("want empty output, got %v", out)
+	}
+}
+
 func TestRawPayload_EncodeWrongType(t *testing.T) {
 	r := RawPayload{MinLen: 0, MaxLen: 4}
 	if _, err := r.Encode(42); err == nil || err.Code != ErrCodeInvalidArgument {

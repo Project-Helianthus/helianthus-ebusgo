@@ -3,8 +3,10 @@ package types
 // RawPayload decodes a variable-length raw byte slice as defined in
 // 02-l7-types.md §"Variable-Length Raw Payload".
 //
-// The catalog branch supplies MinLen and MaxLen bounds. Zero-length is
-// permitted only when MinLen == 0.
+// The catalog branch supplies MinLen and MaxLen bounds. Both bounds are
+// always enforced; MaxLen == 0 is a legitimate strict zero-length cap
+// (payload must be exactly zero bytes). Zero-length input is permitted
+// only when MinLen == 0.
 type RawPayload struct {
 	MinLen int
 	MaxLen int
@@ -16,7 +18,7 @@ func (r RawPayload) Decode(payload []byte) Value {
 	if n < r.MinLen {
 		return Value{Raw: cloneBytes(payload), Err: newDecodeError(ErrCodeTruncatedPayload, "raw payload shorter than MinLen")}
 	}
-	if r.MaxLen > 0 && n > r.MaxLen {
+	if n > r.MaxLen {
 		return Value{Raw: cloneBytes(payload), Err: newDecodeError(ErrCodeOverlongPayload, "raw payload longer than MaxLen")}
 	}
 	raw := cloneBytes(payload)
@@ -47,7 +49,7 @@ func (r RawPayload) Encode(value any) ([]byte, *DecodeError) {
 	if len(data) < r.MinLen {
 		return nil, newDecodeError(ErrCodeTruncatedPayload, "raw payload shorter than MinLen")
 	}
-	if r.MaxLen > 0 && len(data) > r.MaxLen {
+	if len(data) > r.MaxLen {
 		return nil, newDecodeError(ErrCodeOverlongPayload, "raw payload longer than MaxLen")
 	}
 	return cloneBytes(data), nil
