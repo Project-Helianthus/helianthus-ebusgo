@@ -117,12 +117,33 @@ func TestLengthSelector_OverlongAgainstLengthPrefixNotMaxLen(t *testing.T) {
 }
 
 func TestLengthSelector_RawTailBranchAllowsExtra(t *testing.T) {
+	// AllowsRawTail permits the PAYLOAD BUFFER to carry extra bytes beyond
+	// the declared LengthPrefix (NN). It does NOT relax the MaxLen bound on
+	// LengthPrefix itself.
 	sel := LengthSelector{Branches: []Branch{
 		{Name: "with_tail", MinLen: 1, MaxLen: 1, AllowsRawTail: true},
 	}}
-	res := sel.Select(SelectorInput{LengthPrefix: 4, Payload: []byte{1, 2, 3, 4}})
+	// LengthPrefix=1 fits MaxLen=1; buffer carries 3 extra trailing bytes
+	// which AllowsRawTail permits.
+	res := sel.Select(SelectorInput{LengthPrefix: 1, Payload: []byte{1, 2, 3, 4}})
 	if res.Err != nil || res.Selected != "with_tail" {
-		t.Fatalf("raw-tail branch must accept extra bytes, got %+v", res)
+		t.Fatalf("raw-tail branch must accept extra buffer bytes, got %+v", res)
+	}
+}
+
+// Regression for Codex r3106271521: AllowsRawTail must not let LengthPrefix
+// exceed the declared MaxLen. A branch like {MinLen:1, MaxLen:4,
+// AllowsRawTail:true} must reject LengthPrefix=100.
+func TestLengthSelector_RawTailDoesNotBypassMaxLenOnLengthPrefix(t *testing.T) {
+	sel := LengthSelector{Branches: []Branch{
+		{Name: "bounded_tail", MinLen: 1, MaxLen: 4, AllowsRawTail: true},
+	}}
+	res := sel.Select(SelectorInput{LengthPrefix: 100, Payload: make([]byte, 100)})
+	if res.Err == nil || res.Err.Code != ErrCodeOverlongPayload {
+		t.Fatalf("want overlong_payload for LengthPrefix beyond MaxLen even with AllowsRawTail, got %+v", res)
+	}
+	if res.Selected != "" {
+		t.Fatalf("selected must be empty on error, got %q", res.Selected)
 	}
 }
 

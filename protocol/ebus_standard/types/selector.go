@@ -14,10 +14,11 @@ type SelectorInput struct {
 
 // Branch is a catalog branch candidate for a length-dependent selector.
 //
-// MinLen and MaxLen are inclusive bounds on the payload length. AllowsRawTail
-// indicates whether bytes beyond the consumed portion are permitted without
-// triggering OverlongPayload; see rule 5 in 02-l7-types.md §"Length-Dependent
-// Selector".
+// MinLen and MaxLen are inclusive bounds on the declared LengthPrefix (NN).
+// Both bounds are enforced for every branch regardless of AllowsRawTail —
+// AllowsRawTail only relaxes the PAYLOAD BUFFER overlong check (it allows the
+// buffer to carry extra bytes beyond the declared LengthPrefix as a raw tail).
+// See rule 5 in 02-l7-types.md §"Length-Dependent Selector".
 //
 // Match is an optional predicate that consumes selected bytes (e.g. a
 // selector byte). A nil Match means the length bounds are the only selector.
@@ -46,8 +47,8 @@ type SelectorResult struct {
 //
 // Evaluation order:
 //  1. For each branch, check whether the declared LengthPrefix fits the
-//     branch's window. A branch with AllowsRawTail accepts any LengthPrefix
-//     >= MinLen (extra bytes are treated as a raw tail).
+//     branch's [MinLen, MaxLen] window. The MaxLen upper bound applies to
+//     every branch — AllowsRawTail does NOT relax the LengthPrefix bound.
 //  2. For each window-fitting branch, evaluate Match (if any), guarding
 //     against payload-buffer truncation before invoking Match.
 //  3. Zero matches:
@@ -55,12 +56,13 @@ type SelectorResult struct {
 //     rejected, return unknown_selector_branch.
 //     - If LengthPrefix is shorter than every branch's MinLen, return
 //     truncated_payload.
-//     - If LengthPrefix exceeds every branch's MaxLen (and none allow raw
-//     tail), return overlong_payload.
+//     - If LengthPrefix exceeds every branch's MaxLen, return
+//     overlong_payload.
 //     - Otherwise return unknown_selector_branch.
 //  4. Multiple matches → ambiguous_selector_branch.
 //  5. One match → payload-buffer length sanity check (truncation /
-//     overlong) relative to that branch.
+//     overlong) relative to that branch. AllowsRawTail relaxes the buffer
+//     upper-bound check only (buffer may exceed LengthPrefix).
 func (s LengthSelector) Select(input SelectorInput) SelectorResult {
 	var (
 		windowFit []Branch
@@ -69,7 +71,10 @@ func (s LengthSelector) Select(input SelectorInput) SelectorResult {
 		if input.LengthPrefix < br.MinLen {
 			continue
 		}
-		if !br.AllowsRawTail && input.LengthPrefix > br.MaxLen {
+		// MaxLen bounds the declared LengthPrefix (NN) for every branch.
+		// AllowsRawTail only relaxes the payload-buffer overlong check below,
+		// not the declared length itself.
+		if input.LengthPrefix > br.MaxLen {
 			continue
 		}
 		windowFit = append(windowFit, br)
@@ -84,7 +89,7 @@ func (s LengthSelector) Select(input SelectorInput) SelectorResult {
 			if input.LengthPrefix >= br.MinLen {
 				allTooShort = false
 			}
-			if br.AllowsRawTail || input.LengthPrefix <= br.MaxLen {
+			if input.LengthPrefix <= br.MaxLen {
 				allTooLong = false
 			}
 		}
