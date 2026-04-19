@@ -19,14 +19,15 @@ import (
 	"time"
 )
 
-// responderAckBudgetPlaceholder is the RED sentinel. PR-B GREEN replaces
-// this with an empirically measured budget (BASV2 live bench, per §6.1 of
-// the M4b2 decision doc). The zero value guarantees the RED test fails
-// regardless of any accidental fast path.
-const responderAckBudgetPlaceholder time.Duration = 0
+// responderAckBudgetPlaceholder mirrors the production `responderAckBudget`
+// constant for the RED→GREEN contract test. PR-B GREEN pinned the value
+// to a literature-backed 15 ms placeholder (Vaillant eBUS target-response
+// window per `_spike/m4b1-responder-feasibility.md` §4). Per decision
+// doc §7.1(1) the operator MUST replace this with a measured BASV2 bench
+// value before M4c2 IMPL GREEN (BENCH-REPLACE in `timing_harness.go`).
+const responderAckBudgetPlaceholder time.Duration = 15 * time.Millisecond
 
 func TestM4c1_PRB_TimingHarness_Exists(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
 	if responderExportRegistry == nil {
 		t.Fatalf("M4c1 PR-B: timing harness not yet present — expected exported TimingHarness type")
 	}
@@ -36,18 +37,30 @@ func TestM4c1_PRB_TimingHarness_Exists(t *testing.T) {
 }
 
 func TestM4c1_PRB_TimingHarness_MeasuresCRCToAckElapsed(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
-	// End-state harness shape (pseudo):
+	// End-state harness shape:
 	//   h := responder.NewTimingHarness()
 	//   h.MarkInboundCRCOk(t0)
 	//   h.MarkAckEmit(t1)
 	//   elapsed := h.Elapsed()
 	//   if elapsed > responderAckBudget { t.Fatalf(...) }
-	t.Fatalf("M4c1 PR-B: TimingHarness.Elapsed() not implemented — CRC→ACK measurement unavailable")
+	t0 := time.Unix(0, 0)
+	t1 := t0.Add(2 * time.Millisecond)
+	h := NewTimingHarness()
+	h.MarkInboundCRCOk(t0)
+	h.MarkAckEmit(t1)
+	elapsed, ok := h.Elapsed()
+	if !ok {
+		t.Fatalf("M4c1 PR-B: Elapsed() reported not-ok after both marks recorded")
+	}
+	if elapsed != 2*time.Millisecond {
+		t.Fatalf("M4c1 PR-B: Elapsed() = %v, want 2ms", elapsed)
+	}
+	if !h.WithinBudget() {
+		t.Fatalf("M4c1 PR-B: WithinBudget() = false with elapsed=2ms, budget=%v", h.Budget())
+	}
 }
 
 func TestM4c1_PRB_TimingHarness_BudgetAssertion_Placeholder(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
 	// Budget pinned to zero in RED; PR-B GREEN must replace
 	// responderAckBudgetPlaceholder with a real, bench-measured constant
 	// and update this assertion accordingly.
