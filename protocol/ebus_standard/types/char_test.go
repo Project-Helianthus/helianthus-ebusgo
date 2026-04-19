@@ -147,10 +147,13 @@ func TestCHARText_EncodeCustomPad(t *testing.T) {
 	}
 }
 
-// Regression for Codex r3105815894: when CHARText.Pad is explicitly set to a
-// non-default byte (e.g. 0xFF), the Decode display trim MUST also strip that
-// pad byte. Per 02-l7-types.md §CHAR rule 6/8, the catalog-declared pad byte
-// is padding and must not leak into the display string as escaped bytes.
+// Regression for Codex r3105815894 + r3106369841: when CHARText.Pad is
+// explicitly set to a non-default byte (e.g. 0xFF), the Decode display trim
+// MUST strip THAT pad byte and ONLY that pad byte (override, not additive).
+// Per 02-l7-types.md §CHAR rule 6, the catalog-declared pad byte overrides
+// the default — it is not combined with the default 0x00/0x20 set. A
+// trailing 0x20 under Pad=0xFF is a VALID SPACE, not padding, and must
+// remain visible in the display string.
 func TestCHARText_DecodeHonorsCustomPad(t *testing.T) {
 	ff := byte(0xFF)
 	c := CHARText{Width: 4, Pad: &ff}
@@ -168,6 +171,49 @@ func TestCHARText_DecodeHonorsCustomPad(t *testing.T) {
 	// Raw must remain authoritative regardless of display trim.
 	if !bytes.Equal(got.Raw, []byte{'A', 'B', 0xFF, 0xFF}) {
 		t.Fatalf("raw must be preserved, got %v", got.Raw)
+	}
+}
+
+// Regression for Codex r3106369841: when CHARText.Pad=0xFF is explicitly
+// declared, a trailing 0x20 (space) is a valid content byte under the
+// catalog's declared padding semantics, NOT padding. The display trim must
+// treat Pad as an override — strip 0xFF only, preserve the 0x20.
+func TestCHARText_DecodeCustomPadIsOverrideNotAdditive(t *testing.T) {
+	ff := byte(0xFF)
+	c := CHARText{Width: 5, Pad: &ff}
+	// payload: 'A','B', 0x20 (valid space), 0xFF, 0xFF (trailing pad)
+	got := c.Decode([]byte{'A', 'B', 0x20, 0xFF, 0xFF})
+	if !got.Valid {
+		t.Fatalf("unexpected invalid, err=%v", got.Err)
+	}
+	s, ok := got.Value.(string)
+	if !ok {
+		t.Fatalf("want string display, got %T", got.Value)
+	}
+	if s != "AB " {
+		t.Fatalf("Pad override: trailing 0x20 is valid content when Pad=0xFF; want %q, got %q", "AB ", s)
+	}
+	if !bytes.Equal(got.Raw, []byte{'A', 'B', 0x20, 0xFF, 0xFF}) {
+		t.Fatalf("raw must be preserved, got %v", got.Raw)
+	}
+}
+
+// Regression for Codex r3106369841: positive sanity — when Pad is NOT set,
+// the default behavior stripping trailing 0x00 and 0x20 bytes still holds.
+// This guards against over-correction of the override fix.
+func TestCHARText_DecodeDefaultPadStripsNullAndSpace(t *testing.T) {
+	c := CHARText{Width: 5}
+	// trailing 0x00 and 0x20 stripped by default.
+	got := c.Decode([]byte{'O', 'K', 0x20, 0x00, 0x20})
+	if !got.Valid {
+		t.Fatalf("unexpected invalid, err=%v", got.Err)
+	}
+	s, ok := got.Value.(string)
+	if !ok {
+		t.Fatalf("want string display, got %T", got.Value)
+	}
+	if s != "OK" {
+		t.Fatalf("want default trim %q, got %q", "OK", s)
 	}
 }
 

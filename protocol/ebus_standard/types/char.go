@@ -104,17 +104,22 @@ func (c CHARText) Decode(payload []byte) Value {
 	// Display: strip trailing pad bytes for display only; raw bytes remain
 	// authoritative. Per 02-l7-types.md §CHAR rule 6, default padding is
 	// 0x00 / 0x20 when the catalog field does not declare a different pad.
-	// When c.Pad is explicitly set (e.g. 0xFF), that byte is ALSO treated as
-	// trailing padding for display purposes. Non-printable bytes not stripped
-	// as padding are escaped as \xHH so consumers can tell they were present.
+	// When c.Pad is explicitly set (e.g. 0xFF), the catalog field's declared
+	// pad byte is an OVERRIDE of the default — only that byte is treated as
+	// trailing padding, so genuine trailing 0x00 / 0x20 bytes remain visible
+	// in the display string. Non-printable bytes not stripped as padding are
+	// escaped as \xHH so consumers can tell they were present.
 	end := len(raw)
 	for end > 0 {
 		b := raw[end-1]
-		if b == 0x00 || b == 0x20 {
-			end--
-			continue
+		if c.Pad != nil {
+			if b == *c.Pad {
+				end--
+				continue
+			}
+			break
 		}
-		if c.Pad != nil && b == *c.Pad {
+		if b == 0x00 || b == 0x20 {
 			end--
 			continue
 		}
