@@ -3,6 +3,7 @@ package types
 import (
 	"bytes"
 	"math"
+	"strconv"
 	"testing"
 )
 
@@ -72,8 +73,21 @@ func TestCHARSigned_EncodeRejectsUintOverflow(t *testing.T) {
 	// uint values above math.MaxInt64 must not wrap through int64 to valid
 	// signed bytes. toInt64 must reject them, and CHARSigned.Encode must
 	// surface an invalid_argument error rather than emit bytes.
+	//
+	// On 32-bit targets `uint` is 32 bits and cannot exceed math.MaxInt64,
+	// so the overflow path being exercised here is unreachable. Skip rather
+	// than constructing a compile-time-constant expression that overflows
+	// `uint` on 32-bit builds (which would break `GOARCH=386` compilation).
+	if strconv.IntSize < 64 {
+		t.Skip("test requires 64-bit uint to construct a value > math.MaxInt64")
+	}
 	codec := CHARSigned{}
-	huge := uint(math.MaxInt64) + 1 // only meaningful on 64-bit; on 32-bit uint MaxInt64+1 overflows to 0, still rejected as out-of-range below
+	// Build the overflow value at runtime so the expression is not a
+	// compile-time constant evaluated against the target `uint` width
+	// (which would break `GOARCH=386` compilation).
+	hugeU64 := uint64(math.MaxInt64)
+	hugeU64++
+	huge := uint(hugeU64)
 	got, err := codec.Encode(huge)
 	if err == nil {
 		t.Fatalf("want error for uint > MaxInt64, got bytes %v", got)
