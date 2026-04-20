@@ -16,7 +16,11 @@
 
 package responder
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+)
 
 // Expected state constant names, in declaration order. PR-B GREEN must
 // export these as a named-int type `State` with String() values matching
@@ -29,7 +33,6 @@ var expectedFSMStates = []string{
 }
 
 func TestM4c1_PRB_FSM_States_Declared(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
 	if responderExportRegistry == nil {
 		t.Fatalf("M4c1 PR-B: protocol/responder FSM state constants not declared yet")
 	}
@@ -41,28 +44,142 @@ func TestM4c1_PRB_FSM_States_Declared(t *testing.T) {
 }
 
 func TestM4c1_PRB_FSM_Transition_IdleToAckReceived_OnValidInbound(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
 	// End-state: construct FSM in StateIdle, feed a valid for-local-responder
 	// frame, assert transition to StateAckReceived.
-	t.Fatalf("M4c1 PR-B: FSM transition harness absent — Idle→AckReceived on valid inbound")
+	fsm := NewFSM()
+	if fsm.State() != StateIdle {
+		t.Fatalf("M4c1 PR-B: initial FSM state = %s, want StateIdle", fsm.State())
+	}
+	s, err := fsm.OnInboundFrame(true)
+	if err != nil {
+		t.Fatalf("M4c1 PR-B: OnInboundFrame(true) from Idle returned err: %v", err)
+	}
+	if s != StateAckReceived {
+		t.Fatalf("M4c1 PR-B: Idle→? on valid inbound = %s, want StateAckReceived", s)
+	}
 }
 
 func TestM4c1_PRB_FSM_Transition_AckReceivedToResponseSent_OnEmit(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
-	t.Fatalf("M4c1 PR-B: FSM transition harness absent — AckReceived→ResponseSent on payload emit")
+	fsm := NewFSM()
+	if _, err := fsm.OnInboundFrame(true); err != nil {
+		t.Fatalf("M4c1 PR-B: priming to AckReceived failed: %v", err)
+	}
+	s, err := fsm.OnEmitResponse()
+	if err != nil {
+		t.Fatalf("M4c1 PR-B: OnEmitResponse from AckReceived returned err: %v", err)
+	}
+	if s != StateResponseSent {
+		t.Fatalf("M4c1 PR-B: AckReceived→? on emit = %s, want StateResponseSent", s)
+	}
 }
 
 func TestM4c1_PRB_FSM_Transition_ResponseSentToIdle_OnFinalAck(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
-	t.Fatalf("M4c1 PR-B: FSM transition harness absent — ResponseSent→Idle on initiator final ACK")
+	fsm := NewFSM()
+	if _, err := fsm.OnInboundFrame(true); err != nil {
+		t.Fatalf("prime OnInboundFrame: %v", err)
+	}
+	if _, err := fsm.OnEmitResponse(); err != nil {
+		t.Fatalf("prime OnEmitResponse: %v", err)
+	}
+	s, err := fsm.OnInitiatorFinalAck()
+	if err != nil {
+		t.Fatalf("M4c1 PR-B: OnInitiatorFinalAck from ResponseSent returned err: %v", err)
+	}
+	if s != StateIdle {
+		t.Fatalf("M4c1 PR-B: ResponseSent→? on final ACK = %s, want StateIdle", s)
+	}
 }
 
 func TestM4c1_PRB_FSM_Transition_ResponseSentToAckReceived_OnInitiatorNack_Retry(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
-	t.Fatalf("M4c1 PR-B: FSM retry transition harness absent — ResponseSent→AckReceived on NACK within retry budget")
+	fsm := NewFSM()
+	fsm.MaxNackRetries = 3
+	if _, err := fsm.OnInboundFrame(true); err != nil {
+		t.Fatalf("prime OnInboundFrame: %v", err)
+	}
+	if _, err := fsm.OnEmitResponse(); err != nil {
+		t.Fatalf("prime OnEmitResponse: %v", err)
+	}
+	s, err := fsm.OnInitiatorNack()
+	if err != nil {
+		t.Fatalf("M4c1 PR-B: OnInitiatorNack within budget returned err: %v", err)
+	}
+	if s != StateAckReceived {
+		t.Fatalf("M4c1 PR-B: ResponseSent→? on NACK (within budget) = %s, want StateAckReceived", s)
+	}
 }
 
 func TestM4c1_PRB_FSM_Transition_ResponseSentToIdle_OnInitiatorNack_Exhausted(t *testing.T) {
-	t.Skip("M4c1 PR-B impl pending — see issue/138 PR-B dispatch")
-	t.Fatalf("M4c1 PR-B: FSM abort transition harness absent — ResponseSent→Idle on NACK with retries exhausted")
+	// With MaxNackRetries=1 the FSM permits exactly one retry. The first
+	// NACK returns StateAckReceived (the single allowed retry); the second
+	// NACK exhausts the budget and returns StateIdle + ErrRetriesExhausted.
+	fsm := NewFSM()
+	fsm.MaxNackRetries = 1
+	if _, err := fsm.OnInboundFrame(true); err != nil {
+		t.Fatalf("prime OnInboundFrame: %v", err)
+	}
+	if _, err := fsm.OnEmitResponse(); err != nil {
+		t.Fatalf("prime OnEmitResponse: %v", err)
+	}
+	// 1st NACK: within budget → retry (StateAckReceived).
+	s, err := fsm.OnInitiatorNack()
+	if err != nil {
+		t.Fatalf("M4c1 PR-B: OnInitiatorNack #1 within budget returned err: %v", err)
+	}
+	if s != StateAckReceived {
+		t.Fatalf("M4c1 PR-B: OnInitiatorNack #1 = %s, want StateAckReceived", s)
+	}
+	// Re-emit to return to ResponseSent.
+	if _, err := fsm.OnEmitResponse(); err != nil {
+		t.Fatalf("prime OnEmitResponse (2): %v", err)
+	}
+	// 2nd NACK: budget consumed → exhausted.
+	s, err = fsm.OnInitiatorNack()
+	if err == nil {
+		t.Fatalf("M4c1 PR-B: OnInitiatorNack #2 with budget=1 should exhaust, got no err")
+	}
+	if s != StateIdle {
+		t.Fatalf("M4c1 PR-B: ResponseSent→? on NACK (exhausted) = %s, want StateIdle", s)
+	}
+}
+
+// TestM4c1_PRB_FSM_OnInitiatorNack_RespectsExactBudget locks the retry-budget
+// invariant: with MaxNackRetries=N the FSM permits exactly N retries (each
+// returning StateAckReceived) and aborts on the (N+1)-th NACK with
+// ErrRetriesExhausted + StateIdle. Regression guard for the off-by-one that
+// pre-incremented f.retries before the budget check.
+func TestM4c1_PRB_FSM_OnInitiatorNack_RespectsExactBudget(t *testing.T) {
+	for _, N := range []int{1, 2, 3, 5} {
+		t.Run(fmt.Sprintf("N=%d", N), func(t *testing.T) {
+			fsm := NewFSM()
+			fsm.MaxNackRetries = N
+			if _, err := fsm.OnInboundFrame(true); err != nil {
+				t.Fatalf("prime OnInboundFrame: %v", err)
+			}
+			if _, err := fsm.OnEmitResponse(); err != nil {
+				t.Fatalf("prime OnEmitResponse: %v", err)
+			}
+			// N NACKs must all succeed with StateAckReceived; re-emit
+			// after each to return to StateResponseSent.
+			for i := 1; i <= N; i++ {
+				s, err := fsm.OnInitiatorNack()
+				if err != nil {
+					t.Fatalf("N=%d NACK #%d within budget returned err: %v", N, i, err)
+				}
+				if s != StateAckReceived {
+					t.Fatalf("N=%d NACK #%d = %s, want StateAckReceived", N, i, s)
+				}
+				if _, err := fsm.OnEmitResponse(); err != nil {
+					t.Fatalf("N=%d re-emit after NACK #%d: %v", N, i, err)
+				}
+			}
+			// (N+1)-th NACK: exhausted.
+			s, err := fsm.OnInitiatorNack()
+			if !errors.Is(err, ErrRetriesExhausted) {
+				t.Fatalf("N=%d NACK #%d want ErrRetriesExhausted, got err=%v", N, N+1, err)
+			}
+			if s != StateIdle {
+				t.Fatalf("N=%d NACK #%d = %s, want StateIdle", N, N+1, s)
+			}
+		})
+	}
 }
