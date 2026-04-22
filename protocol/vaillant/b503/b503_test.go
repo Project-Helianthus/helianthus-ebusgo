@@ -23,11 +23,11 @@ func readFixture(t *testing.T, name string) []byte {
 
 func TestEncodeRequest_AllSelectors(t *testing.T) {
 	cases := []struct {
-		name            string
-		family          byte
-		selector        byte
-		fixture         string
-		helper          func() []byte
+		name     string
+		family   byte
+		selector byte
+		fixture  string
+		helper   func() []byte
 	}{
 		{"Currenterror", 0x00, 0x01, "req_current_error.bin", b503.EncodeCurrentError},
 		{"Errorhistory", 0x01, 0x01, "req_error_history.bin", b503.EncodeErrorHistory},
@@ -60,13 +60,13 @@ func TestSafety_Classification(t *testing.T) {
 		family, selector byte
 		want             b503.InvokeSafety
 	}{
-		{0x00, 0x01, b503.SafetyRead},          // Currenterror
-		{0x01, 0x01, b503.SafetyRead},          // Errorhistory
-		{0x02, 0x01, b503.SafetyInstallWrite},  // Clearerrorhistory
-		{0x00, 0x02, b503.SafetyRead},          // Currentservice
-		{0x01, 0x02, b503.SafetyRead},          // Servicehistory
-		{0x02, 0x02, b503.SafetyInstallWrite},  // Clearservicehistory
-		{0x00, 0x03, b503.SafetyServiceWrite},  // LiveMonitorMain
+		{0x00, 0x01, b503.SafetyRead},         // Currenterror
+		{0x01, 0x01, b503.SafetyRead},         // Errorhistory
+		{0x02, 0x01, b503.SafetyInstallWrite}, // Clearerrorhistory
+		{0x00, 0x02, b503.SafetyRead},         // Currentservice
+		{0x01, 0x02, b503.SafetyRead},         // Servicehistory
+		{0x02, 0x02, b503.SafetyInstallWrite}, // Clearservicehistory
+		{0x00, 0x03, b503.SafetyServiceWrite}, // LiveMonitorMain
 	}
 	for _, tc := range cases {
 		got, ok := b503.Safety(tc.family, tc.selector)
@@ -211,8 +211,8 @@ func TestDecoders_OverlongPayload_Error(t *testing.T) {
 	// length-prefixed frame body (e.g. `0x0a` + 10-byte slots) is passed by a
 	// caller that forgot to strip the length byte.
 	tenSlots := make([]byte, 10)
-	overlong10Plus1 := make([]byte, 11)   // 10-byte slot payload + 1 spurious byte
-	overlongHistory := make([]byte, 12)   // 11-byte history payload + 1 spurious byte
+	overlong10Plus1 := make([]byte, 11) // 10-byte slot payload + 1 spurious byte
+	overlongHistory := make([]byte, 12) // 11-byte history payload + 1 spurious byte
 	for i := range overlong10Plus1 {
 		overlong10Plus1[i] = 0xff
 	}
