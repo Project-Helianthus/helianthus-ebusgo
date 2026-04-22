@@ -1,6 +1,7 @@
 package b503_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -37,7 +38,10 @@ func TestEncodeRequest_AllSelectors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			want := readFixture(t, tc.fixture)
-			got := b503.EncodeRequest(tc.family, tc.selector)
+			got, err := b503.EncodeRequest(tc.family, tc.selector)
+			if err != nil {
+				t.Fatalf("EncodeRequest(%#x,%#x): unexpected error %v", tc.family, tc.selector, err)
+			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("EncodeRequest(%#x,%#x) = %x; want %x", tc.family, tc.selector, got, want)
 			}
@@ -198,6 +202,45 @@ func TestDecodeLiveMonitorMain_SpecFixture(t *testing.T) {
 	}
 	if len(st.Reserved) != len(payload)-2 {
 		t.Errorf("Reserved len = %d; want %d", len(st.Reserved), len(payload)-2)
+	}
+}
+
+func TestDecoders_OverlongPayload_Error(t *testing.T) {
+	// Fixed-shape decoders MUST reject overlong inputs per spec §5.1 sentinel
+	// contract — silent truncation would corrupt slot interpretation when a
+	// length-prefixed frame body (e.g. `0x0a` + 10-byte slots) is passed by a
+	// caller that forgot to strip the length byte.
+	tenSlots := make([]byte, 10)
+	overlong10Plus1 := make([]byte, 11)   // 10-byte slot payload + 1 spurious byte
+	overlongHistory := make([]byte, 12)   // 11-byte history payload + 1 spurious byte
+	for i := range overlong10Plus1 {
+		overlong10Plus1[i] = 0xff
+	}
+	for i := range overlongHistory {
+		overlongHistory[i] = 0xff
+	}
+
+	if _, err := b503.DecodeCurrentError(tenSlots); err != nil {
+		t.Errorf("DecodeCurrentError(exact-10): unexpected error %v", err)
+	}
+	if _, err := b503.DecodeCurrentError(overlong10Plus1); !errors.Is(err, b503.ErrWrongPayloadLen) {
+		t.Errorf("DecodeCurrentError(11-byte): err = %v; want ErrWrongPayloadLen", err)
+	}
+	if _, err := b503.DecodeCurrentService(overlong10Plus1); !errors.Is(err, b503.ErrWrongPayloadLen) {
+		t.Errorf("DecodeCurrentService(11-byte): err = %v; want ErrWrongPayloadLen", err)
+	}
+	if _, err := b503.DecodeErrorHistory(overlongHistory); !errors.Is(err, b503.ErrWrongPayloadLen) {
+		t.Errorf("DecodeErrorHistory(12-byte): err = %v; want ErrWrongPayloadLen", err)
+	}
+	if _, err := b503.DecodeServiceHistory(overlongHistory); !errors.Is(err, b503.ErrWrongPayloadLen) {
+		t.Errorf("DecodeServiceHistory(12-byte): err = %v; want ErrWrongPayloadLen", err)
+	}
+	// LiveMonitorMain is variable-length (Reserved trailing bytes are valid);
+	// overlong inputs MUST still decode successfully.
+	payload := make([]byte, 20)
+	payload[0], payload[1] = 0xf4, 0x01
+	if _, err := b503.DecodeLiveMonitorMain(payload); err != nil {
+		t.Errorf("DecodeLiveMonitorMain(variable-20): unexpected error %v", err)
 	}
 }
 

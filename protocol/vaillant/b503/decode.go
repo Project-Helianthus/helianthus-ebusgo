@@ -22,6 +22,12 @@ const slotPayloadLen = slotCount * 2
 // the minimum required for the selector.
 var ErrShortPayload = errors.New("b503: payload shorter than required for selector")
 
+// ErrWrongPayloadLen is returned by fixed-shape decoders when the payload
+// length does not match the exact size specified in spec §3. Fixed-size
+// selectors MUST reject overlong inputs — silent truncation would let
+// malformed or length-prefixed frame bodies decode into corrupt slot values.
+var ErrWrongPayloadLen = errors.New("b503: payload length does not match fixed-size selector")
+
 // ErrorSlots is the decoded five-slot composite payload returned by the
 // Currenterror (00 01) and Currentservice (00 02) selectors.
 //
@@ -89,43 +95,57 @@ func decodeSlots(payload []byte) [slotCount]uint16 {
 // (10 bytes), i.e. the response body AFTER the leading length byte has been
 // stripped by the transport layer.
 func DecodeCurrentError(payload []byte) (ErrorSlots, error) {
-	if len(payload) < slotPayloadLen {
-		return ErrorSlots{}, fmt.Errorf("%w: Currenterror wants %d bytes, got %d", ErrShortPayload, slotPayloadLen, len(payload))
+	if len(payload) != slotPayloadLen {
+		if len(payload) < slotPayloadLen {
+			return ErrorSlots{}, fmt.Errorf("%w: Currenterror wants %d bytes, got %d", ErrShortPayload, slotPayloadLen, len(payload))
+		}
+		return ErrorSlots{}, fmt.Errorf("%w: Currenterror wants exactly %d bytes, got %d", ErrWrongPayloadLen, slotPayloadLen, len(payload))
 	}
-	return ErrorSlots{Slots: decodeSlots(payload[:slotPayloadLen])}, nil
+	return ErrorSlots{Slots: decodeSlots(payload)}, nil
 }
 
 // DecodeCurrentService decodes the response payload for selector 00 02
 // (Currentservice, spec §3 / §5). Wire shape is identical to Currenterror.
 func DecodeCurrentService(payload []byte) (ErrorSlots, error) {
-	if len(payload) < slotPayloadLen {
-		return ErrorSlots{}, fmt.Errorf("%w: Currentservice wants %d bytes, got %d", ErrShortPayload, slotPayloadLen, len(payload))
+	if len(payload) != slotPayloadLen {
+		if len(payload) < slotPayloadLen {
+			return ErrorSlots{}, fmt.Errorf("%w: Currentservice wants %d bytes, got %d", ErrShortPayload, slotPayloadLen, len(payload))
+		}
+		return ErrorSlots{}, fmt.Errorf("%w: Currentservice wants exactly %d bytes, got %d", ErrWrongPayloadLen, slotPayloadLen, len(payload))
 	}
-	return ErrorSlots{Slots: decodeSlots(payload[:slotPayloadLen])}, nil
+	return ErrorSlots{Slots: decodeSlots(payload)}, nil
 }
 
 // DecodeErrorHistory decodes the response payload for selector 01 01
 // (Errorhistory, spec §3). The first byte is the echoed history index,
 // followed by the five LE uint16 slots.
 func DecodeErrorHistory(payload []byte) (ErrorHistoryRecord, error) {
-	if len(payload) < 1+slotPayloadLen {
-		return ErrorHistoryRecord{}, fmt.Errorf("%w: Errorhistory wants %d bytes, got %d", ErrShortPayload, 1+slotPayloadLen, len(payload))
+	const expected = 1 + slotPayloadLen
+	if len(payload) != expected {
+		if len(payload) < expected {
+			return ErrorHistoryRecord{}, fmt.Errorf("%w: Errorhistory wants %d bytes, got %d", ErrShortPayload, expected, len(payload))
+		}
+		return ErrorHistoryRecord{}, fmt.Errorf("%w: Errorhistory wants exactly %d bytes, got %d", ErrWrongPayloadLen, expected, len(payload))
 	}
 	return ErrorHistoryRecord{
 		Index: payload[0],
-		Slots: decodeSlots(payload[1 : 1+slotPayloadLen]),
+		Slots: decodeSlots(payload[1:expected]),
 	}, nil
 }
 
 // DecodeServiceHistory decodes the response payload for selector 01 02
 // (Servicehistory, spec §3). Wire shape is identical to Errorhistory.
 func DecodeServiceHistory(payload []byte) (ErrorHistoryRecord, error) {
-	if len(payload) < 1+slotPayloadLen {
-		return ErrorHistoryRecord{}, fmt.Errorf("%w: Servicehistory wants %d bytes, got %d", ErrShortPayload, 1+slotPayloadLen, len(payload))
+	const expected = 1 + slotPayloadLen
+	if len(payload) != expected {
+		if len(payload) < expected {
+			return ErrorHistoryRecord{}, fmt.Errorf("%w: Servicehistory wants %d bytes, got %d", ErrShortPayload, expected, len(payload))
+		}
+		return ErrorHistoryRecord{}, fmt.Errorf("%w: Servicehistory wants exactly %d bytes, got %d", ErrWrongPayloadLen, expected, len(payload))
 	}
 	return ErrorHistoryRecord{
 		Index: payload[0],
-		Slots: decodeSlots(payload[1 : 1+slotPayloadLen]),
+		Slots: decodeSlots(payload[1:expected]),
 	}, nil
 }
 
