@@ -293,6 +293,61 @@ func TestSourceAddressSelector_ExplicitAddressBypassesCandidateSearchButValidate
 	}
 }
 
+func TestSourceAddressSelector_SelectionModeContract(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  SourceAddressSelectionConfig
+		want SourceAddressSelectionMode
+	}{
+		{
+			name: "default",
+			cfg:  SourceAddressSelectionConfig{},
+			want: SourceAddressSelectionModeDefaultPolicy,
+		},
+		{
+			name: "source description constrained",
+			cfg: SourceAddressSelectionConfig{
+				SourceDescription: SourceAddressDescriptionBusInterface,
+			},
+			want: SourceAddressSelectionModeSourceDescriptionConstrainedPolicy,
+		},
+		{
+			name: "priority filtered default",
+			cfg: SourceAddressSelectionConfig{
+				PriorityIndex: SourceAddressPriorityP3,
+			},
+			want: SourceAddressSelectionModePriorityFilteredDefaultPolicy,
+		},
+		{
+			name: "explicit validate only",
+			cfg: SourceAddressSelectionConfig{
+				ExplicitSource:    0x71,
+				ExplicitSourceSet: true,
+			},
+			want: SourceAddressSelectionModeExplicitValidateOnly,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := tc.cfg
+			cfg.ListenWarmup = 2 * time.Millisecond
+			selector := NewSourceAddressSelector(&scriptedSourceAddressSelectionBus{}, cfg)
+			result, err := selector.Select(context.Background())
+			if err != nil {
+				t.Fatalf("Select error = %v", err)
+			}
+			if result.Mode != tc.want {
+				t.Fatalf("Mode = %q; want %q", result.Mode, tc.want)
+			}
+		})
+	}
+}
+
 func TestSourceAddressSelector_ExplicitAddressRejectsDescriptionOrPriority(t *testing.T) {
 	t.Parallel()
 

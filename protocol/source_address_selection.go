@@ -183,9 +183,10 @@ type SourceAddressSelectionBus interface {
 type SourceAddressSelectionMode string
 
 const (
-	SourceAddressSelectionModeDefault              SourceAddressSelectionMode = "default"
-	SourceAddressSelectionModeConstrained          SourceAddressSelectionMode = "constrained"
-	SourceAddressSelectionModeExplicitValidateOnly SourceAddressSelectionMode = "explicit_validate_only"
+	SourceAddressSelectionModeDefaultPolicy                      SourceAddressSelectionMode = "default_policy"
+	SourceAddressSelectionModeSourceDescriptionConstrainedPolicy SourceAddressSelectionMode = "source_description_constrained_policy"
+	SourceAddressSelectionModePriorityFilteredDefaultPolicy      SourceAddressSelectionMode = "priority_filtered_default_policy"
+	SourceAddressSelectionModeExplicitValidateOnly               SourceAddressSelectionMode = "explicit_validate_only"
 )
 
 // SourceAddressOccupancyState is the selector's known state for a source or companion address.
@@ -586,10 +587,13 @@ func (cfg SourceAddressSelectionConfig) selectionMode() SourceAddressSelectionMo
 	if cfg.ExplicitSourceSet {
 		return SourceAddressSelectionModeExplicitValidateOnly
 	}
-	if cfg.SourceDescription != "" || cfg.PriorityIndex != "" {
-		return SourceAddressSelectionModeConstrained
+	if cfg.SourceDescription != "" {
+		return SourceAddressSelectionModeSourceDescriptionConstrainedPolicy
 	}
-	return SourceAddressSelectionModeDefault
+	if cfg.PriorityIndex != "" {
+		return SourceAddressSelectionModePriorityFilteredDefaultPolicy
+	}
+	return SourceAddressSelectionModeDefaultPolicy
 }
 
 func isKnownSourceAddressPriority(priority SourceAddressPriorityIndex) bool {
