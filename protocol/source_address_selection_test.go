@@ -509,6 +509,28 @@ func TestSourceAddressSelector_PropagatesInquiryCancellation(t *testing.T) {
 	}
 }
 
+func TestSourceAddressSelector_IgnoresOptionalInquiryFailure(t *testing.T) {
+	t.Parallel()
+
+	bus := &scriptedSourceAddressSelectionBus{inquiryErr: errors.New("inquiry unsupported")}
+	selector := NewSourceAddressSelector(bus, SourceAddressSelectionConfig{
+		ListenWarmup:       2 * time.Millisecond,
+		InquiryEnabled:     true,
+		InquiryMaxAttempts: 1,
+	})
+
+	result, err := selector.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error = %v; want optional inquiry failure to be non-fatal", err)
+	}
+	if result.Source != 0x7F {
+		t.Fatalf("Source = 0x%02x; want 0x7f from candidate evaluation after optional inquiry failure", result.Source)
+	}
+	if bus.inquiryCalls != 1 {
+		t.Fatalf("inquiry calls = %d; want 1", bus.inquiryCalls)
+	}
+}
+
 func TestSourceAddressSelector_NilContextDefaultsToBackground(t *testing.T) {
 	t.Parallel()
 

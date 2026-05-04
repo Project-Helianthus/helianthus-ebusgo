@@ -359,7 +359,7 @@ func (s *SourceAddressSelector) Select(ctx context.Context) (SourceAddressSelect
 		} else if ctx.Err() != nil {
 			return SourceAddressSelection{}, ctx.Err()
 		} else {
-			return SourceAddressSelection{}, &ErrSourceAddressBusObservation{Operation: "inquiry-existence", Err: err}
+			s.markInquiryResult(cfg, false)
 		}
 	}
 
