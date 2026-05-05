@@ -79,29 +79,86 @@ def normalized_outcome(case):
         return "planned"
     return "fail"
 
-unexpected = []
-xfailed = 0
-xpassed = 0
-passed = 0
+case_by_id = {}
+duplicate = []
 for case in cases:
-    value = normalized_outcome(case)
-    case_id = case.get("case_id", "?")
-    if value == "pass":
-        passed += 1
-    elif value == "xfail":
-        xfailed += 1
-    elif value == "xpass":
-        xpassed += 1
-    else:
-        unexpected.append(case_id)
+    case_id = case.get("case_id")
+    if not isinstance(case_id, str) or not case_id:
+        print("transport gate: invalid matrix report (case without case_id).")
+        raise SystemExit(1)
+    if case_id in case_by_id:
+        duplicate.append(case_id)
+    case_by_id[case_id] = case
 
-if unexpected:
-    preview = ",".join(unexpected[:10])
-    print(f"transport gate: matrix has unexpected failures/planned ({len(unexpected)}). sample={preview}")
+if duplicate:
+    preview = ",".join(sorted(set(duplicate))[:10])
+    print(f"transport gate: duplicate case IDs ({len(set(duplicate))}). sample={preview}")
     raise SystemExit(1)
 
-msg = f"transport gate: PASS (pass={passed}, xfail={xfailed}, xpass={xpassed}, total={len(cases)})."
-if xpassed:
+expected_ids = {f"T{number:02d}" for number in range(1, 89)}
+actual_ids = set(case_by_id)
+missing_ids = sorted(expected_ids - actual_ids)
+unknown_ids = sorted(actual_ids - expected_ids)
+if missing_ids or unknown_ids:
+    if missing_ids:
+        print(f"transport gate: missing matrix case IDs: {','.join(missing_ids[:10])}")
+    if unknown_ids:
+        print(f"transport gate: unknown matrix case IDs: {','.join(unknown_ids[:10])}")
+    raise SystemExit(1)
+
+required_active = {f"T{number:02d}" for number in range(1, 7)}
+ebusd_plain_adapter = {"T07", "T08"}
+proxy_single_info = {f"T{number:02d}" for number in range(9, 25)}
+proxy_dual_info = {f"T{number:02d}" for number in range(25, 89)}
+allowed_non_terminal = {"pass", "xfail", "xpass", "blocked-infra"}
+
+required_failures = []
+unexpected = []
+planned = []
+for case_id, case in sorted(case_by_id.items()):
+    value = normalized_outcome(case)
+    if value == "planned":
+        planned.append(case_id)
+        continue
+    if value not in allowed_non_terminal:
+        unexpected.append(case_id)
+        continue
+    if case_id in required_active and value not in {"pass", "xpass"}:
+        required_failures.append(case_id)
+    if case_id in ebusd_plain_adapter:
+        infra_reason = case.get("infra_reason")
+        if value == "blocked-infra" and infra_reason != "adapter_no_signal":
+            unexpected.append(case_id)
+        elif value not in {"pass", "xfail", "xpass", "blocked-infra"}:
+            unexpected.append(case_id)
+
+if planned:
+    preview = ",".join(planned[:10])
+    print(f"transport gate: matrix still has planned/not-run cases ({len(planned)}). sample={preview}")
+    raise SystemExit(1)
+if required_failures:
+    preview = ",".join(required_failures[:10])
+    print(f"transport gate: required active adapter cases failed ({len(required_failures)}). sample={preview}")
+    raise SystemExit(1)
+if unexpected:
+    preview = ",".join(unexpected[:10])
+    print(f"transport gate: matrix has unexpected outcomes ({len(unexpected)}). sample={preview}")
+    raise SystemExit(1)
+
+counts = {}
+for case in cases:
+    value = normalized_outcome(case)
+    counts[value] = counts.get(value, 0) + 1
+
+msg = (
+    "transport gate: PASS "
+    f"(required_active={len(required_active)}, "
+    f"ebusd_plain_nonblocking={len(ebusd_plain_adapter)}, "
+    f"proxy_single_informational={len(proxy_single_info)}, "
+    f"proxy_dual_informational={len(proxy_dual_info)}, "
+    f"total={len(cases)}, outcomes={counts})."
+)
+if counts.get("xpass", 0):
     msg += " review expected-failure list (xpass present)."
 print(msg)
 PY
