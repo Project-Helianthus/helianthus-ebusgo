@@ -10,6 +10,9 @@ if grep -RInwi --exclude-dir=.git -E 'm[a]ster|s[l]ave' .; then
   exit 1
 fi
 
+echo "==> public symbol gate"
+./scripts/public_symbol_gate.sh
+
 echo "==> gofmt"
 unformatted="$(git ls-files '*.go' | xargs -n 50 gofmt -l || true)"
 if [ -n "${unformatted}" ]; then

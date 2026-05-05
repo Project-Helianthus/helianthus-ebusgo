@@ -53,9 +53,9 @@ type EventCollisionDetected struct {
 
 // CollisionMonitorConfig controls matching windows and history size.
 type CollisionMonitorConfig struct {
-	EchoWindow       time.Duration
-	HistoryCapacity  int
-	GraceAfterRejoin time.Duration
+	EchoWindow               time.Duration
+	HistoryCapacity          int
+	SourceAddressChangeGrace time.Duration
 }
 
 // CollisionMonitor identifies foreign frames that reuse our initiator source.
@@ -101,7 +101,7 @@ func (m *CollisionMonitor) SetInitiator(initiator byte) {
 	if m.initiator != 0 && m.initiator != initiator {
 		m.oldInitiator = m.initiator
 		m.oldInitiatorValid = true
-		m.oldInitiatorGraceEnd = now.Add(m.cfg.GraceAfterRejoin)
+		m.oldInitiatorGraceEnd = now.Add(m.cfg.SourceAddressChangeGrace)
 		// Clear collision state only when the address actually changes.
 		// Setting the same address again must preserve active collision state
 		// so that an ongoing collision is not silently discarded (EG25).
@@ -215,8 +215,8 @@ func normalizeCollisionMonitorConfig(cfg CollisionMonitorConfig) CollisionMonito
 	if cfg.HistoryCapacity <= 0 {
 		cfg.HistoryCapacity = defaultCollisionHistoryCapacity
 	}
-	if cfg.GraceAfterRejoin <= 0 {
-		cfg.GraceAfterRejoin = defaultCollisionGraceWindow
+	if cfg.SourceAddressChangeGrace <= 0 {
+		cfg.SourceAddressChangeGrace = defaultCollisionGraceWindow
 	}
 	return cfg
 }
