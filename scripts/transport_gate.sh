@@ -110,7 +110,7 @@ required_active = {f"T{number:02d}" for number in range(1, 7)}
 ebusd_plain_adapter = {"T07", "T08"}
 proxy_single_info = {f"T{number:02d}" for number in range(9, 25)}
 proxy_dual_info = {f"T{number:02d}" for number in range(25, 89)}
-allowed_non_terminal = {"pass", "xfail", "xpass", "blocked-infra", "fail"}
+allowed_non_terminal = {"pass", "xfail", "xpass", "blocked-infra"}
 
 required_failures = []
 unexpected = []
