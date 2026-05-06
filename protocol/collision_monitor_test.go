@@ -13,9 +13,9 @@ func TestCollisionMonitor_ForeignSameSourceTriggersCollision(t *testing.T) {
 
 	now := time.Date(2026, 2, 19, 17, 0, 0, 0, time.UTC)
 	monitor := NewCollisionMonitor(CollisionMonitorConfig{
-		EchoWindow:       200 * time.Millisecond,
-		HistoryCapacity:  16,
-		GraceAfterRejoin: 750 * time.Millisecond,
+		EchoWindow:               200 * time.Millisecond,
+		HistoryCapacity:          16,
+		SourceAddressChangeGrace: 750 * time.Millisecond,
 	})
 	monitor.now = func() time.Time { return now }
 	monitor.SetInitiator(0x31)
@@ -137,14 +137,14 @@ func TestCollisionMonitor_RecordTXFailsFastWhileCollisionActive(t *testing.T) {
 	}
 }
 
-func TestCollisionMonitor_GraceAfterRejoinIgnoresOldInitiator(t *testing.T) {
+func TestCollisionMonitor_SourceAddressChangeGraceIgnoresOldInitiator(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 2, 19, 17, 0, 0, 0, time.UTC)
 	monitor := NewCollisionMonitor(CollisionMonitorConfig{
-		EchoWindow:       200 * time.Millisecond,
-		HistoryCapacity:  16,
-		GraceAfterRejoin: 500 * time.Millisecond,
+		EchoWindow:               200 * time.Millisecond,
+		HistoryCapacity:          16,
+		SourceAddressChangeGrace: 500 * time.Millisecond,
 	})
 	monitor.now = func() time.Time { return now }
 	monitor.SetInitiator(0x31)
