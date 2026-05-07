@@ -20,17 +20,52 @@ const (
 )
 
 // Frame represents a parsed eBUS frame.
+//
+// FrameType is an optional explicit declaration of the frame's
+// application-layer semantic kind (M2S / M2M / M2BC). When zero-valued
+// (FrameTypeUnknown), the frame's effective type is derived from
+// Target via FrameTypeForTarget. The Phase C transport-side validator
+// (Bus.Send + Frame.Validate) requires every emitted frame to have an
+// explicit non-zero FrameType for new semantic API call sites — see
+// Frame.Validate doc + Phase C M-C7 enrichment.
 type Frame struct {
 	Source    byte
 	Target    byte
 	Primary   byte
 	Secondary byte
 	Data      []byte
+	FrameType FrameType
 }
 
 // Type returns the frame type based on the target address.
+//
+// Used by parser-side code that always derives from Target. New
+// emit-side code should prefer Frame.EffectiveFrameType which respects
+// the explicit Frame.FrameType field.
 func (f Frame) Type() FrameType {
 	return FrameTypeForTarget(f.Target)
+}
+
+// EffectiveFrameType returns the explicit Frame.FrameType when set
+// (non-Unknown), otherwise FrameTypeForTarget(Target). Used by
+// Frame.Validate to assert caller intent matches the destination class.
+func (f Frame) EffectiveFrameType() FrameType {
+	if f.FrameType != FrameTypeUnknown {
+		return f.FrameType
+	}
+	return FrameTypeForTarget(f.Target)
+}
+
+// Validate enforces the Phase C frame-type addressing contract by
+// delegating to ValidateFrameAddressing(EffectiveFrameType, Source,
+// Target). Returns nil on conformance; ErrInvalidFrameAddress (or a
+// wrapped variant) on rejection.
+//
+// Decision references: AD24 (additive Frame.FrameType field +
+// Frame.Validate invoked from Bus.Send), AD26 (validator contract),
+// AD28 (per-API-site explicit frame-type declaration).
+func (f Frame) Validate() error {
+	return ValidateFrameAddressing(f.EffectiveFrameType(), f.Source, f.Target)
 }
 
 // FrameTypeForTarget determines the frame type based on the destination address.
