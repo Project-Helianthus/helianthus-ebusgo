@@ -18,6 +18,8 @@ jobs:
               ':!protocol/initiator_address_test.go' \
               ':!protocol/address_class.go' \
               ':!protocol/address_class_test.go' \
+              ':!protocol/validate_frame_addressing.go' \
+              ':!protocol/validate_frame_addressing_test.go' \
               ':!emulation/' \
               ':!transport/ebusd_tcp.go' \
               ':!README.md'; then
