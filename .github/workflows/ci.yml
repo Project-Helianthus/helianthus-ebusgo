@@ -16,6 +16,8 @@ jobs:
               ':!protocol/bus.go' \
               ':!protocol/protocol.go' \
               ':!protocol/initiator_address_test.go' \
+              ':!protocol/address_class.go' \
+              ':!protocol/address_class_test.go' \
               ':!emulation/' \
               ':!transport/ebusd_tcp.go' \
               ':!README.md'; then
