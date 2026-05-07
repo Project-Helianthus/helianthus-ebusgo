@@ -3,7 +3,24 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 )
+
+// invalidFrameAddressTotal counts frames rejected by Bus.Send via
+// Frame.Validate. Exposed via InvalidFrameAddressTotal so the gateway
+// can publish the value as Prometheus counter
+// `ebus_transport_invalid_frame_address_total`. Atomic for race safety.
+//
+// Decision: counter increments Bus.Send-side, NOT validator-side, so
+// unit tests that call ValidateFrameAddressing in isolation don't bump
+// production metrics.
+var invalidFrameAddressTotal uint64
+
+// InvalidFrameAddressTotal returns the cumulative count of frames
+// rejected by Bus.Send via Frame.Validate (Phase C M-C5).
+func InvalidFrameAddressTotal() uint64 {
+	return atomic.LoadUint64(&invalidFrameAddressTotal)
+}
 
 // ErrInvalidFrameAddress is the sentinel error returned by
 // ValidateFrameAddressing when a frame's (FrameType, src, dst) tuple

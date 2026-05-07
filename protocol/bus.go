@@ -160,6 +160,16 @@ func (b *Bus) Send(ctx context.Context, frame Frame) (*Frame, error) {
 		return nil, err
 	}
 
+	// Phase C M-C5: enforce frame-type addressing contract before any
+	// wire write. Rejection increments invalidFrameAddressTotal and
+	// returns ErrInvalidFrameAddress wrapped with the failing clause.
+	// Decision references: AD24 (additive Frame.FrameType + Validate),
+	// AD26 (validator contract).
+	if err := frame.Validate(); err != nil {
+		atomic.AddUint64(&invalidFrameAddressTotal, 1)
+		return nil, err
+	}
+
 	b.queueMu.Lock()
 	if b.closed {
 		b.queueMu.Unlock()
@@ -176,6 +186,7 @@ func (b *Bus) Send(ctx context.Context, frame Frame) (*Frame, error) {
 			Primary:   frame.Primary,
 			Secondary: frame.Secondary,
 			Data:      append([]byte(nil), frame.Data...),
+			FrameType: frame.FrameType,
 		},
 		ctx: ctx,
 		// Capacity 1 to avoid blocking the run loop when delivering results.
