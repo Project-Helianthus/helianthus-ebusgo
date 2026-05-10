@@ -609,6 +609,174 @@ func sourceAddressTableMarkdownForHash() string {
 	return builder.String()
 }
 
+// -----------------------------------------------------------------------------
+// M4_SOURCE_SELECTION_HINT (runtime-state-w19-26.locked):
+// HintCandidate biases candidate ordering toward a cached preferred source
+// from a prior admission cycle. Validation is unchanged: a hint that fails
+// validation falls through to the regular candidate order.
+// -----------------------------------------------------------------------------
+
+func TestSourceAddressSelector_HintCandidateAcceptedFirst(t *testing.T) {
+	t.Parallel()
+
+	// Default policy normally returns 0x7F first (0xFF companion unknown).
+	// Pass a hint of 0x77 — a row LATER in the default policy — and verify
+	// the selector tries it first and admits it.
+	selector := NewSourceAddressSelector(&scriptedSourceAddressSelectionBus{}, SourceAddressSelectionConfig{
+		ListenWarmup:     2 * time.Millisecond,
+		HintCandidate:    0x77,
+		HintCandidateSet: true,
+	})
+	result, err := selector.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error = %v", err)
+	}
+	if result.Source != 0x77 {
+		t.Fatalf("Source = 0x%02x; want 0x77 (hint biased to head of candidate order)", result.Source)
+	}
+	if !result.Metrics.HintCandidateSet || result.Metrics.HintCandidate != 0x77 {
+		t.Fatalf("HintCandidate=%v set=%v; want 0x77 set=true", result.Metrics.HintCandidate, result.Metrics.HintCandidateSet)
+	}
+	if !result.Metrics.HintAccepted {
+		t.Fatalf("HintAccepted = false; want true when hint succeeded")
+	}
+	if result.Metrics.HintRejectionReason != "" {
+		t.Fatalf("HintRejectionReason = %q; want empty when hint accepted", result.Metrics.HintRejectionReason)
+	}
+	if len(result.Metrics.CandidatesConsidered) == 0 || result.Metrics.CandidatesConsidered[0] != 0x77 {
+		t.Fatalf("CandidatesConsidered[0] = 0x%02x; want 0x77 first", firstByteOrZero(result.Metrics.CandidatesConsidered))
+	}
+}
+
+func TestSourceAddressSelector_HintCandidateRejectionFallsBackToDefaultPolicy(t *testing.T) {
+	t.Parallel()
+
+	// Hint = 0xFF — default policy's first candidate, but its companion
+	// 0x04 has unknown occupancy → validator rejects with "companion-unknown".
+	// Selector must fall through to 0x7F (next default-policy row) without
+	// erroring or mutating the hint state — and expose the rejection reason.
+	selector := NewSourceAddressSelector(&scriptedSourceAddressSelectionBus{}, SourceAddressSelectionConfig{
+		ListenWarmup:     2 * time.Millisecond,
+		HintCandidate:    0xFF,
+		HintCandidateSet: true,
+	})
+	result, err := selector.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error = %v", err)
+	}
+	if result.Source != 0x7F {
+		t.Fatalf("Source = 0x%02x; want 0x7f after hint=0xff rejection", result.Source)
+	}
+	if !result.Metrics.HintCandidateSet || result.Metrics.HintCandidate != 0xFF {
+		t.Fatalf("HintCandidate=%v set=%v; want 0xff set=true", result.Metrics.HintCandidate, result.Metrics.HintCandidateSet)
+	}
+	if result.Metrics.HintAccepted {
+		t.Fatalf("HintAccepted = true; want false when hint rejected")
+	}
+	if result.Metrics.HintRejectionReason != "companion-unknown" {
+		t.Fatalf("HintRejectionReason = %q; want companion-unknown", result.Metrics.HintRejectionReason)
+	}
+	// Default-policy fall-through must keep its order intact.
+	if len(result.Metrics.CandidatesConsidered) < 2 ||
+		result.Metrics.CandidatesConsidered[0] != 0xFF ||
+		result.Metrics.CandidatesConsidered[1] != 0x7F {
+		t.Fatalf("CandidatesConsidered = %s; want 0xff,0x7f,...", hexBytes(result.Metrics.CandidatesConsidered))
+	}
+}
+
+func TestSourceAddressSelector_HintCandidateNotInTableIgnored(t *testing.T) {
+	t.Parallel()
+
+	// 0x42 is not a row in sourceAddressTableV1. Selector must silently
+	// ignore the hint and proceed with default policy. Metrics should
+	// still reflect HintCandidateSet=true so observability can attribute
+	// the absence to a missing row, not "no hint passed".
+	selector := NewSourceAddressSelector(&scriptedSourceAddressSelectionBus{}, SourceAddressSelectionConfig{
+		ListenWarmup:     2 * time.Millisecond,
+		HintCandidate:    0x42,
+		HintCandidateSet: true,
+	})
+	result, err := selector.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error = %v", err)
+	}
+	if result.Source != 0x7F {
+		t.Fatalf("Source = 0x%02x; want 0x7f (default policy unaffected)", result.Source)
+	}
+	if result.Metrics.HintAccepted {
+		t.Fatalf("HintAccepted = true; want false when hint not in table")
+	}
+	if result.Metrics.HintRejectionReason != "" {
+		t.Fatalf("HintRejectionReason = %q; want empty (hint never tried)", result.Metrics.HintRejectionReason)
+	}
+}
+
+func TestSourceAddressSelector_HintCandidateIgnoredWhenExplicitSourceSet(t *testing.T) {
+	t.Parallel()
+
+	// Operator pinned ExplicitSource — hint must be silently ignored to
+	// avoid biasing the operator-supplied candidate set.
+	selector := NewSourceAddressSelector(&scriptedSourceAddressSelectionBus{}, SourceAddressSelectionConfig{
+		ListenWarmup:      2 * time.Millisecond,
+		ExplicitSource:    0x71,
+		ExplicitSourceSet: true,
+		HintCandidate:     0x77,
+		HintCandidateSet:  true,
+	})
+	result, err := selector.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error = %v", err)
+	}
+	if result.Source != 0x71 {
+		t.Fatalf("Source = 0x%02x; want 0x71 (explicit source pinned, hint ignored)", result.Source)
+	}
+	// HintCandidateSet metric must report false because explicit source
+	// suppressed the hint — observability shouldn't claim the hint was used.
+	if result.Metrics.HintCandidateSet || result.Metrics.HintAccepted {
+		t.Fatalf("Hint metrics should be cleared when explicit source set; got set=%v accepted=%v",
+			result.Metrics.HintCandidateSet, result.Metrics.HintAccepted)
+	}
+}
+
+func TestSourceAddressSelector_HintCandidateSetWithZeroIsHonored(t *testing.T) {
+	t.Parallel()
+
+	// HintCandidate=0x00 + HintCandidateSet=true means "hint = 0x00", not
+	// "no hint" — the byte-zero ambiguity is resolved by the explicit
+	// HintCandidateSet flag. 0x00 is in the default policy table (last
+	// entry), and without occupancy evidence its companion (0x05) is
+	// unknown but still allowed by the validator. Selector must promote
+	// 0x00 to head of the candidate sequence and admit it.
+	selector := NewSourceAddressSelector(&scriptedSourceAddressSelectionBus{}, SourceAddressSelectionConfig{
+		ListenWarmup:     2 * time.Millisecond,
+		HintCandidate:    0x00,
+		HintCandidateSet: true,
+	})
+	result, err := selector.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error = %v", err)
+	}
+	if result.Source != 0x00 {
+		t.Fatalf("Source = 0x%02x; want 0x00 (hint biased to head of candidate order)", result.Source)
+	}
+	if !result.Metrics.HintCandidateSet || result.Metrics.HintCandidate != 0x00 {
+		t.Fatalf("HintCandidate=%v set=%v; want 0x00 set=true", result.Metrics.HintCandidate, result.Metrics.HintCandidateSet)
+	}
+	if !result.Metrics.HintAccepted {
+		t.Fatalf("HintAccepted = false; want true (hint=0x00 honored, not treated as unset)")
+	}
+	if len(result.Metrics.CandidatesConsidered) == 0 || result.Metrics.CandidatesConsidered[0] != 0x00 {
+		t.Fatalf("CandidatesConsidered[0] = 0x%02x; want 0x00 first", firstByteOrZero(result.Metrics.CandidatesConsidered))
+	}
+}
+
+func firstByteOrZero(b []byte) byte {
+	if len(b) == 0 {
+		return 0
+	}
+	return b[0]
+}
+
 func equalBytes(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
