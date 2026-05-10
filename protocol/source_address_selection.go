@@ -233,6 +233,25 @@ type SourceAddressSelectionConfig struct {
 	ExplicitSource    byte
 	ExplicitSourceSet bool
 
+	// HintCandidate is a cached preferred source address from a prior
+	// admission cycle (e.g. runtime_state.ebus.self.last_admitted_source).
+	// When HintCandidateSet is true and the hint resolves to a row in the
+	// standard source-address table that matches the active filters
+	// (SourceDescription / PriorityIndex), the hint row is tried FIRST in
+	// the candidate sequence — biasing the selector toward the source it
+	// previously admitted to keep address allocation stable across
+	// restarts. Standard validation still applies; the hint never bypasses
+	// warmup or evidence checks. If the hint fails validation, candidate
+	// iteration falls through to the regular candidate order (same rows
+	// the selector would have tried without the hint).
+	//
+	// HintCandidate is mutually exclusive with ExplicitSourceSet: an
+	// operator-supplied explicit source already pins the candidate set to
+	// one row, so a hint adds no information. When both are set the hint
+	// is silently ignored.
+	HintCandidate    byte
+	HintCandidateSet bool
+
 	Evidence KnownAddressEvidence
 }
 
@@ -247,6 +266,26 @@ type SourceAddressSelectionMetrics struct {
 	ObservedSourceAddresses []byte
 	ObservedProbableTargets []byte
 	TopTalkersBySource      []byte
+
+	// HintCandidate echoes the hint that was passed in via
+	// SourceAddressSelectionConfig.HintCandidate. Zero when no hint was
+	// active (or when the hint was filtered out by description / priority).
+	HintCandidate byte
+	// HintCandidateSet mirrors the corresponding config flag and lets
+	// metrics consumers distinguish "hint=0x00 was actively passed and
+	// validated" from "no hint was passed".
+	HintCandidateSet bool
+	// HintAccepted is true when the hint was passed AND the selector
+	// returned the hint row as the admitted source (i.e. validation
+	// succeeded on the hint). False when the hint was rejected and
+	// fall-through to the regular candidate order picked a different row,
+	// or when no hint was passed.
+	HintAccepted bool
+	// HintRejectionReason is the validator reason returned for the hint
+	// row when it was tried but rejected. Empty when the hint was
+	// accepted, when no hint was passed, or when the hint was not present
+	// in the active candidate set (e.g. filtered out by description).
+	HintRejectionReason string
 }
 
 // SourceAddressSelection contains the selected source and companion address.
@@ -374,6 +413,12 @@ func (s *SourceAddressSelector) Select(ctx context.Context) (SourceAddressSelect
 		TopTalkersBySource:      observation.topTalkers(defaultSourceAddressTopTalkerCount),
 	}
 
+	hintActive := cfg.HintCandidateSet && !cfg.ExplicitSourceSet
+	if hintActive {
+		metrics.HintCandidate = cfg.HintCandidate
+		metrics.HintCandidateSet = true
+	}
+
 	rows, err := candidateRowsForSourceAddressSelection(cfg)
 	if err != nil {
 		return SourceAddressSelection{}, err
@@ -383,10 +428,16 @@ func (s *SourceAddressSelector) Select(ctx context.Context) (SourceAddressSelect
 		appendUniqueByte(&metrics.CandidatesConsidered, row.Source)
 		if validationErr := validateSourceAddressCandidate(row, cfg.Evidence, observation, &metrics); validationErr != nil {
 			metrics.RejectionReasons[row.Source] = append(metrics.RejectionReasons[row.Source], validationErr.Reason)
+			if hintActive && row.Source == cfg.HintCandidate && metrics.HintRejectionReason == "" {
+				metrics.HintRejectionReason = validationErr.Reason
+			}
 			if cfg.ExplicitSourceSet {
 				return SourceAddressSelection{}, validationErr
 			}
 			continue
+		}
+		if hintActive && row.Source == cfg.HintCandidate {
+			metrics.HintAccepted = true
 		}
 		return SourceAddressSelection{
 			Source:       row.Source,
@@ -537,7 +588,7 @@ func candidateRowsForSourceAddressSelection(cfg SourceAddressSelectionConfig) ([
 			}
 			rows = append(rows, row)
 		}
-		return rows, nil
+		return applyHintBias(rows, cfg), nil
 	}
 
 	rows := make([]SourceAddressTableRow, 0, len(helianthusGatewayDefaultPolicyV1))
@@ -551,7 +602,41 @@ func candidateRowsForSourceAddressSelection(cfg SourceAddressSelectionConfig) ([
 		}
 		rows = append(rows, row)
 	}
-	return rows, nil
+	return applyHintBias(rows, cfg), nil
+}
+
+// applyHintBias reorders rows so that the hint candidate (if set, valid,
+// and present in rows) appears first. Other rows preserve their relative
+// order so default-policy fallback semantics are unchanged. When the hint
+// is unset, not in the standard table, or filtered out by the active
+// description/priority, rows are returned unchanged.
+//
+// HintCandidate is silently ignored when ExplicitSourceSet — caller has
+// already pinned candidates to one row; biasing adds no information.
+func applyHintBias(rows []SourceAddressTableRow, cfg SourceAddressSelectionConfig) []SourceAddressTableRow {
+	if !cfg.HintCandidateSet || cfg.ExplicitSourceSet {
+		return rows
+	}
+	if len(rows) <= 1 {
+		// Single-candidate or empty list — nothing to reorder.
+		return rows
+	}
+	hintIdx := -1
+	for i, row := range rows {
+		if row.Source == cfg.HintCandidate {
+			hintIdx = i
+			break
+		}
+	}
+	if hintIdx <= 0 {
+		// Hint absent (filtered out / not in table) or already first — no work.
+		return rows
+	}
+	reordered := make([]SourceAddressTableRow, 0, len(rows))
+	reordered = append(reordered, rows[hintIdx])
+	reordered = append(reordered, rows[:hintIdx]...)
+	reordered = append(reordered, rows[hintIdx+1:]...)
+	return reordered
 }
 
 func validateSourceAddressSelectionConfig(cfg SourceAddressSelectionConfig) error {
