@@ -29,10 +29,24 @@ const (
 // StreamEvent is a transport-stream item. Byte is valid for
 // StreamEventByte. Data is valid for StreamEventStarted (confirmed
 // initiator address) and StreamEventFailed (winner address).
+//
+// WasEscaped (F-23, batch-19, 2026-05-13) is valid for StreamEventByte
+// only. It carries the wire-side truth flag for the emitted logical
+// byte: true means the byte was decoded from an eBUS escape pair
+// (wire 0xA9 0x00 → logical 0xA9 with WasEscaped=true; wire 0xA9 0x01
+// → logical 0xAA with WasEscaped=true); false means the byte passed
+// through unchanged as a raw wire byte. Transports that already
+// deliver logical bytes (i.e. BytesAreUnescaped() returns true) MUST
+// populate this field on every StreamEventByte emission so consumers
+// can distinguish a real wire SYN (0xAA, WasEscaped=false) from an
+// escape-decoded logical 0xAA carrying user payload (WasEscaped=true).
+// Transports that deliver raw wire bytes leave the field at its
+// zero value (false).
 type StreamEvent struct {
-	Kind StreamEventKind
-	Byte byte // valid for StreamEventByte
-	Data byte // valid for StreamEventStarted, StreamEventFailed
+	Kind       StreamEventKind
+	Byte       byte // valid for StreamEventByte
+	Data       byte // valid for StreamEventStarted, StreamEventFailed
+	WasEscaped bool // valid for StreamEventByte; see F-23 docstring above
 }
 
 // StreamEventReader is an optional extension implemented by transports that
