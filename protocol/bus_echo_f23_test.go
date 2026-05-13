@@ -246,6 +246,71 @@ func TestBus_EscapeAware_NonSynEcho_RealWireSynIsCollision(t *testing.T) {
 	}
 }
 
+// TestBus_EscapeAware_PayloadAAEcho_WithWasEscapedAccepted pins the
+// Codex bot r3 finding on PR #154: when the bus writes a TELEGRAM
+// PAYLOAD byte equal to 0xAA (e.g. a data byte), the adapter wire-
+// encodes it as `0xA9 0x01` and the echo arrives as logical 0xAA
+// with WasEscaped=true. The new escape-decoded-SYN rejection guard
+// in sendRawWithEcho MUST NOT fire on this case — that's a
+// legitimate payload echo, not an unrelated-traffic 0xAA.
+//
+// The distinguishing signal is the structural-vs-payload flag
+// threaded from sendSymbolWithEcho: payload bytes pass
+// expectRawSyn=false; only the end-of-message structural SYN
+// passes expectRawSyn=true.
+//
+// Pre-r3 fix, this test would have failed with ErrBusCollision
+// because the guard fired on raw==SymbolSyn alone. Post-r3 fix,
+// the guard is gated on expectRawSyn AND the payload 0xAA echoes
+// pass cleanly.
+func TestBus_EscapeAware_PayloadAAEcho_WithWasEscapedAccepted(t *testing.T) {
+	t.Parallel()
+
+	tr := &echoF23TestTransport{
+		unescaped: true,
+	}
+	bus := protocol.NewBus(tr, protocol.DefaultBusConfig(), 8)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+	ctx := context.Background()
+
+	// Broadcast frame with a PAYLOAD byte equal to SymbolSyn (0xAA).
+	// Wire transmission: DST PB SB LEN DATA[0]=0xAA CRC, then
+	// trailing end-of-message SYN. Echo for the 0xAA data byte
+	// arrives with WasEscaped=true (legitimately wire-escaped by
+	// the adapter); all other bytes arrive WasEscaped=false.
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0xB5,
+		Secondary: 0x16,
+		Data:      []byte{protocol.SymbolSyn},
+	}
+	telegram := []byte{
+		protocol.AddressBroadcast, 0xB5, 0x16, 0x01, protocol.SymbolSyn,
+	}
+	telegram = append(telegram, protocol.CRC(append([]byte{0x10}, telegram...)))
+
+	tr.mu.Lock()
+	tr.echo = nil
+	for i, b := range telegram {
+		ev := echoF23Event{value: b}
+		if i == 4 { // DATA[0] = 0xAA — wire-escaped, echo wasEscaped=true
+			ev.wasEscaped = true
+		}
+		tr.echo = append(tr.echo, ev)
+	}
+	// End-of-message structural SYN: real wire SYN, wasEscaped=false.
+	tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: false})
+	tr.mu.Unlock()
+
+	_, err := bus.Send(ctx, frame)
+	if err != nil {
+		t.Fatalf("Send error = %v; want nil (payload 0xAA with WasEscaped=true MUST be accepted as legitimate echo)", err)
+	}
+}
+
 // TestBus_EscapeAware_NonSynEcho_EscapeDecodedAANotCollision pins
 // the inverse of the above: escape-decoded payload 0xAA arriving
 // when we expected a non-SYN echo is a value-mismatch

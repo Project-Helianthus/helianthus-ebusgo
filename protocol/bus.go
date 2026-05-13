@@ -913,21 +913,43 @@ func (b *Bus) sendEndOfMessage(runCtx, reqCtx context.Context) error {
 
 func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, escape bool) error {
 	if b.unescapedTransport || !escape || (symbol != SymbolEscape && symbol != SymbolSyn) {
-		return b.sendRawWithEcho(runCtx, reqCtx, symbol)
+		// F-23 (Codex bot r3 on #154): for ENH-class transports, a
+		// `raw == SymbolSyn` write can be either a structural
+		// end-of-message SYN (escape=false; adapter sends 0xAA raw
+		// on wire) or a telegram payload byte equal to 0xAA
+		// (escape=true; adapter wire-encodes to `0xA9 0x01`, echo
+		// returns logical 0xAA with WasEscaped=true). The new
+		// escape-decoded-SYN rejection in sendRawWithEcho must only
+		// fire on the FIRST case — otherwise legitimate payload
+		// 0xAA echoes are misclassified as bus collisions.
+		expectRawSyn := !escape && symbol == SymbolSyn
+		return b.sendRawWithEcho(runCtx, reqCtx, symbol, expectRawSyn)
 	}
 
-	// Plain transport: wire-level escape for 0xA9/0xAA symbols.
-	if err := b.sendRawWithEcho(runCtx, reqCtx, SymbolEscape); err != nil {
+	// Plain transport: wire-level escape for 0xA9/0xAA symbols. The
+	// two writes are escape-pair bytes (0xA9 followed by 0x00 or
+	// 0x01), neither of which is a structural SYN, so
+	// expectRawSyn=false for both. The new ENH guards only fire on
+	// unescapedTransport=true anyway, so this is defensive parameter
+	// hygiene rather than load-bearing.
+	if err := b.sendRawWithEcho(runCtx, reqCtx, SymbolEscape, false); err != nil {
 		return err
 	}
 	esc := byte(0x00)
 	if symbol == SymbolSyn {
 		esc = 0x01
 	}
-	return b.sendRawWithEcho(runCtx, reqCtx, esc)
+	return b.sendRawWithEcho(runCtx, reqCtx, esc, false)
 }
 
-func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte) error {
+// sendRawWithEcho writes a single byte and validates the wire echo.
+// expectRawSyn (F-23, Codex bot r3 on #154) — when true, raw is a
+// structural end-of-message SYN that the adapter sends as raw 0xAA
+// on wire; the echo MUST come back with WasEscaped=false. When
+// false, raw is a payload byte: the adapter may legitimately
+// wire-escape values 0xA9/0xAA, and the echo's WasEscaped flag
+// reflects that without indicating collision.
+func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRawSyn bool) error {
 	written, err := b.transport.Write([]byte{raw})
 	if err != nil {
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
@@ -983,13 +1005,23 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte) error {
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
-	// F-23: when we DID write a SYN (end-of-message 0xAA), the echo
-	// must be a real wire SYN. An escape-decoded payload 0xAA
-	// happens to share the value but is user data from an unrelated
-	// frame — it MUST NOT satisfy our echo wait. Pre-F-23 the wire
-	// bytes would have arrived as `0xA9, 0x01` (two bytes, first one
-	// fails the value check), so the bug was masked by the leak.
-	if b.unescapedTransport && raw == SymbolSyn && echo == SymbolSyn && echoWasEscaped {
+	// F-23 (Codex bot r3 on #154): when we DID write a STRUCTURAL
+	// end-of-message SYN (raw=0xAA, escape=false), the echo must be
+	// a real wire SYN with WasEscaped=false. An escape-decoded
+	// payload 0xAA (WasEscaped=true) happens to share the value but
+	// is user data from an unrelated frame — it MUST NOT satisfy
+	// our echo wait. Pre-F-23 the wire bytes would have arrived as
+	// `0xA9, 0x01` (two bytes, first one fails the value check), so
+	// the bug was masked by the leak.
+	//
+	// The expectRawSyn gate is critical: a TELEGRAM PAYLOAD byte
+	// equal to 0xAA (escape=true at sendSymbolWithEcho) is
+	// wire-escaped by the adapter, and its legitimate echo arrives
+	// as logical 0xAA with WasEscaped=true. Rejecting that would
+	// misclassify every payload 0xAA write as a collision. The
+	// expectRawSyn flag, passed in by sendSymbolWithEcho, encodes
+	// "this 0xAA write IS the structural SYN, not a payload byte".
+	if b.unescapedTransport && expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && echoWasEscaped {
 		b.emitObserverEvent(BusEvent{
 			Kind:    BusEventEchoMismatch,
 			Outcome: BusOutcomeEchoMismatch,

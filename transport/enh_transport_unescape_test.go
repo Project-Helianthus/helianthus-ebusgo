@@ -177,7 +177,7 @@ func TestENH_Transport_PreservesWasEscaped(t *testing.T) {
 }
 
 // TestENH_Transport_PatternA_CRC_A9_Roundtrip synthesizes the wire
-// fragment from batch-19's Pattern A: a slave response whose CRC=0xA9
+// fragment from batch-19's Pattern A: a target response whose CRC=0xA9
 // is wire-encoded as `0xA9 0x00`, followed by M_ACK (0x00) and SYN
 // (0xAA). The transport MUST deliver three logical bytes — CRC,
 // M_ACK, SYN — not four wire bytes.

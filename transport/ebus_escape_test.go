@@ -47,7 +47,7 @@ func TestEbusEscape_A9_00_DecodesToA9_WasEscapedTrue(t *testing.T) {
 
 	d := &EbusEscapeDecoder{}
 
-	got, ok, wasEscaped, err := d.Push(0xA9)
+	_, ok, wasEscaped, err := d.Push(0xA9)
 	if err != nil {
 		t.Fatalf("Push(0xA9) lead: unexpected err=%v", err)
 	}
@@ -61,7 +61,7 @@ func TestEbusEscape_A9_00_DecodesToA9_WasEscapedTrue(t *testing.T) {
 		t.Fatal("HasPendingEscape() = false after 0xA9 lead; want true")
 	}
 
-	got, ok, wasEscaped, err = d.Push(0x00)
+	got, ok, wasEscaped, err := d.Push(0x00)
 	if err != nil {
 		t.Fatalf("Push(0x00) pair-complete: unexpected err=%v", err)
 	}
