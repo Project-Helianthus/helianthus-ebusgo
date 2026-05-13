@@ -1,10 +1,12 @@
 package transport_test
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
 
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
 	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
 )
 
@@ -524,8 +526,9 @@ func TestENH_Transport_EscapePersistsAcrossConnReadBoundary(t *testing.T) {
 // decoded payload 0xAA can be distinguished from a real wire SYN.
 //
 // Feeds: A9 00 (-> logical A9, WasEscaped=true)
-//        A9 01 (-> logical AA, WasEscaped=true)
-//        AA    (-> logical AA, WasEscaped=false — real wire SYN)
+//
+//	A9 01 (-> logical AA, WasEscaped=true)
+//	AA    (-> logical AA, WasEscaped=false — real wire SYN)
 func TestENH_Transport_ReadByteWithEscape_ExposesProvenanceFlag(t *testing.T) {
 	t.Parallel()
 
@@ -648,6 +651,146 @@ func TestENH_Transport_StartArbitrationDiscardDoesNotStrandEscape(t *testing.T) 
 	}
 	if got := enh.DecodeFaultTotal(); got != 0 {
 		t.Fatalf("DecodeFaultTotal = %d; want 0 (no invalid-pair fault)", got)
+	}
+}
+
+// TestENH_Transport_StartArbitrationTimeoutResetsEscape pins the
+// F-23 Codex bot r5 finding on PR #154: if the blocking
+// StartArbitration discard path consumes a `0xA9` lead and then
+// the conn.Read times out before the second pair byte arrives,
+// the escape decoder MUST be reset. Otherwise the stale lead
+// would pair with the first byte of any future read.
+//
+// Test flow:
+//  1. Issue StartArbitration; server reads the START request.
+//  2. Server writes a wire `0xA9` (an isolated lead, no follower).
+//     This is the discarded pre-grant byte that feeds the decoder.
+//  3. Server stops writing. Read times out. Bus returns the timeout.
+//  4. Then send a wire 0x55 (plain byte). Verify it emits as logical
+//     0x55 with WasEscaped=false — NOT paired with the stale lead.
+//     If decoder.escape were stale, 0x55 would either fault (invalid
+//     pair) or be wrongly paired.
+func TestENH_Transport_StartArbitrationTimeoutResetsEscape(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 300*time.Millisecond, 300*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Read the START request from the client.
+		buf := make([]byte, 2)
+		if _, err := readFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Send a wire 0xA9 (isolated lead, no second byte).
+		// Decoder will buffer escape=true; awaitingStart=true so
+		// the byte is dropped from emission. Then we wait — the
+		// conn.Read on the client side will time out, exercising
+		// the F-23 r5 reset path.
+		leadFrame := transport.EncodeENH(transport.ENHResReceived, 0xA9)
+		_, _ = server.Write(leadFrame[:])
+		// Don't send anything else for 600ms — long enough for
+		// StartArbitration's read deadline (300ms) to fire twice.
+		// The bus returns the timeout error after the first deadline.
+	}()
+
+	err := enh.StartArbitration(initiator)
+	if err == nil {
+		t.Fatal("StartArbitration err = nil; want timeout (server never sent STARTED/FAILED)")
+	}
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("StartArbitration err = %v; want wrapped ErrTimeout", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+
+	// Decoder state check: now feed a plain 0x55. The legacy stale
+	// lead from step 2 should have been wiped by the timeout
+	// reset. Expected: 0x55 emits as plain passthrough.
+	plain := transport.EncodeENH(transport.ENHResReceived, 0x55)
+	go func() {
+		_, _ = server.Write(plain[:])
+	}()
+	got, wasEscaped, readErr := enh.ReadByteWithEscape()
+	if readErr != nil {
+		t.Fatalf("ReadByteWithEscape after timeout: err=%v", readErr)
+	}
+	if got != 0x55 || wasEscaped {
+		t.Fatalf("after timeout: {Byte=0x%02X WasEscaped=%v}; want {0x55, false} (decoder.escape MUST have been reset on arbitration timeout)",
+			got, wasEscaped)
+	}
+	if got := enh.DecodeFaultTotal(); got != 0 {
+		t.Fatalf("DecodeFaultTotal = %d; want 0 (clean decode after reset)", got)
+	}
+}
+
+// TestENH_Transport_RequestInfoAwaitingStartTimeoutResetsEscape pins the
+// RequestInfo sibling of the blocking-arbitration timeout bug: if an async
+// RequestStart window is open, RequestInfo feeds RECEIVED bytes through the
+// decoder before dropping them as pre-grant traffic. A timeout that closes
+// that window must reset a stale escape lead from discarded traffic.
+func TestENH_Transport_RequestInfoAwaitingStartTimeoutResetsEscape(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 200*time.Millisecond, 200*time.Millisecond)
+	initiator := byte(0x10)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		buf := make([]byte, 2)
+		if _, err := readFull(server, buf); err != nil { // START
+			serverErr <- err
+			return
+		}
+		if _, err := readFull(server, buf); err != nil { // INFO
+			serverErr <- err
+			return
+		}
+		leadFrame := transport.EncodeENH(transport.ENHResReceived, 0xA9)
+		_, _ = server.Write(leadFrame[:])
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+	_, err := enh.RequestInfo(transport.AdapterInfoVersion)
+	if err == nil {
+		t.Fatal("RequestInfo err = nil; want timeout")
+	}
+	if !errors.Is(err, ebuserrors.ErrTimeout) {
+		t.Fatalf("RequestInfo err = %v; want wrapped ErrTimeout", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+
+	plain := transport.EncodeENH(transport.ENHResReceived, 0x55)
+	go func() {
+		_, _ = server.Write(plain[:])
+	}()
+	got, wasEscaped, readErr := enh.ReadByteWithEscape()
+	if readErr != nil {
+		t.Fatalf("ReadByteWithEscape after RequestInfo timeout: err=%v", readErr)
+	}
+	if got != 0x55 || wasEscaped {
+		t.Fatalf("after RequestInfo timeout: {Byte=0x%02X WasEscaped=%v}; want {0x55, false}",
+			got, wasEscaped)
+	}
+	if got := enh.DecodeFaultTotal(); got != 0 {
+		t.Fatalf("DecodeFaultTotal = %d; want 0 (clean decode after RequestInfo awaitingStart timeout reset)", got)
 	}
 }
 

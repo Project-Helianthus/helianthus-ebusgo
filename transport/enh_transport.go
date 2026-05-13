@@ -656,6 +656,19 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 				t.parser.Reset() // Clear any pending byte1 from partial frame
 				t.deferredErr = nil
 				t.awaitingStart.Store(false)
+				// F-23 (Codex bot r5 on #154): blocking arbitration
+				// timeout. The discard path during arbitration feeds
+				// every received byte through escDecoder so a stale
+				// 0xA9 lead cannot strand across a non-dropped byte
+				// boundary — but if arbitration TIMES OUT before the
+				// second byte of the pair arrives, the lead persists
+				// and the next read (after the caller retries or moves
+				// on) would pair its first byte with that stale lead.
+				// Arbitration abort is a Layer-1 boundary that
+				// invalidates discarded-traffic state; the bytes we
+				// fed during the aborted window are gone, no
+				// completion is expected. Reset.
+				t.escDecoder.Reset()
 			}
 			return t.mapReadError(err)
 		}
@@ -864,6 +877,7 @@ func (t *ENHTransport) postGrantPreEchoExpired() bool {
 // Keeping this synchronous and explicit, called before each error return
 // and BEFORE releasing writeMu, eliminates the race entirely.
 func (t *ENHTransport) requestInfoFail(err error) error {
+	wasAwaitingStart := t.awaitingStart.Load()
 	t.parser.Reset()
 	t.deferredErr = nil
 	t.awaitingStart.Store(false)
@@ -874,12 +888,14 @@ func (t *ENHTransport) requestInfoFail(err error) error {
 	// (RESETTED, ebus/host error, parse-error resync). Wipe in-
 	// flight escape state in those cases so a stranded 0xA9 lead
 	// from before the fault can't pair with the first post-recovery
-	// byte. Timeouts are NOT protocol faults — the bus simply went
-	// quiet, and a legitimate pair-completion byte may arrive on
-	// the next read after the caller retries. Skip the decoder
-	// reset on ErrTimeout so the timeout class matches the
-	// init/arbitration/fillPending timeout policy.
-	if !errors.Is(err, ebuserrors.ErrTimeout) {
+	// byte. Pure passive timeouts are NOT protocol faults — the bus simply
+	// went quiet, and a legitimate pair-completion byte may arrive on the
+	// next read after the caller retries. But if RequestInfo timed out while
+	// an async arbitration window was open, RECEIVED bytes may have been fed
+	// through the decoder and then discarded as pre-grant traffic. Closing
+	// that arbitration window is a Layer-1 abort boundary, so any in-flight
+	// discarded escape lead is stale and must be reset.
+	if !errors.Is(err, ebuserrors.ErrTimeout) || wasAwaitingStart {
 		t.escDecoder.Reset()
 	}
 	// Preserve buffered events on timeout/error so they are not silently
@@ -1245,6 +1261,18 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// FAILED didn't arrive, the RequestStart caller should treat
 			// this as a timed-out arbitration. Leaving awaitingStart set
 			// would silently drop RECEIVED bytes on subsequent reads.
+			//
+			// F-23 (Codex bot r5 on #154): if awaitingStart was true
+			// at the moment of timeout, the decoder may have a stale
+			// 0xA9 lead from a discarded pre-grant byte. Arbitration
+			// abort is a Layer-1 boundary; reset the decoder so the
+			// next read does not pair its first byte with the stale
+			// lead. Pure passive timeouts (awaitingStart=false)
+			// preserve decoder state — a passive listener may
+			// legitimately await pair completion on the next read.
+			if t.awaitingStart.Load() {
+				t.escDecoder.Reset()
+			}
 			t.awaitingStart.Store(false)
 		}
 		return t.mapReadError(err)
