@@ -1007,34 +1007,43 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					}
 				}
 			case ENHResReceived:
-				// F-23 (batch-19): feed the escape decoder on EVERY wire
-				// byte — including bytes the suppression layer below
-				// will drop — so a 0xA9 lead cannot strand across a
-				// dropped byte and pair incorrectly with a later
-				// non-dropped byte. The decoded value (or the
-				// `accumulating` no-emission state) is the input to the
-				// suppression checks; the SYN comparison now uses the
-				// LOGICAL byte + WasEscaped flag instead of the raw
-				// wire byte so escape-decoded data 0xAA (WasEscaped=
-				// true) is never mistaken for an idle bus SYN.
+				// F-23 (batch-19, Codex bot r6 on #154): handle the
+				// awaitingStart deadline-expiry boundary BEFORE
+				// feeding the escape decoder. Mirrors the
+				// fillPendingLocked fix — a pre-grant 0xA9 lead
+				// dropped during the active window would otherwise
+				// pair with the FIRST post-expiry byte inside the
+				// decoder, emitting a false byte (or faulting).
+				//
+				// Two paths through awaitingStart:
+				//   (a) Window still active: drop emission AND feed
+				//       decoder so state stays coherent across the
+				//       INFO-interleave discarded-traffic stream.
+				//   (b) Window expired at byte arrival: Layer-1
+				//       abort — wipe arbitration state INCLUDING the
+				//       escape decoder, then fall through to feed
+				//       the byte fresh.
+				if t.awaitingStart.Load() {
+					if t.arbitrationWindowExpired() {
+						t.escDecoder.Reset()
+						t.awaitingStart.Store(false)
+						t.arbitrationDeadline.Store(0)
+						// Fall through to the normal decode path below.
+					} else {
+						_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
+						continue
+					}
+				}
+				// F-23: feed the escape decoder so logical bytes
+				// reach consumers. INFO-interleave path keeps the
+				// same maxPendingEvents cap (applied inside the
+				// helper). The SYN comparison uses LOGICAL byte +
+				// WasEscaped so escape-decoded data 0xAA
+				// (WasEscaped=true) is never mistaken for an idle
+				// bus SYN.
 				decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
 				if !ok {
 					continue
-				}
-				// Bus byte received during INFO. If an async arbitration
-				// window is open, drop pre-grant bytes (same semantics as
-				// fillPendingLocked awaitingStart gate). Honor the window
-				// deadline so a lost STARTED/FAILED does not starve bytes
-				// for the full INFO timeout — only for the 500ms arbitration
-				// budget. After expiry, bytes fall through to normal queue.
-				if t.awaitingStart.Load() {
-					if t.arbitrationWindowExpired() {
-						t.awaitingStart.Store(false)
-						t.arbitrationDeadline.Store(0)
-						// Fall through: deliver this byte to pendingEvents.
-					} else {
-						continue
-					}
 				}
 				// Post-grant pre-echo window: suppress idle SYN bytes that
 				// arrive between arbitration grant and first real echo.
@@ -1288,35 +1297,48 @@ func (t *ENHTransport) fillPendingLocked() error {
 	for _, msg := range msgs {
 		switch msg.Command {
 		case ENHResReceived:
-			// F-23 (batch-19): feed the escape decoder on EVERY wire
-			// byte — including bytes that the awaitingStart /
-			// postGrantPreEcho suppression layers below will drop —
-			// so a 0xA9 lead cannot strand across a dropped byte and
-			// pair incorrectly with a later non-dropped byte (Codex
-			// bot P2 on PR-1 review). The decoded value is the input
-			// to the suppression checks; the SYN test now compares
-			// the LOGICAL byte + WasEscaped flag so escape-decoded
-			// data 0xAA (WasEscaped=true) is never mistaken for an
-			// idle bus SYN.
+			// F-23 (batch-19, Codex bot r6 on #154): handle the
+			// awaitingStart deadline-expiry boundary BEFORE feeding
+			// the escape decoder. Otherwise a pre-grant 0xA9 lead
+			// that was dropped while the window was active would
+			// pair with the FIRST post-expiry byte inside the
+			// decoder, emitting a false escape-decoded byte (or
+			// faulting on an invalid pair) instead of letting the
+			// boundary byte through cleanly.
+			//
+			// Two paths through awaitingStart:
+			//
+			//   (a) Window still active: drop emission AND feed
+			//       decoder so state stays coherent across the
+			//       discarded-traffic stream (round-2 invariant).
+			//
+			//   (b) Window expired at the moment THIS byte arrived:
+			//       Layer-1 abort — wipe arbitration state INCLUDING
+			//       the escape decoder, then fall through to feed
+			//       the byte fresh as the start of post-arbitration
+			//       traffic.
+			if t.awaitingStart.Load() {
+				if t.arbitrationWindowExpired() {
+					t.escDecoder.Reset()
+					t.awaitingStart.Store(false)
+					t.arbitrationDeadline.Store(0)
+					// Fall through to the normal decode path below.
+				} else {
+					// Window still active: feed the decoder (so
+					// leads from this byte don't strand across the
+					// next non-dropped boundary) and drop emission.
+					_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
+					continue
+				}
+			}
+			// F-23 (batch-19): feed the escape decoder so logical
+			// (unescaped) bytes reach consumers. The SYN test on
+			// the decoded value uses the LOGICAL byte + WasEscaped
+			// flag so escape-decoded data 0xAA (WasEscaped=true) is
+			// never mistaken for an idle bus SYN.
 			decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
 			if !ok {
 				continue
-			}
-			// Drop RECEIVED bytes that arrive inside the async arbitration
-			// window — they are pre-grant bus traffic, not our echoes. The
-			// blocking StartArbitration clears pendingEvents after grant;
-			// this is the async-path equivalent (see awaitingStart doc).
-			// Force-close the window if its deadline expired (STARTED/
-			// FAILED was lost on a busy bus); remaining RECEIVED bytes
-			// from that point are delivered normally.
-			if t.awaitingStart.Load() {
-				if t.arbitrationWindowExpired() {
-					t.awaitingStart.Store(false)
-					t.arbitrationDeadline.Store(0)
-					// Fall through: deliver this byte to pendingEvents.
-				} else {
-					continue
-				}
 			}
 			// Post-grant pre-echo window: suppress idle SYN bytes that
 			// arrive between arbitration grant and the first real echo

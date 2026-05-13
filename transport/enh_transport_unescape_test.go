@@ -794,6 +794,90 @@ func TestENH_Transport_RequestInfoAwaitingStartTimeoutResetsEscape(t *testing.T)
 	}
 }
 
+// TestENH_Transport_AwaitingStartExpiryBoundaryResetsEscape pins the
+// F-23 Codex bot r6 finding on PR #154: an async RequestStart window
+// can be force-closed at the moment of a fresh byte arrival when
+// the deadline has expired. If the decoder retains a stale 0xA9
+// lead from a dropped pre-grant byte, feeding the boundary byte
+// through the decoder BEFORE clearing the arbitration state would
+// pair it with the stale lead — emitting a false 0xA9/0xAA or
+// faulting on an invalid pair.
+//
+// Test flow:
+//  1. RequestStart opens awaitingStart with a short deadline.
+//  2. Server sends a wire 0xA9 (lead). Decoder buffers escape=true,
+//     awaitingStart drops emission per the round-2 invariant.
+//  3. Test sleeps past the arbitration deadline (no second byte
+//     arrives during the window).
+//  4. Server sends a wire 0x55 (the boundary byte that triggers
+//     the expired-window fall-through).
+//  5. Test reads via ReadByteWithEscape and asserts the byte
+//     emerges as plain 0x55 (WasEscaped=false), NOT paired with
+//     the stale lead.
+func TestENH_Transport_AwaitingStartExpiryBoundaryResetsEscape(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 500*time.Millisecond)
+	initiator := byte(0x10)
+
+	// Drive RequestStart on a goroutine: it writes the START frame
+	// and returns immediately (non-blocking). awaitingStart is set
+	// asynchronously by the transport.
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		// Server reads the START request from the client to
+		// unblock RequestStart's writer.
+		buf := make([]byte, 2)
+		if _, err := readFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		// Send a wire 0xA9 lead during the awaitingStart window.
+		// Decoder buffers escape=true; awaitingStart drops the
+		// emission per the round-2 invariant.
+		lead := transport.EncodeENH(transport.ENHResReceived, 0xA9)
+		if _, err := server.Write(lead[:]); err != nil {
+			serverErr <- err
+			return
+		}
+		// Wait past the arbitration deadline (default 500ms per
+		// arbitrationWindowTimeout). 700ms is comfortable margin.
+		time.Sleep(700 * time.Millisecond)
+		// Now send the boundary byte. The transport's read loop
+		// will see awaitingStart=true AND deadline expired → wipe
+		// arbitration state (including escDecoder) BEFORE feeding
+		// the byte → 0x55 emits plain.
+		boundary := transport.EncodeENH(transport.ENHResReceived, 0x55)
+		_, err := server.Write(boundary[:])
+		serverErr <- err
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart error = %v", err)
+	}
+
+	got, wasEscaped, err := enh.ReadByteWithEscape()
+	if err != nil {
+		t.Fatalf("ReadByteWithEscape: err=%v", err)
+	}
+	if got != 0x55 || wasEscaped {
+		t.Fatalf("post-expiry boundary byte = {Byte=0x%02X WasEscaped=%v}; want {0x55, false} (decoder MUST be reset BEFORE feeding the expired-window boundary byte)",
+			got, wasEscaped)
+	}
+	if got := enh.DecodeFaultTotal(); got != 0 {
+		t.Fatalf("DecodeFaultTotal = %d; want 0 (clean decode after expiry boundary reset)", got)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
 // readFull is a small io.ReadFull-equivalent for the test helpers
 // above without dragging the full io package into our import list.
 func readFull(r net.Conn, buf []byte) (int, error) {
