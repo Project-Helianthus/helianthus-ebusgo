@@ -134,6 +134,24 @@ type ENHTransport struct {
 	// postGrantPreEchoTimeout for timing rationale.
 	postGrantPreEcho         atomic.Bool
 	postGrantPreEchoDeadline atomic.Int64
+	// escDecoder unescapes eBUS byte-stuffing on the steady-state byte
+	// stream so the BytesAreUnescaped() contract is honest. Accessed
+	// only under readMu (every byte-emission site that feeds into it
+	// is locked). F-23, batch-19, 2026-05-13. See transport/ebus_escape.go.
+	escDecoder EbusEscapeDecoder
+	// escapeResetPending is set by writer-side async arbitration aborts that
+	// cannot reset escDecoder directly because they do not hold readMu. The
+	// next read-side non-dropped byte consumes this flag and resets before
+	// feeding that byte, preventing stale pre-grant escape state from crossing
+	// the abort boundary.
+	escapeResetPending atomic.Bool
+	// decodeFaultTotal counts wire 0xA9 leads followed by a byte
+	// other than 0x00 or 0x01 (invalid escape pair). Non-fatal: the
+	// decoder drops the offending pair and resumes on the next wire
+	// byte. Exposed via DecodeFaultTotal() for transport-level
+	// observability. Atomic because external readers (gateway metrics
+	// snapshot) read it without holding readMu.
+	decodeFaultTotal atomic.Uint64
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -304,8 +322,13 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 		for _, msg := range msgs {
 			switch msg.Command {
 			case ENHResReceived:
-				if len(t.pendingEvents) < maxPendingEvents {
-					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
+				// F-23 (batch-19): feed the escape decoder on every
+				// wire byte so logical (unescaped) bytes reach
+				// consumers. Init-recv has no application-layer
+				// suppression, so we append immediately when the
+				// decoder produces a logical byte.
+				if decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data); ok {
+					t.appendDecodedByteLocked(decoded, wasEscaped)
 				}
 			case ENHResResetted:
 				t.resetStateLocked()
@@ -320,6 +343,13 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 		}
 		if parseErr != nil {
 			t.parser.Reset()
+			// F-23 (batch-19, Codex bot P-r3): protocol fault on the
+			// ENH frame layer — orphan byte2 or unknown command. The
+			// wire-stream interpretation cannot be trusted across
+			// the resync boundary, so wipe any in-flight escape
+			// state too. (Timeouts are NOT faults and stay
+			// parser-only.)
+			t.escDecoder.Reset()
 			return InitResult{}, parseErr
 		}
 	}
@@ -416,8 +446,29 @@ func (t *ENHTransport) Reconnect() error {
 }
 
 func (t *ENHTransport) ReadByte() (byte, error) {
+	b, _, err := t.readByteAndFlag()
+	return b, err
+}
+
+// ReadByteWithEscape behaves like ReadByte but additionally returns
+// the WasEscaped flag for the emitted byte. F-23 (batch-19,
+// 2026-05-13, Codex bot review on PR-1): the protocol layer's
+// waitForSyn (idle-detect) MUST use this method for ENH-class
+// transports so a logical 0xAA carrying user payload
+// (WasEscaped=true, originally wire 0xA9 0x01) is not falsely
+// counted as a real wire SYN. See transport.EscapeFlaggedReader for
+// the interface contract.
+func (t *ENHTransport) ReadByteWithEscape() (byte, bool, error) {
+	return t.readByteAndFlag()
+}
+
+// readByteAndFlag is the shared implementation backing ReadByte
+// (which discards the flag) and ReadByteWithEscape (which surfaces
+// it). Acquires readMu, drains pendingEvents, and returns the next
+// logical byte plus its WasEscaped provenance.
+func (t *ENHTransport) readByteAndFlag() (byte, bool, error) {
 	if t.closed.Load() {
-		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+		return 0, false, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
 	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -425,7 +476,7 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 	for {
 		if t.resets > 0 {
 			t.resets--
-			return 0, ebuserrors.ErrAdapterReset
+			return 0, false, ebuserrors.ErrAdapterReset
 		}
 
 		// Drain pendingEvents, returning only Byte events. Non-byte events
@@ -435,7 +486,7 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			ev := t.pendingEvents[0]
 			t.pendingEvents = t.pendingEvents[1:]
 			if ev.Kind == StreamEventByte {
-				return ev.Byte, nil
+				return ev.Byte, ev.WasEscaped, nil
 			}
 			// Skip non-byte events (StreamEventStarted, StreamEventFailed,
 			// StreamEventReset) in ReadByte — event-aware consumers should
@@ -446,11 +497,11 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 		if t.deferredErr != nil {
 			err := t.deferredErr
 			t.deferredErr = nil
-			return 0, err
+			return 0, false, err
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if t.resets == 0 && len(t.pendingEvents) == 0 {
 			continue
@@ -611,6 +662,19 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 				t.parser.Reset() // Clear any pending byte1 from partial frame
 				t.deferredErr = nil
 				t.awaitingStart.Store(false)
+				// F-23 (Codex bot r5 on #154): blocking arbitration
+				// timeout. The discard path during arbitration feeds
+				// every received byte through escDecoder so a stale
+				// 0xA9 lead cannot strand across a non-dropped byte
+				// boundary — but if arbitration TIMES OUT before the
+				// second byte of the pair arrives, the lead persists
+				// and the next read (after the caller retries or moves
+				// on) would pair its first byte with that stale lead.
+				// Arbitration abort is a Layer-1 boundary that
+				// invalidates discarded-traffic state; the bytes we
+				// fed during the aborted window are gone, no
+				// completion is expected. Reset.
+				t.escDecoder.Reset()
 			}
 			return t.mapReadError(err)
 		}
@@ -632,6 +696,14 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 				// devices' traffic, not our echoes. Buffering them would cause
 				// echo mismatch in sendRawWithEcho (ReadByte drains
 				// pendingEvents first, returning stale bytes as "echoes").
+				//
+				// F-23 (batch-19, Codex bot P2 round 2 on PR-1): the byte
+				// is intentionally dropped from pendingEvents, but we MUST
+				// still advance the escape decoder so a 0xA9 lead from
+				// before this arbitration cycle does not strand. The
+				// decoded value is then discarded — only the side effect
+				// on escDecoder state matters.
+				_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
 			case ENHResResetted:
 				if reconnErr := t.reconnectLocked(); reconnErr != nil {
 					arbitrationDone = true
@@ -674,6 +746,16 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			t.pendingEvents = nil
 			t.deferredErr = nil
 			t.awaitingStart.Store(false)
+			// F-23 (batch-19, Codex bot P2 round 2 on PR-1): defense-
+			// in-depth — even though discarded RECEIVED bytes during
+			// arbitration now advance the decoder (above), a stranded
+			// 0xA9 lead from JUST BEFORE arbitration (e.g. across a
+			// read timeout that doesn't reset the decoder) could
+			// survive if no byte arrived during arbitration to
+			// complete it. Treat arbitration completion as a Layer-1
+			// boundary that invalidates in-flight wire-stream state,
+			// same as the steady-state RESETTED branch.
+			t.escDecoder.Reset()
 			// On successful grant, open the post-grant pre-echo window
 			// so idle SYN bytes arriving between STARTED and our first
 			// write's echo are suppressed. On failure/error, clear it
@@ -692,6 +774,11 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			t.parser.Reset()
 			t.deferredErr = nil
 			t.awaitingStart.Store(false)
+			// F-23 (batch-19, Codex bot P-r3): parse-error resync is
+			// a protocol fault boundary; reset the escape decoder
+			// alongside the parser so a stranded pre-fault 0xA9
+			// lead can't pair with the first post-resync byte.
+			t.escDecoder.Reset()
 			return parseErr
 		}
 	}
@@ -730,11 +817,13 @@ func (t *ENHTransport) RequestStart(initiator byte) error {
 	t.awaitingStart.Store(true)
 	n, err := t.conn.Write(seq[:])
 	if err != nil {
+		t.escapeResetPending.Store(true)
 		t.awaitingStart.Store(false)
 		t.arbitrationDeadline.Store(0)
 		return t.mapWriteError(err)
 	}
 	if n != len(seq) {
+		t.escapeResetPending.Store(true)
 		t.awaitingStart.Store(false)
 		t.arbitrationDeadline.Store(0)
 		return fmt.Errorf("enh request start short write (%d/%d): %w", n, len(seq), ebuserrors.ErrInvalidPayload)
@@ -796,11 +885,27 @@ func (t *ENHTransport) postGrantPreEchoExpired() bool {
 // Keeping this synchronous and explicit, called before each error return
 // and BEFORE releasing writeMu, eliminates the race entirely.
 func (t *ENHTransport) requestInfoFail(err error) error {
+	wasAwaitingStart := t.awaitingStart.Load()
 	t.parser.Reset()
 	t.deferredErr = nil
 	t.awaitingStart.Store(false)
 	t.arbitrationDeadline.Store(0)
 	t.closePostGrantPreEchoWindow()
+	// F-23 (batch-19, Codex bot P-r3 + P-r4): RequestInfo fault
+	// recovery is a wire-stream boundary for PROTOCOL errors
+	// (RESETTED, ebus/host error, parse-error resync). Wipe in-
+	// flight escape state in those cases so a stranded 0xA9 lead
+	// from before the fault can't pair with the first post-recovery
+	// byte. Pure passive timeouts are NOT protocol faults — the bus simply
+	// went quiet, and a legitimate pair-completion byte may arrive on the
+	// next read after the caller retries. But if RequestInfo timed out while
+	// an async arbitration window was open, RECEIVED bytes may have been fed
+	// through the decoder and then discarded as pre-grant traffic. Closing
+	// that arbitration window is a Layer-1 abort boundary, so any in-flight
+	// discarded escape lead is stale and must be reset.
+	if !errors.Is(err, ebuserrors.ErrTimeout) || wasAwaitingStart {
+		t.escDecoder.Reset()
+	}
 	// Preserve buffered events on timeout/error so they are not silently
 	// dropped. Clear pending on fatal transport errors and adapter resets
 	// where the parser state is unrecoverable or events from the same TCP
@@ -910,20 +1015,44 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					}
 				}
 			case ENHResReceived:
-				// Bus byte received during INFO. If an async arbitration
-				// window is open, drop pre-grant bytes (same semantics as
-				// fillPendingLocked awaitingStart gate). Honor the window
-				// deadline so a lost STARTED/FAILED does not starve bytes
-				// for the full INFO timeout — only for the 500ms arbitration
-				// budget. After expiry, bytes fall through to normal queue.
+				// F-23 (batch-19, Codex bot r6 on #154): handle the
+				// awaitingStart deadline-expiry boundary BEFORE
+				// feeding the escape decoder. Mirrors the
+				// fillPendingLocked fix — a pre-grant 0xA9 lead
+				// dropped during the active window would otherwise
+				// pair with the FIRST post-expiry byte inside the
+				// decoder, emitting a false byte (or faulting).
+				//
+				// Two paths through awaitingStart:
+				//   (a) Window still active: drop emission AND feed
+				//       decoder so state stays coherent across the
+				//       INFO-interleave discarded-traffic stream.
+				//   (b) Window expired at byte arrival: Layer-1
+				//       abort — wipe arbitration state INCLUDING the
+				//       escape decoder, then fall through to feed
+				//       the byte fresh.
 				if t.awaitingStart.Load() {
 					if t.arbitrationWindowExpired() {
+						t.escDecoder.Reset()
 						t.awaitingStart.Store(false)
 						t.arbitrationDeadline.Store(0)
-						// Fall through: deliver this byte to pendingEvents.
+						// Fall through to the normal decode path below.
 					} else {
+						_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
 						continue
 					}
+				}
+				t.resetPendingEscapeBeforeEmissionLocked()
+				// F-23: feed the escape decoder so logical bytes
+				// reach consumers. INFO-interleave path keeps the
+				// same maxPendingEvents cap (applied inside the
+				// helper). The SYN comparison uses LOGICAL byte +
+				// WasEscaped so escape-decoded data 0xAA
+				// (WasEscaped=true) is never mistaken for an idle
+				// bus SYN.
+				decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
+				if !ok {
+					continue
 				}
 				// Post-grant pre-echo window: suppress idle SYN bytes that
 				// arrive between arbitration grant and first real echo.
@@ -935,15 +1064,17 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 					if t.postGrantPreEchoExpired() {
 						t.closePostGrantPreEchoWindow()
 						// Fall through: deliver this byte.
-					} else if msg.Data == ebusSymbolSyn {
+					} else if decoded == ebusSymbolSyn && !wasEscaped {
+						// Idle bus SYN — suppress. An escape-decoded
+						// logical 0xAA carrying user payload
+						// (WasEscaped=true) is NOT an idle SYN and
+						// must pass through.
 						continue
 					} else {
 						t.closePostGrantPreEchoWindow()
 					}
 				}
-				if len(t.pendingEvents) < maxPendingEvents {
-					t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
-				}
+				t.appendDecodedByteLocked(decoded, wasEscaped)
 				// Drop when at cap — INFO is bounded by deadline anyway.
 			case ENHResStarted:
 				// Only a STARTED matching the expected initiator is OUR
@@ -957,6 +1088,13 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				// post-grant pre-echo window, queue event.
 				t.awaitingStart.Store(false)
 				t.arbitrationDeadline.Store(0)
+				// F-23 (Codex bot r7 on #154): mirror of
+				// fillPendingLocked. Pre-grant RECEIVED bytes fed
+				// to the decoder during awaitingStart may have left
+				// a stranded 0xA9 lead. Arbitration completion is
+				// a Layer-1 boundary; reset the decoder before the
+				// post-grant window opens.
+				t.escDecoder.Reset()
 				t.openPostGrantPreEchoWindow()
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted, Data: msg.Data})
 			case ENHResFailed:
@@ -966,6 +1104,10 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				t.awaitingStart.Store(false)
 				t.arbitrationDeadline.Store(0)
 				t.closePostGrantPreEchoWindow()
+				// F-23 (Codex bot r7 on #154): mirror of the STARTED
+				// branch — clear stranded escape state at arbitration
+				// completion.
+				t.escDecoder.Reset()
 				t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 			case ENHResResetted:
 				t.surfaceResetLocked()
@@ -1070,6 +1212,76 @@ func (t *ENHTransport) resetStateLocked() {
 	// in-flight arbitration-echo correlation is broken; next write will
 	// open a fresh window if applicable.
 	t.closePostGrantPreEchoWindow()
+	// F-23 (batch-19): clear any in-flight eBUS escape pair. A mid-pair
+	// 0xA9 lead from before the lifecycle boundary is stale; pairing it
+	// with whatever byte arrives next from the fresh connection would
+	// silently corrupt the post-reset stream.
+	t.escapeResetPending.Store(false)
+	t.escDecoder.Reset()
+}
+
+// resetPendingEscapeBeforeEmissionLocked consumes any writer-side request to
+// reset the escape decoder before the next non-dropped byte is fed. This is
+// needed for RequestStart write-failure rollback: RequestStart opens the async
+// arbitration window before conn.Write, but it cannot safely reset escDecoder
+// directly on write failure because it does not hold readMu.
+func (t *ENHTransport) resetPendingEscapeBeforeEmissionLocked() {
+	if t.escapeResetPending.Swap(false) {
+		t.escDecoder.Reset()
+	}
+}
+
+// feedEscapeDecoderLocked advances the F-23 eBUS escape decoder by one
+// wire byte WITHOUT making an emission decision. Returns the decoded
+// logical byte and its WasEscaped flag when a logical symbol is ready
+// (ok=true), or ok=false while accumulating an escape pair / on
+// invalid-pair fault. Invalid pairs increment decodeFaultTotal and
+// clear the decoder's internal state so subsequent calls resume
+// cleanly. Caller must hold readMu.
+//
+// This primitive MUST be called on every wire byte the transport
+// observes, including bytes that are dropped by application-layer
+// suppression (awaitingStart pre-grant traffic, post-grant pre-echo
+// SYN). Skipping the decoder on a dropped byte would leave a prior
+// 0xA9 lead stranded, and the next non-dropped byte would falsely
+// complete the stale pair (Codex bot P2 on PR-1: discarded-byte
+// discontinuity preserving pending escape).
+func (t *ENHTransport) feedEscapeDecoderLocked(raw byte) (decoded byte, ok bool, wasEscaped bool) {
+	var err error
+	decoded, ok, wasEscaped, err = t.escDecoder.Push(raw)
+	if err != nil {
+		// Invalid escape pair: increment the fault counter and drop.
+		// The decoder cleared its in-flight state before returning, so
+		// subsequent bytes resume cleanly.
+		t.decodeFaultTotal.Add(1)
+		return 0, false, false
+	}
+	return decoded, ok, wasEscaped
+}
+
+// appendDecodedByteLocked emits a fully-decoded logical byte to
+// pendingEvents subject to the maxPendingEvents cap. Caller must hold
+// readMu and is responsible for having advanced the escape decoder
+// (via feedEscapeDecoderLocked) for THIS byte. Control events still
+// bypass the cap via appendControlEventLocked.
+func (t *ENHTransport) appendDecodedByteLocked(decoded byte, wasEscaped bool) {
+	if len(t.pendingEvents) < maxPendingEvents {
+		t.pendingEvents = append(t.pendingEvents, StreamEvent{
+			Kind:       StreamEventByte,
+			Byte:       decoded,
+			WasEscaped: wasEscaped,
+		})
+	}
+}
+
+// DecodeFaultTotal returns the cumulative count of invalid eBUS escape
+// pairs observed on the wire (a 0xA9 lead followed by a byte other
+// than 0x00 or 0x01). Non-fatal — the decoder drops the offending
+// pair and resumes on the next byte. Exposed for transport-level
+// observability surfaces (gateway metrics snapshot, admin endpoints).
+// Safe to call without holding readMu.
+func (t *ENHTransport) DecodeFaultTotal() uint64 {
+	return t.decodeFaultTotal.Load()
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -1090,6 +1302,18 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// FAILED didn't arrive, the RequestStart caller should treat
 			// this as a timed-out arbitration. Leaving awaitingStart set
 			// would silently drop RECEIVED bytes on subsequent reads.
+			//
+			// F-23 (Codex bot r5 on #154): if awaitingStart was true
+			// at the moment of timeout, the decoder may have a stale
+			// 0xA9 lead from a discarded pre-grant byte. Arbitration
+			// abort is a Layer-1 boundary; reset the decoder so the
+			// next read does not pair its first byte with the stale
+			// lead. Pure passive timeouts (awaitingStart=false)
+			// preserve decoder state — a passive listener may
+			// legitimately await pair completion on the next read.
+			if t.awaitingStart.Load() {
+				t.escDecoder.Reset()
+			}
 			t.awaitingStart.Store(false)
 		}
 		return t.mapReadError(err)
@@ -1105,21 +1329,49 @@ func (t *ENHTransport) fillPendingLocked() error {
 	for _, msg := range msgs {
 		switch msg.Command {
 		case ENHResReceived:
-			// Drop RECEIVED bytes that arrive inside the async arbitration
-			// window — they are pre-grant bus traffic, not our echoes. The
-			// blocking StartArbitration clears pendingEvents after grant;
-			// this is the async-path equivalent (see awaitingStart doc).
-			// Force-close the window if its deadline expired (STARTED/
-			// FAILED was lost on a busy bus); remaining RECEIVED bytes
-			// from that point are delivered normally.
+			// F-23 (batch-19, Codex bot r6 on #154): handle the
+			// awaitingStart deadline-expiry boundary BEFORE feeding
+			// the escape decoder. Otherwise a pre-grant 0xA9 lead
+			// that was dropped while the window was active would
+			// pair with the FIRST post-expiry byte inside the
+			// decoder, emitting a false escape-decoded byte (or
+			// faulting on an invalid pair) instead of letting the
+			// boundary byte through cleanly.
+			//
+			// Two paths through awaitingStart:
+			//
+			//   (a) Window still active: drop emission AND feed
+			//       decoder so state stays coherent across the
+			//       discarded-traffic stream (round-2 invariant).
+			//
+			//   (b) Window expired at the moment THIS byte arrived:
+			//       Layer-1 abort — wipe arbitration state INCLUDING
+			//       the escape decoder, then fall through to feed
+			//       the byte fresh as the start of post-arbitration
+			//       traffic.
 			if t.awaitingStart.Load() {
 				if t.arbitrationWindowExpired() {
+					t.escDecoder.Reset()
 					t.awaitingStart.Store(false)
 					t.arbitrationDeadline.Store(0)
-					// Fall through: deliver this byte to pendingEvents.
+					// Fall through to the normal decode path below.
 				} else {
+					// Window still active: feed the decoder (so
+					// leads from this byte don't strand across the
+					// next non-dropped boundary) and drop emission.
+					_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
 					continue
 				}
+			}
+			t.resetPendingEscapeBeforeEmissionLocked()
+			// F-23 (batch-19): feed the escape decoder so logical
+			// (unescaped) bytes reach consumers. The SYN test on
+			// the decoded value uses the LOGICAL byte + WasEscaped
+			// flag so escape-decoded data 0xAA (WasEscaped=true) is
+			// never mistaken for an idle bus SYN.
+			decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
+			if !ok {
+				continue
 			}
 			// Post-grant pre-echo window: suppress idle SYN bytes that
 			// arrive between arbitration grant and the first real echo
@@ -1132,15 +1384,17 @@ func (t *ENHTransport) fillPendingLocked() error {
 				if t.postGrantPreEchoExpired() {
 					t.closePostGrantPreEchoWindow()
 					// Fall through: deliver this byte.
-				} else if msg.Data == ebusSymbolSyn {
+				} else if decoded == ebusSymbolSyn && !wasEscaped {
+					// Idle bus SYN — suppress. An escape-decoded
+					// logical 0xAA (WasEscaped=true) is user payload
+					// from a frame, not an idle bus marker, and
+					// MUST pass through.
 					continue
 				} else {
 					t.closePostGrantPreEchoWindow()
 				}
 			}
-			if len(t.pendingEvents) < maxPendingEvents {
-				t.pendingEvents = append(t.pendingEvents, StreamEvent{Kind: StreamEventByte, Byte: msg.Data})
-			}
+			t.appendDecodedByteLocked(decoded, wasEscaped)
 		case ENHResStarted:
 			// If an async arbitration window is open, only a STARTED that
 			// matches the expected initiator is OUR grant. STARTED with a
@@ -1162,6 +1416,19 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// window, open post-grant pre-echo window, queue event.
 			t.awaitingStart.Store(false)
 			t.arbitrationDeadline.Store(0)
+			// F-23 (Codex bot r7 on #154): pre-grant RECEIVED bytes
+			// were fed through the escape decoder during the
+			// awaitingStart window. If a 0xA9 lead arrived and the
+			// pair-completion byte did NOT arrive before STARTED,
+			// the decoder retains escape=true. The first post-grant
+			// echo (our own write echoing back) would pair with
+			// that stale lead, mis-decoding it as a payload
+			// 0xA9/0xAA or faulting as an invalid pair. Arbitration
+			// completion is a Layer-1 boundary — the discarded
+			// traffic's escape state is gone, no completion will
+			// arrive from it. Reset BEFORE the post-grant window
+			// opens so our echo path starts with a clean decoder.
+			t.escDecoder.Reset()
 			t.openPostGrantPreEchoWindow()
 			// Control events MUST NEVER be dropped — gateway/adaptermux
 			// wait for exactly one STARTED or FAILED per arbitration cycle.
@@ -1174,6 +1441,13 @@ func (t *ENHTransport) fillPendingLocked() error {
 			t.awaitingStart.Store(false)
 			t.arbitrationDeadline.Store(0)
 			t.closePostGrantPreEchoWindow()
+			// F-23 (Codex bot r7 on #154): symmetric to STARTED —
+			// arbitration completion (whether grant or loss) closes
+			// the discarded-traffic window. Any stranded 0xA9 lead
+			// from a dropped pre-grant byte must be cleared so
+			// subsequent reads (passive listen, or another
+			// arbitration attempt) start with a clean decoder.
+			t.escDecoder.Reset()
 			t.appendControlEventLocked(StreamEvent{Kind: StreamEventFailed, Data: msg.Data})
 		case ENHResInfo:
 			// INFO responses are consumed by RequestInfo's dedicated read path.
@@ -1204,6 +1478,16 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// Clear post-grant pre-echo window: any in-flight arbitration
 			// correlation is invalidated by the adapter reset.
 			t.closePostGrantPreEchoWindow()
+			// F-23 (batch-19, Codex bot P1 on PR-1): the adapter-
+			// direct RESETTED path does NOT call resetStateLocked()
+			// (pendingEvents must survive to deliver the boundary
+			// event, and the parser stays alive because bus-level
+			// data after RESETTED is valid). But the escape decoder
+			// MUST be reset here: a 0xA9 lead consumed from the pre-
+			// RESETTED stream would otherwise pair with the first
+			// post-RESETTED byte. Layer-1 boundary at the adapter
+			// invalidates in-flight wire-stream state.
+			t.escDecoder.Reset()
 			t.appendControlEventLocked(StreamEvent{Kind: StreamEventReset, Data: msg.Data})
 		}
 	}
@@ -1212,6 +1496,12 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// Parser desync: orphan byte2, missing byte2, or unknown command.
 			// Reset parser to re-synchronize on the next valid byte1.
 			t.parser.Reset()
+			// F-23 (batch-19, Codex bot P-r3): protocol fault on the
+			// ENH frame layer invalidates wire-stream interpretation.
+			// Wipe in-flight escape state alongside the parser so a
+			// stranded pre-fault 0xA9 lead can't falsely pair with
+			// the first post-resync byte.
+			t.escDecoder.Reset()
 			// Always close the async arbitration window on a parse error —
 			// a malformed frame before STARTED/FAILED arrives means the
 			// START response is compromised and would never be recognized.
@@ -1305,6 +1595,21 @@ func isClosed(err error) bool {
 
 // BytesAreUnescaped reports that ENH transport delivers pre-unescaped bytes.
 // The adapter handles eBUS wire escaping internally.
+//
+// F-23 (batch-19, 2026-05-13) — this contract is now honest. Prior to
+// F-23 the function returned true but the transport actually forwarded
+// raw wire bytes (the eBUS escape pairs 0xA9 0x00 → 0xA9 and 0xA9 0x01
+// → 0xAA were leaked as two-byte sequences). Consumers (passive bus
+// tap, reconstructor) saw bare 0xA9 followed by 0x00 or 0x01 and
+// classified the trailing byte as a spurious symbol, producing false
+// unexpected_symbol abandons on every frame whose CRC or data byte was
+// 0xA9 or 0xAA. The CRC verification documented in the batch-19 audit
+// confirmed three production frames (CRC=0xA9 ×2, CRC=0x1B with a data
+// byte 0xA9 at position 13) all matched their wire fingerprints under
+// the escape-leak hypothesis. The fix added an EbusEscapeDecoder
+// (transport/ebus_escape.go) that runs on every StreamEventByte
+// emission inside this transport — the contract is now what the
+// docstring always claimed.
 func (t *ENHTransport) BytesAreUnescaped() bool { return true }
 
 var _ RawTransport = (*ENHTransport)(nil)
@@ -1312,3 +1617,4 @@ var _ StreamEventReader = (*ENHTransport)(nil)
 var _ InfoRequester = (*ENHTransport)(nil)
 var _ Reconnectable = (*ENHTransport)(nil)
 var _ EscapeAware = (*ENHTransport)(nil)
+var _ EscapeFlaggedReader = (*ENHTransport)(nil)
