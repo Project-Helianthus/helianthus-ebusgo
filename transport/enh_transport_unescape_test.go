@@ -2,7 +2,9 @@ package transport_test
 
 import (
 	"errors"
+	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -878,8 +880,275 @@ func TestENH_Transport_AwaitingStartExpiryBoundaryResetsEscape(t *testing.T) {
 	}
 }
 
-// readFull is a small io.ReadFull-equivalent for the test helpers
-// above without dragging the full io package into our import list.
+// TestENH_Transport_AwaitingStartMatchingStartedResetsEscape pins
+// the F-23 Codex bot r7 finding on PR #154: when an async
+// RequestStart window closes via matching STARTED (not timeout, not
+// expiry), the decoder must be reset before the post-grant pre-echo
+// window opens. Otherwise a 0xA9 lead from a dropped pre-grant byte
+// could pair with the first post-grant echo of OUR write, corrupting
+// or dropping it as a phantom escape pair.
+//
+// Test flow:
+//  1. RequestStart opens awaitingStart with a generous deadline.
+//  2. Server sends a wire 0xA9 (lead) during the window. Decoder
+//     buffers escape=true, awaitingStart drops emission.
+//  3. Server sends ENHResStarted (matching initiator). The transport
+//     must close awaitingStart AND reset escDecoder before opening
+//     postGrantPreEcho.
+//  4. Server sends a wire 0x42 (plain). With the r7 fix, this emits
+//     as plain 0x42; without it, it would have paired with the stale
+//     lead (decoder error / drop).
+func TestENH_Transport_AwaitingStartMatchingStartedResetsEscape(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 2*time.Second, 2*time.Second)
+	initiator := byte(0x10)
+
+	// Use a buffered events channel + single reader goroutine to
+	// avoid two competing ReadEvent callers.
+	events := make(chan transport.StreamEvent, 16)
+	readErrCh := make(chan error, 1)
+	go func() {
+		for {
+			ev, err := enh.ReadEvent()
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+			events <- ev
+		}
+	}()
+
+	// Send a wire 0xA9 lead BEFORE we open the arbitration window.
+	// Reader pulls it; decoder.escape=true (no event because
+	// accumulating).
+	preLead := transport.EncodeENH(transport.ENHResReceived, 0xA9)
+	if _, err := server.Write(preLead[:]); err != nil {
+		t.Fatalf("write preLead: %v", err)
+	}
+
+	// Now open the arbitration window. Server: read START, send
+	// matching STARTED, then a plain 0x42 byte. The 0xA9 lead is
+	// still in the decoder from the pre-window byte; STARTED must
+	// reset it.
+	serverErr := make(chan error, 1)
+	go func() {
+		defer close(serverErr)
+		buf := make([]byte, 2)
+		if _, err := readFull(server, buf); err != nil {
+			serverErr <- err
+			return
+		}
+		started := transport.EncodeENH(transport.ENHResStarted, initiator)
+		if _, err := server.Write(started[:]); err != nil {
+			serverErr <- err
+			return
+		}
+		// Plain 0x42 after STARTED. Post-grant pre-echo would
+		// suppress raw 0xAA but not 0x42; the byte should pass
+		// through cleanly. With the r7 reset, 0x42 emits plain.
+		// Without the reset, decoder paired 0xA9+0x42 → invalid
+		// pair → 0x42 silently dropped (or worse).
+		plain := transport.EncodeENH(transport.ENHResReceived, 0x42)
+		_, err := server.Write(plain[:])
+		serverErr <- err
+	}()
+
+	if err := enh.RequestStart(initiator); err != nil {
+		t.Fatalf("RequestStart err = %v", err)
+	}
+
+	// Collect: STARTED, then 0x42.
+	deadline := time.After(3 * time.Second)
+	var gotStarted bool
+	var firstByte *transport.StreamEvent
+	for !gotStarted || firstByte == nil {
+		select {
+		case ev := <-events:
+			switch ev.Kind {
+			case transport.StreamEventStarted:
+				gotStarted = true
+			case transport.StreamEventByte:
+				captured := ev
+				firstByte = &captured
+			}
+		case err := <-readErrCh:
+			t.Fatalf("reader: err=%v DecodeFaultTotal=%d", err, enh.DecodeFaultTotal())
+		case <-deadline:
+			t.Fatalf("timeout: gotStarted=%v firstByte=%v DecodeFaultTotal=%d (pre-r7-fix: 0x42 paired with stale 0xA9 → fault/drop)",
+				gotStarted, firstByte, enh.DecodeFaultTotal())
+		}
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	if firstByte.Byte != 0x42 || firstByte.WasEscaped {
+		t.Fatalf("post-STARTED byte = {Byte=0x%02X WasEscaped=%v}; want {0x42, false} (r7 fix: decoder reset on matching STARTED)",
+			firstByte.Byte, firstByte.WasEscaped)
+	}
+	if got := enh.DecodeFaultTotal(); got != 0 {
+		t.Fatalf("DecodeFaultTotal = %d; want 0 (r7 fix: no false invalid-pair fault)", got)
+	}
+}
+
+// requestStartFailConn lets a test hold RequestStart inside conn.Write after
+// it has opened awaitingStart, while the read side still delivers ENH frames.
+type requestStartFailConn struct {
+	readCh       chan []byte
+	closed       chan struct{}
+	writeEntered chan struct{}
+	releaseWrite chan struct{}
+	readCalls    chan struct{}
+	closeOnce    sync.Once
+}
+
+func newRequestStartFailConn() *requestStartFailConn {
+	return &requestStartFailConn{
+		readCh:       make(chan []byte, 8),
+		closed:       make(chan struct{}),
+		writeEntered: make(chan struct{}, 1),
+		releaseWrite: make(chan struct{}),
+		readCalls:    make(chan struct{}, 8),
+	}
+}
+
+func (c *requestStartFailConn) Read(b []byte) (int, error) {
+	select {
+	case c.readCalls <- struct{}{}:
+	default:
+	}
+	select {
+	case data := <-c.readCh:
+		return copy(b, data), nil
+	case <-c.closed:
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (c *requestStartFailConn) Write(_ []byte) (int, error) {
+	select {
+	case c.writeEntered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-c.releaseWrite:
+		return 0, io.ErrClosedPipe
+	case <-c.closed:
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (c *requestStartFailConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *requestStartFailConn) LocalAddr() net.Addr              { return dummyENHAddr("local") }
+func (c *requestStartFailConn) RemoteAddr() net.Addr             { return dummyENHAddr("remote") }
+func (c *requestStartFailConn) SetDeadline(time.Time) error      { return nil }
+func (c *requestStartFailConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *requestStartFailConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *requestStartFailConn) enqueueENH(msg [2]byte)           { c.readCh <- []byte{msg[0], msg[1]} }
+func (c *requestStartFailConn) releaseRequestStartWriteFailure() { close(c.releaseWrite) }
+func (c *requestStartFailConn) waitForRequestStartWrite(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.writeEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RequestStart did not enter conn.Write")
+	}
+}
+
+func (c *requestStartFailConn) waitForReadCalls(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-c.readCalls:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("conn.Read call %d/%d did not start", i+1, n)
+		}
+	}
+}
+
+type dummyENHAddr string
+
+func (a dummyENHAddr) Network() string { return string(a) }
+func (a dummyENHAddr) String() string  { return string(a) }
+
+// TestENH_Transport_RequestStartWriteFailureResetsDroppedEscape covers the
+// writer-side async arbitration abort: RequestStart opens awaitingStart before
+// conn.Write. If that write later fails after a reader dropped a pre-grant
+// 0xA9 lead, closing awaitingStart must also reset the decoder before the next
+// non-dropped byte is fed.
+func TestENH_Transport_RequestStartWriteFailureResetsDroppedEscape(t *testing.T) {
+	conn := newRequestStartFailConn()
+	defer func() { _ = conn.Close() }()
+
+	enh := transport.NewENHTransport(conn, 2*time.Second, 2*time.Second)
+	initiator := byte(0x10)
+
+	byteEvents := make(chan transport.StreamEvent, 1)
+	readErrCh := make(chan error, 1)
+	go func() {
+		for {
+			ev, err := enh.ReadEvent()
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+			if ev.Kind == transport.StreamEventByte {
+				byteEvents <- ev
+				return
+			}
+		}
+	}()
+
+	startErrCh := make(chan error, 1)
+	go func() {
+		startErrCh <- enh.RequestStart(initiator)
+	}()
+
+	conn.waitForRequestStartWrite(t)
+
+	// This lead is consumed while awaitingStart=true, so it is intentionally
+	// dropped from emission but still leaves escDecoder mid-pair.
+	conn.enqueueENH(transport.EncodeENH(transport.ENHResReceived, 0xA9))
+	// The second Read call starts only after the dropped lead was processed.
+	conn.waitForReadCalls(t, 2)
+
+	conn.releaseRequestStartWriteFailure()
+	err := <-startErrCh
+	if err == nil {
+		t.Fatal("RequestStart err = nil; want write failure")
+	}
+	if !errors.Is(err, ebuserrors.ErrTransportClosed) {
+		t.Fatalf("RequestStart err = %v; want wrapped ErrTransportClosed", err)
+	}
+
+	// First post-abort byte must not pair with the stale dropped 0xA9 lead.
+	conn.enqueueENH(transport.EncodeENH(transport.ENHResReceived, 0x42))
+	select {
+	case ev := <-byteEvents:
+		if ev.Byte != 0x42 || ev.WasEscaped {
+			t.Fatalf("post-write-failure byte = {Byte=0x%02X WasEscaped=%v}; want {0x42, false}",
+				ev.Byte, ev.WasEscaped)
+		}
+	case err := <-readErrCh:
+		t.Fatalf("ReadEvent err = %v DecodeFaultTotal=%d", err, enh.DecodeFaultTotal())
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for 0x42 DecodeFaultTotal=%d", enh.DecodeFaultTotal())
+	}
+	if got := enh.DecodeFaultTotal(); got != 0 {
+		t.Fatalf("DecodeFaultTotal = %d; want 0", got)
+	}
+}
+
+// readFull is a small io.ReadFull-equivalent for the test helpers above.
 func readFull(r net.Conn, buf []byte) (int, error) {
 	read := 0
 	for read < len(buf) {
