@@ -944,13 +944,58 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte) error {
 		Byte:    raw,
 	})
 
-	echo, err := b.readByte(runCtx, reqCtx)
+	// F-23 (batch-19, Codex bot follow-up review on PR #154): for
+	// ENH-class transports, read the echo via the EscapeFlaggedReader
+	// path so we can distinguish a real wire SYN from an escape-
+	// decoded payload 0xAA. Without this distinction, an unrelated
+	// in-flight telegram carrying a payload 0xAA (wire-encoded as
+	// `0xA9 0x01`) can satisfy an end-of-message SYN echo wait and
+	// the bus would proceed as if our SYN was acknowledged.
+	flagged, _ := b.transport.(transport.EscapeFlaggedReader)
+	var echo byte
+	var echoWasEscaped bool
+	if b.unescapedTransport && flagged != nil {
+		echo, echoWasEscaped, err = b.readByteWithEscape(runCtx, reqCtx, flagged)
+	} else {
+		echo, err = b.readByte(runCtx, reqCtx)
+		// Plain transport: wire-level bytes; echoWasEscaped stays
+		// false (the plain-transport "unexpected SYN" check below
+		// keys on raw 0xAA only).
+	}
 	if err != nil {
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
+	// Pre-existing collision detection for PLAIN transports: a real
+	// wire SYN echoed back while we were waiting for a non-SYN echo
+	// is unambiguous collision evidence.
 	if !b.unescapedTransport && echo == SymbolSyn && raw != SymbolSyn {
 		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+		return err
+	}
+	// F-23: the same collision-detection invariant for ENH-class
+	// transports, now keyed on `wasEscaped=false` so a payload 0xAA
+	// (escape-decoded with wasEscaped=true) is correctly NOT treated
+	// as a real wire SYN.
+	if b.unescapedTransport && echo == SymbolSyn && !echoWasEscaped && raw != SymbolSyn {
+		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+		return err
+	}
+	// F-23: when we DID write a SYN (end-of-message 0xAA), the echo
+	// must be a real wire SYN. An escape-decoded payload 0xAA
+	// happens to share the value but is user data from an unrelated
+	// frame — it MUST NOT satisfy our echo wait. Pre-F-23 the wire
+	// bytes would have arrived as `0xA9, 0x01` (two bytes, first one
+	// fails the value check), so the bug was masked by the leak.
+	if b.unescapedTransport && raw == SymbolSyn && echo == SymbolSyn && echoWasEscaped {
+		b.emitObserverEvent(BusEvent{
+			Kind:    BusEventEchoMismatch,
+			Outcome: BusOutcomeEchoMismatch,
+			Byte:    echo,
+		})
+		err := fmt.Errorf("echo expected real wire SYN (0x%02X) but received escape-decoded payload 0xAA: %w", raw, ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
