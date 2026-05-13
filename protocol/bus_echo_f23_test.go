@@ -311,6 +311,65 @@ func TestBus_EscapeAware_PayloadAAEcho_WithWasEscapedAccepted(t *testing.T) {
 	}
 }
 
+// TestBus_EscapeAware_PayloadAAEcho_RealWireSynIsCollision pins the
+// Codex bot r4 finding on PR #154: symmetric to the round-3
+// PayloadAAEcho_WithWasEscapedAccepted test. We write a TELEGRAM
+// PAYLOAD byte equal to 0xAA (expectRawSyn=false). The legitimate
+// echo would arrive WasEscaped=true (adapter wire-escaped). Instead,
+// a real wire SYN (WasEscaped=false) arrives first — this is an
+// unrelated bus event, NOT our payload echo, and MUST be rejected
+// as ErrBusCollision.
+//
+// Pre-r4 fix, all four existing guards skipped: the ENH SYN-intrusion
+// guard requires raw != SymbolSyn; the structural-SYN rejection
+// requires expectRawSyn=true; the value-mismatch check has echo ==
+// raw == 0xAA. Result: false accept. The new guard plugs that hole.
+func TestBus_EscapeAware_PayloadAAEcho_RealWireSynIsCollision(t *testing.T) {
+	t.Parallel()
+
+	tr := &echoF23TestTransport{
+		unescaped: true,
+	}
+	bus := protocol.NewBus(tr, protocol.DefaultBusConfig(), 8)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+	ctx := context.Background()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0xB5,
+		Secondary: 0x16,
+		Data:      []byte{protocol.SymbolSyn},
+	}
+	telegram := []byte{
+		protocol.AddressBroadcast, 0xB5, 0x16, 0x01, protocol.SymbolSyn,
+	}
+	telegram = append(telegram, protocol.CRC(append([]byte{0x10}, telegram...)))
+
+	tr.mu.Lock()
+	tr.echo = nil
+	// First four bytes echo normally (DST PB SB LEN). The fifth
+	// echo (DATA[0]=0xAA) is poisoned: a real wire SYN arrives
+	// where the escape-decoded payload echo should have been. Bus
+	// must reject as collision before reaching the value check.
+	for i, b := range telegram[:4] {
+		_ = i
+		tr.echo = append(tr.echo, echoF23Event{value: b, wasEscaped: false})
+	}
+	tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: false})
+	tr.mu.Unlock()
+
+	_, err := bus.Send(ctx, frame)
+	if err == nil {
+		t.Fatalf("Send err = nil; want ErrBusCollision (real wire SYN where escape-decoded payload 0xAA was expected MUST be a collision)")
+	}
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("Send err = %v; want wrapped ErrBusCollision", err)
+	}
+}
+
 // TestBus_EscapeAware_NonSynEcho_EscapeDecodedAANotCollision pins
 // the inverse of the above: escape-decoded payload 0xAA arriving
 // when we expected a non-SYN echo is a value-mismatch

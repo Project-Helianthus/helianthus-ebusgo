@@ -1000,7 +1000,15 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// transports, now keyed on `wasEscaped=false` so a payload 0xAA
 	// (escape-decoded with wasEscaped=true) is correctly NOT treated
 	// as a real wire SYN.
-	if b.unescapedTransport && echo == SymbolSyn && !echoWasEscaped && raw != SymbolSyn {
+	//
+	// Gated on `flagged != nil` (Codex bot r4 on #154): for an
+	// unescaped transport that does NOT implement EscapeFlaggedReader
+	// (e.g. legacy test doubles), `echoWasEscaped` defaults to false
+	// in the fallback ReadByte path. Without provenance we cannot
+	// distinguish a real wire SYN from an escape-decoded payload —
+	// fall back to pre-F-23 behavior (skip this guard) rather than
+	// false-positive on every legitimate payload 0xAA echo.
+	if flagged != nil && echo == SymbolSyn && !echoWasEscaped && raw != SymbolSyn {
 		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
@@ -1021,13 +1029,35 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// misclassify every payload 0xAA write as a collision. The
 	// expectRawSyn flag, passed in by sendSymbolWithEcho, encodes
 	// "this 0xAA write IS the structural SYN, not a payload byte".
-	if b.unescapedTransport && expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && echoWasEscaped {
+	if flagged != nil && expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && echoWasEscaped {
 		b.emitObserverEvent(BusEvent{
 			Kind:    BusEventEchoMismatch,
 			Outcome: BusOutcomeEchoMismatch,
 			Byte:    echo,
 		})
 		err := fmt.Errorf("echo expected real wire SYN (0x%02X) but received escape-decoded payload 0xAA: %w", raw, ebuserrors.ErrBusCollision)
+		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+		return err
+	}
+	// F-23 (Codex bot r4 on #154): symmetric to the previous guard.
+	// When we wrote a TELEGRAM PAYLOAD byte equal to 0xAA
+	// (expectRawSyn=false), the adapter wire-escapes it as `A9 01`
+	// and the legitimate echo arrives WasEscaped=true. A real wire
+	// SYN (WasEscaped=false) arriving FIRST is NOT our payload
+	// echo — it's an unrelated bus event (idle SYN, or another
+	// initiator's structural marker). Pre-F-23 the wire bytes for
+	// our payload would have been `A9, 01` (first one ≠ 0xAA so
+	// the bare-value match would fail). Post-F-23 our payload
+	// echo is logical 0xAA with WasEscaped=true; we must reject
+	// any 0xAA with WasEscaped=false as a real wire SYN intrusion
+	// that we accidentally let through the value check below.
+	if flagged != nil && !expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && !echoWasEscaped {
+		b.emitObserverEvent(BusEvent{
+			Kind:    BusEventEchoMismatch,
+			Outcome: BusOutcomeEchoMismatch,
+			Byte:    echo,
+		})
+		err := fmt.Errorf("echo for payload 0xAA expected escape-decoded WasEscaped=true but received real wire SYN: %w", ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
