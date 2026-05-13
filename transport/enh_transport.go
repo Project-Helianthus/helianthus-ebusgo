@@ -440,8 +440,29 @@ func (t *ENHTransport) Reconnect() error {
 }
 
 func (t *ENHTransport) ReadByte() (byte, error) {
+	b, _, err := t.readByteAndFlag()
+	return b, err
+}
+
+// ReadByteWithEscape behaves like ReadByte but additionally returns
+// the WasEscaped flag for the emitted byte. F-23 (batch-19,
+// 2026-05-13, Codex bot review on PR-1): the protocol layer's
+// waitForSyn (idle-detect) MUST use this method for ENH-class
+// transports so a logical 0xAA carrying user payload
+// (WasEscaped=true, originally wire 0xA9 0x01) is not falsely
+// counted as a real wire SYN. See transport.EscapeFlaggedReader for
+// the interface contract.
+func (t *ENHTransport) ReadByteWithEscape() (byte, bool, error) {
+	return t.readByteAndFlag()
+}
+
+// readByteAndFlag is the shared implementation backing ReadByte
+// (which discards the flag) and ReadByteWithEscape (which surfaces
+// it). Acquires readMu, drains pendingEvents, and returns the next
+// logical byte plus its WasEscaped provenance.
+func (t *ENHTransport) readByteAndFlag() (byte, bool, error) {
 	if t.closed.Load() {
-		return 0, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+		return 0, false, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
 	}
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -449,7 +470,7 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 	for {
 		if t.resets > 0 {
 			t.resets--
-			return 0, ebuserrors.ErrAdapterReset
+			return 0, false, ebuserrors.ErrAdapterReset
 		}
 
 		// Drain pendingEvents, returning only Byte events. Non-byte events
@@ -459,7 +480,7 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 			ev := t.pendingEvents[0]
 			t.pendingEvents = t.pendingEvents[1:]
 			if ev.Kind == StreamEventByte {
-				return ev.Byte, nil
+				return ev.Byte, ev.WasEscaped, nil
 			}
 			// Skip non-byte events (StreamEventStarted, StreamEventFailed,
 			// StreamEventReset) in ReadByte — event-aware consumers should
@@ -470,11 +491,11 @@ func (t *ENHTransport) ReadByte() (byte, error) {
 		if t.deferredErr != nil {
 			err := t.deferredErr
 			t.deferredErr = nil
-			return 0, err
+			return 0, false, err
 		}
 
 		if err := t.fillPendingLocked(); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if t.resets == 0 && len(t.pendingEvents) == 0 {
 			continue
@@ -1493,3 +1514,4 @@ var _ StreamEventReader = (*ENHTransport)(nil)
 var _ InfoRequester = (*ENHTransport)(nil)
 var _ Reconnectable = (*ENHTransport)(nil)
 var _ EscapeAware = (*ENHTransport)(nil)
+var _ EscapeFlaggedReader = (*ENHTransport)(nil)

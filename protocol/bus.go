@@ -594,6 +594,28 @@ func (b *Bus) readByte(runCtx, reqCtx context.Context) (byte, error) {
 	return value, nil
 }
 
+// readByteWithEscape reads one byte and its WasEscaped flag from a
+// transport that implements EscapeFlaggedReader. Caller is expected
+// to have type-asserted the transport once and passed it in. F-23
+// (batch-19, Codex bot review on PR-1): used by waitForSyn so
+// escape-decoded payload 0xAA bytes are not falsely counted as real
+// wire SYNs in the bus-idle detection path.
+func (b *Bus) readByteWithEscape(runCtx, reqCtx context.Context, flagged transport.EscapeFlaggedReader) (byte, bool, error) {
+	if err := b.contextError(runCtx, reqCtx); err != nil {
+		return 0, false, err
+	}
+	value, wasEscaped, err := flagged.ReadByteWithEscape()
+	if err != nil {
+		return 0, false, err
+	}
+	b.emitObserverEvent(BusEvent{
+		Kind:    BusEventRX,
+		Outcome: BusOutcomeSuccess,
+		Byte:    value,
+	})
+	return value, wasEscaped, nil
+}
+
 type busDecoder struct {
 	escape bool
 }
@@ -950,13 +972,39 @@ func (b *Bus) waitForSyn(runCtx, reqCtx context.Context, count int) error {
 		return nil
 	}
 	if b.unescapedTransport {
-		// ENH: bytes are pre-unescaped, 0xAA is always a real SYN.
+		// ENH: bytes are pre-unescaped at the transport layer. Post-
+		// F-23 (batch-19, 2026-05-13), this includes user-payload
+		// 0xAA bytes that were wire-encoded as `0xA9 0x01`. The
+		// transport surfaces those with the WasEscaped flag set so
+		// SYN-counting logic can distinguish them from real wire
+		// SYNs. Without this distinction (per Codex bot review on
+		// Project-Helianthus/helianthus-ebusgo#154), an unrelated
+		// in-progress telegram carrying an escaped 0xAA could
+		// falsely satisfy waitForSyn during collision retry/backoff
+		// and let the bus try to re-arbitrate while traffic is
+		// still flowing.
+		//
+		// Use the EscapeFlaggedReader interface when the transport
+		// implements it. Transports that don't (none today; future
+		// "ENH-class" transports that claim BytesAreUnescaped() but
+		// emit escape-decoded SYNs as bare bytes) would be the
+		// callers responsible for implementing the interface — this
+		// branch is the gate.
+		flagged, _ := b.transport.(transport.EscapeFlaggedReader)
 		seen := 0
 		for seen < count {
 			if err := b.contextError(runCtx, reqCtx); err != nil {
 				return err
 			}
-			raw, err := b.readByte(runCtx, reqCtx)
+			var raw byte
+			var wasEscaped bool
+			var err error
+			if flagged != nil {
+				raw, wasEscaped, err = b.readByteWithEscape(runCtx, reqCtx, flagged)
+			} else {
+				raw, err = b.readByte(runCtx, reqCtx)
+				wasEscaped = false
+			}
 			if err != nil {
 				if errors.Is(err, ebuserrors.ErrTimeout) ||
 					errors.Is(err, ebuserrors.ErrAdapterReset) ||
@@ -965,7 +1013,7 @@ func (b *Bus) waitForSyn(runCtx, reqCtx context.Context, count int) error {
 				}
 				return err
 			}
-			if raw == SymbolSyn {
+			if raw == SymbolSyn && !wasEscaped {
 				seen++
 			}
 		}

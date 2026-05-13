@@ -70,6 +70,32 @@ type EscapeAware interface {
 	BytesAreUnescaped() bool
 }
 
+// EscapeFlaggedReader is an optional extension (F-23, batch-19, 2026-05-13)
+// implemented by transports whose ReadByte stream may legitimately contain
+// the SYN value (0xAA) as user payload — distinguishable only by the
+// upstream WasEscaped flag.
+//
+// Callers that interpret raw 0xAA as a structural marker (e.g. the
+// protocol layer's waitForSyn idle-detection) MUST use this method on
+// any transport that implements it; otherwise an escape-decoded payload
+// 0xAA (originally wire `0xA9 0x01`) would falsely satisfy SYN-counting
+// logic and let the bus arbitration retry path proceed while traffic is
+// still in progress (Codex bot review on Project-Helianthus/helianthus-ebusgo#154).
+//
+// Transports that already track escape state internally and never
+// surface a logical 0xAA without provenance (e.g. plain TCP / UDP, the
+// ebusd_tcp adapter) do NOT need to implement this — the protocol
+// layer's plain-transport path handles those correctly via the
+// `prevWasEscape` heuristic inside waitForSyn.
+type EscapeFlaggedReader interface {
+	// ReadByteWithEscape behaves like ReadByte but additionally
+	// returns the WasEscaped flag for the emitted byte: true means
+	// the byte was decoded from an eBUS escape pair (wire 0xA9 0x00
+	// → logical 0xA9 or 0xA9 0x01 → logical 0xAA) and is therefore
+	// user payload, not a wire-layer structural marker.
+	ReadByteWithEscape() (byte, bool, error)
+}
+
 // Reconnectable is an optional extension implemented by transports that can
 // tear down and re-establish their underlying connection mid-session. This is
 // used by the protocol layer to recover from dead TCP connections (timeout

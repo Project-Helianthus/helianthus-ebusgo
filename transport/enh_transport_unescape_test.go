@@ -517,6 +517,71 @@ func TestENH_Transport_EscapePersistsAcrossConnReadBoundary(t *testing.T) {
 	}
 }
 
+// TestENH_Transport_ReadByteWithEscape_ExposesProvenanceFlag pins
+// the F-23 (Codex bot review on PR-1) fix that adds the
+// EscapeFlaggedReader interface. The transport must surface
+// WasEscaped to SYN-comparison consumers (waitForSyn) so an escape-
+// decoded payload 0xAA can be distinguished from a real wire SYN.
+//
+// Feeds: A9 00 (-> logical A9, WasEscaped=true)
+//        A9 01 (-> logical AA, WasEscaped=true)
+//        AA    (-> logical AA, WasEscaped=false — real wire SYN)
+func TestENH_Transport_ReadByteWithEscape_ExposesProvenanceFlag(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond)
+	feedENHReceivedBytes(t, server, []byte{0xA9, 0x00, 0xA9, 0x01, 0xAA})
+
+	cases := []struct {
+		Byte       byte
+		WasEscaped bool
+		note       string
+	}{
+		{0xA9, true, "escape-decoded data byte 0xA9"},
+		{0xAA, true, "escape-decoded data byte 0xAA (NOT a SYN)"},
+		{0xAA, false, "raw wire SYN"},
+	}
+	for i, w := range cases {
+		got, wasEscaped, err := enh.ReadByteWithEscape()
+		if err != nil {
+			t.Fatalf("ReadByteWithEscape[%d]: err=%v", i, err)
+		}
+		if got != w.Byte || wasEscaped != w.WasEscaped {
+			t.Fatalf("ReadByteWithEscape[%d] (%s) = {Byte=0x%02X WasEscaped=%v}; want {0x%02X, %v}",
+				i, w.note, got, wasEscaped, w.Byte, w.WasEscaped)
+		}
+	}
+}
+
+// TestENH_Transport_ReadByte_DiscardsEscapeFlag confirms the legacy
+// ReadByte() shape is preserved: same bytes as ReadByteWithEscape,
+// minus the flag. Backward compatible for callers that don't care.
+func TestENH_Transport_ReadByte_DiscardsEscapeFlag(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond)
+	feedENHReceivedBytes(t, server, []byte{0xA9, 0x00, 0xA9, 0x01, 0xAA})
+
+	want := []byte{0xA9, 0xAA, 0xAA}
+	for i, wantByte := range want {
+		got, err := enh.ReadByte()
+		if err != nil {
+			t.Fatalf("ReadByte[%d]: err=%v", i, err)
+		}
+		if got != wantByte {
+			t.Fatalf("ReadByte[%d] = 0x%02X; want 0x%02X", i, got, wantByte)
+		}
+	}
+}
+
 // TestENH_Transport_StartArbitrationDiscardDoesNotStrandEscape pins
 // the second-pass Codex P2 fix: blocking StartArbitration was also
 // dropping ENHResReceived bytes without feeding the decoder. This
