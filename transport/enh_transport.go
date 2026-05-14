@@ -1392,10 +1392,24 @@ func (t *ENHTransport) fillPendingLocked() error {
 					t.arbitrationDeadline.Store(0)
 					// Fall through to the normal decode path below.
 				} else {
-					// Window still active: feed the decoder (so
-					// leads from this byte don't strand across the
-					// next non-dropped boundary) and drop emission.
-					_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
+					// F-38 (batch-33, iter16, 2026-05-15): forward
+					// wire SYN bytes to upstream consumers even
+					// during awaitingStart. ebusd's bus state
+					// machine has SYN_TIMEOUT = 51 ms (upstream
+					// `src/lib/ebus/protocol.h`); without periodic
+					// SYN markers, its reconstructor transitions
+					// bs_ready → bs_skip on receive timeout and
+					// silently drops the eventual STARTED. See
+					// the RequestInfo path at line ~1034 for the
+					// full rationale.
+					//
+					// This is the DOMINANT data path; the prior
+					// commit only patched RequestInfo (less common
+					// path). fillPendingLocked is the hot loop.
+					decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
+					if ok && decoded == ebusSymbolSyn && !wasEscaped {
+						t.appendDecodedByteLocked(decoded, wasEscaped)
+					}
 					continue
 				}
 			}
