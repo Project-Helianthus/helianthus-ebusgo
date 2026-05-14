@@ -1038,7 +1038,43 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						t.arbitrationDeadline.Store(0)
 						// Fall through to the normal decode path below.
 					} else {
-						_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
+						// F-38 (batch-33, iter16, 2026-05-15): forward wire
+						// SYN bytes to upstream consumers even during
+						// awaitingStart. Suppress non-SYN bytes only.
+						//
+						// Consultant iter15 root-cause analysis: ebusd's
+						// bus state machine has SYN_TIMEOUT = 51 ms (per
+						// upstream `src/lib/ebus/protocol.h`). When wire
+						// SYNs are suppressed for >51 ms during a
+						// gateway-pending START, ebusd's bs_ready→bs_skip
+						// transition fires from its receive-timeout. When
+						// ENH_RES_STARTED finally reaches ebusd, its
+						// m_state is bs_skip → "arbitration won in invalid
+						// state skip" — the dominant residual cause of
+						// the silent-drop cascade observed in iter10-iter14
+						// (73% of grants dropped silently, ~3 invalid-state
+						// events/sec under tight load).
+						//
+						// Pre-F-38 the suppression was conservative:
+						// "freeze the world during pending START". But wire
+						// SYNs are bus-idle markers — they're safe and
+						// even essential to forward to ENH clients during
+						// pending. Other wire bytes (data of unrelated
+						// foreign master frames) are still suppressed so
+						// the consumer doesn't see them as gateway-pending
+						// arbitration results.
+						//
+						// Live evidence: 130 ms silence windows pre-failing
+						// STARTED at /tmp/iter10-enh.txt ts 1778791860.955
+						// → 1778791861.085, exactly matching ebusd's
+						// SYN_TIMEOUT firing.
+						decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
+						if ok && decoded == ebusSymbolSyn && !wasEscaped {
+							// Real wire SYN — emit so external sessions'
+							// bus reconstructors observe bus-idle markers
+							// and don't time out their state machines.
+							t.appendDecodedByteLocked(decoded, wasEscaped)
+						}
 						continue
 					}
 				}
