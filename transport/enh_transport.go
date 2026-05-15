@@ -1070,10 +1070,16 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						// SYN_TIMEOUT firing.
 						decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
 						if ok && decoded == ebusSymbolSyn && !wasEscaped {
-							// Real wire SYN — emit so external sessions'
-							// bus reconstructors observe bus-idle markers
-							// and don't time out their state machines.
-							t.appendDecodedByteLocked(decoded, wasEscaped)
+							// Real wire SYN — emit as StreamEventWireSyn so
+							// external bus reconstructors (downstream via
+							// ReadEvent) observe bus-idle markers, while
+							// the active sender's ReadByte loop SKIPS the
+							// event (kind != StreamEventByte). PR #155 P1
+							// fix: prevents pre-grant SYNs from being drained
+							// as the first echo by sendRawWithEcho's wait
+							// loop, which would mis-classify them as a wire
+							// collision.
+							t.appendWireSynLocked()
 						}
 						continue
 					}
@@ -1310,6 +1316,26 @@ func (t *ENHTransport) appendDecodedByteLocked(decoded byte, wasEscaped bool) {
 	}
 }
 
+// appendWireSynLocked emits a passive wire-SYN marker (StreamEventWireSyn)
+// during the awaitingStart window so ReadEvent consumers downstream
+// (gateway adaptermux → ebusd) observe bus-idle cadence and avoid
+// triggering their receive-state-machine timeouts. Critically, the
+// non-Byte kind makes ReadByte SKIP this event — the active sender's
+// echo-wait drain never sees pre-grant SYNs and so cannot mistake them
+// for the first echo. Subject to maxPendingEvents cap to prevent
+// unbounded growth on a sustained pre-grant window.
+//
+// F-38-fix (PR #155 P1, 2026-05-15): replaces the original F-38 use of
+// appendDecodedByteLocked which pollutes the echo-drain path.
+func (t *ENHTransport) appendWireSynLocked() {
+	if len(t.pendingEvents) < maxPendingEvents {
+		t.pendingEvents = append(t.pendingEvents, StreamEvent{
+			Kind: StreamEventWireSyn,
+			Byte: ebusSymbolSyn,
+		})
+	}
+}
+
 // DecodeFaultTotal returns the cumulative count of invalid eBUS escape
 // pairs observed on the wire (a 0xA9 lead followed by a byte other
 // than 0x00 or 0x01). Non-fatal — the decoder drops the offending
@@ -1408,7 +1434,12 @@ func (t *ENHTransport) fillPendingLocked() error {
 					// path). fillPendingLocked is the hot loop.
 					decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
 					if ok && decoded == ebusSymbolSyn && !wasEscaped {
-						t.appendDecodedByteLocked(decoded, wasEscaped)
+						// PR #155 P1 fix: emit as StreamEventWireSyn so
+						// the active sender's ReadByte echo-wait skips it
+						// instead of consuming the pre-grant SYN as the
+						// first echo (which sendRawWithEcho's collision
+						// guard would reject as unexpected wire SYN).
+						t.appendWireSynLocked()
 					}
 					continue
 				}

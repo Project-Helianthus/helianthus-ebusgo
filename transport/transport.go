@@ -24,6 +24,25 @@ const (
 	StreamEventReset
 	StreamEventStarted // adapter confirmed START arbitration
 	StreamEventFailed  // adapter rejected START arbitration
+
+	// StreamEventWireSyn is a passive bus-idle marker (wire 0xAA SYN)
+	// surfaced during an in-flight async RequestStart's `awaitingStart`
+	// window. Distinct from StreamEventByte so that ReadByte (the
+	// active sender's echo-wait drain) NEVER returns it — only ReadEvent
+	// consumers (e.g. a downstream bus reconstructor that needs to
+	// observe SYN cadence to keep its receive-state-machine in
+	// `bs_ready`) see these markers.
+	//
+	// F-38-fix (PR #155 P1, 2026-05-15): the original F-38 emitted
+	// pre-grant SYNs as StreamEventByte, which polluted the
+	// pendingEvents queue drained by ReadByte. After the eventual
+	// STARTED arrived, the active sender's first echo wait would
+	// return the stale 0xAA as the first echo and `sendRawWithEcho`'s
+	// collision guard would reject it as an unexpected wire SYN.
+	// Routing through this dedicated kind keeps the F-38 contract
+	// (downstream consumers see SYN cadence) without breaking the
+	// active-sender echo invariant.
+	StreamEventWireSyn
 )
 
 // StreamEvent is a transport-stream item. Byte is valid for
