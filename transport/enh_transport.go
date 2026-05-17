@@ -1080,7 +1080,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						// SYNs are bus-idle markers — they're safe and
 						// even essential to forward to ENH clients during
 						// pending. Other wire bytes (data of unrelated
-						// foreign master frames) are still suppressed so
+						// foreign initiator frames) are still suppressed so
 						// the consumer doesn't see them as gateway-pending
 						// arbitration results.
 						//
