@@ -991,7 +991,22 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// Pre-existing collision detection for PLAIN transports: a real
 	// wire SYN echoed back while we were waiting for a non-SYN echo
 	// is unambiguous collision evidence.
+	//
+	// batch-23 round-5 (Codex P2 2026-05-17): emit BusEventEchoMismatch
+	// with byte provenance BEFORE emitOutcomeEvent so the downstream
+	// gateway P10 classifier sees Byte=0xAA + EchoWasEscaped=false and
+	// records this as `pre_echo_syn_raw`. Without this direct emit, the
+	// centralized re-emit in emitOutcomeEvent surfaces a zero-Byte event
+	// that gets misclassified as `post_grant_ack` at the gateway side.
+	// Pattern matches the four sibling guards below (~1032, ~1055,
+	// ~1066) that already do direct-emit + emitOutcomeEvent.
 	if !b.unescapedTransport && echo == SymbolSyn && raw != SymbolSyn {
+		b.emitObserverEvent(BusEvent{
+			Kind:           BusEventEchoMismatch,
+			Outcome:        BusOutcomeEchoMismatch,
+			Byte:           echo,
+			EchoWasEscaped: echoWasEscaped,
+		})
 		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
@@ -1008,7 +1023,18 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// distinguish a real wire SYN from an escape-decoded payload —
 	// fall back to pre-F-23 behavior (skip this guard) rather than
 	// false-positive on every legitimate payload 0xAA echo.
+	//
+	// batch-23 round-5 (Codex P2 2026-05-17): same provenance fix as
+	// the plain-transport sibling above. EchoWasEscaped=false here by
+	// construction (the guard requires it); the explicit forward keeps
+	// the emission pattern symmetric with the other r3/r4 sites.
 	if flagged != nil && echo == SymbolSyn && !echoWasEscaped && raw != SymbolSyn {
+		b.emitObserverEvent(BusEvent{
+			Kind:           BusEventEchoMismatch,
+			Outcome:        BusOutcomeEchoMismatch,
+			Byte:           echo,
+			EchoWasEscaped: echoWasEscaped,
+		})
 		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err

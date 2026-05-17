@@ -570,3 +570,83 @@ func TestBus_EscapeAware_NonSynEcho_EscapeDecodedAANotCollision(t *testing.T) {
 		t.Fatalf("Send err = %v; want wrapped ErrBusCollision", err)
 	}
 }
+
+// TestBus_EchoMismatchEvent_RawSynIntrusion_CarriesProvenance pins
+// the batch-23 round-5 (Codex P2 2026-05-17) fix on PR #155. Pre-fix,
+// the ENH "unexpected SYN while waiting for non-SYN echo" guard at
+// bus.go ~1011 returned after only emitOutcomeEvent, which surfaces
+// a BusEventEchoMismatch with zero Byte. Downstream the gateway P10
+// classifier saw Byte=0x00 and recorded "post_grant_ack" instead of
+// "pre_echo_syn_raw" — the very subclass the operator needs to
+// distinguish raw-SYN mux leaks from third-party-escaped 0xAA frames.
+//
+// Scenario: raw=0xFE (the DST byte of a broadcast frame), echo=0xAA
+// (real wire SYN, WasEscaped=false). Post-fix the bus emits a direct
+// BusEventEchoMismatch{Byte: 0xAA, EchoWasEscaped: false} BEFORE the
+// emitOutcomeEvent re-emit; the gateway classifier sees the per-byte
+// event first and tags it `pre_echo_syn_raw`.
+func TestBus_EchoMismatchEvent_RawSynIntrusion_CarriesProvenance(t *testing.T) {
+	t.Parallel()
+
+	tr := &echoF23TestTransport{unescaped: true}
+
+	var observed []protocol.BusEvent
+	var obsMu sync.Mutex
+	observer := protocol.BusObserverFunc(func(ev protocol.BusEvent) error {
+		obsMu.Lock()
+		defer obsMu.Unlock()
+		if ev.Kind == protocol.BusEventEchoMismatch {
+			observed = append(observed, ev)
+		}
+		return nil
+	})
+
+	cfg := protocol.DefaultBusConfig()
+	cfg.Observer = observer
+	bus := protocol.NewBus(tr, cfg, 8)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+	ctx := context.Background()
+
+	// Broadcast frame: first telegram byte after arbitration is DST=
+	// 0xFE (AddressBroadcast). We poison its echo slot with a real
+	// wire SYN (0xAA, WasEscaped=false) so the bus hits the
+	// `flagged != nil && echo == SymbolSyn && !echoWasEscaped &&
+	// raw != SymbolSyn` guard at bus.go ~1011.
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0xB5,
+		Secondary: 0x16,
+		Data:      nil,
+	}
+	tr.mu.Lock()
+	tr.echo = []echoF23Event{
+		{value: protocol.SymbolSyn, wasEscaped: false},
+	}
+	tr.mu.Unlock()
+
+	_, err := bus.Send(ctx, frame)
+	if err == nil {
+		t.Fatal("setup: expected ErrBusCollision (raw SYN intrusion)")
+	}
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("setup: want wrapped ErrBusCollision, got %v", err)
+	}
+
+	obsMu.Lock()
+	defer obsMu.Unlock()
+	if len(observed) == 0 {
+		t.Fatal("no BusEventEchoMismatch observed (provenance lost — Codex P2 batch-23 regression)")
+	}
+	// The first event is the per-byte direct emission from the
+	// r5 guard; the centralized emitOutcomeEvent re-emit follows.
+	first := observed[0]
+	if first.Byte != protocol.SymbolSyn {
+		t.Fatalf("first event Byte = 0x%02X, want 0xAA (raw SYN intrusion byte)", first.Byte)
+	}
+	if first.EchoWasEscaped {
+		t.Fatalf("first event EchoWasEscaped = true, want false (real wire SYN has WasEscaped=false)")
+	}
+}
