@@ -126,3 +126,21 @@ type EscapeFlaggedReader interface {
 type Reconnectable interface {
 	Reconnect() error
 }
+
+// PostGrantWindowExpiredReporter is an optional extension implemented
+// by transports that maintain a post-grant pre-echo SYN-suppression
+// window (currently: ENH transport). Returns the cumulative count of
+// times the window closed via DEADLINE EXPIRY (as opposed to first-
+// real-echo arrival or lifecycle reset).
+//
+// Consumers (gateway adaptermux) correlate the post-window-close
+// idle 0xAA SYN arrivals with `echo_mismatch` events in the next
+// gateway transaction. F-XX (batch-22 Attack 2 instrumentation,
+// 2026-05-15). Forensic-only — no behavior implication.
+//
+// Transports without a post-grant window (plain TCP/UDP, ebusd_tcp)
+// do NOT need to implement this; the gateway falls back to leaving
+// the diagnostic counter at zero.
+type PostGrantWindowExpiredReporter interface {
+	PostGrantWindowExpiredCount() uint64
+}
