@@ -3862,7 +3862,11 @@ func TestENHTransport_RequestInfo_PostGrantSYNSuppressed(t *testing.T) {
 // delivered as data, and the read path progresses. Copilot P1
 // (3105413090) on PR #135.
 func TestENHTransport_PostGrantWindow_DeadlineExpiresWithSYNEcho(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel: overrides postGrantPreEchoTimeout via a package-
+	// global mutation; running concurrently with
+	// TestPostGrantPreEchoTimeout_CoversTransactionDuration would race
+	// the constant-value assertion. See SetPostGrantPreEchoTimeoutForTest.
+	defer transport.SetPostGrantPreEchoTimeoutForTest(50 * time.Millisecond)()
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -3872,7 +3876,7 @@ func TestENHTransport_PostGrantWindow_DeadlineExpiresWithSYNEcho(t *testing.T) {
 	initiator := byte(0x71)
 
 	// Batch 1: STARTED (opens postGrantPreEcho).
-	// Sleep past the 50ms deadline.
+	// Sleep past the (overridden) 50ms deadline.
 	// Batch 2: RECEIVED(0xAA) — must be delivered, not suppressed.
 	go func() {
 		buf := make([]byte, 2)
@@ -3881,7 +3885,7 @@ func TestENHTransport_PostGrantWindow_DeadlineExpiresWithSYNEcho(t *testing.T) {
 		started := transport.EncodeENH(transport.ENHResStarted, initiator)
 		_, _ = server.Write(started[:])
 
-		// Sleep past 50ms postGrantPreEchoTimeout.
+		// Sleep past the overridden 50ms postGrantPreEchoTimeout.
 		time.Sleep(100 * time.Millisecond)
 
 		// After deadline, 0xAA should be delivered as data.

@@ -24,7 +24,10 @@ import (
 // A 100ms sleep is long enough to refute the old 50ms timeout while short
 // enough not to slow the suite.
 func TestPostGrantPreEchoTimeout_CoversTransactionDuration(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel: this test asserts the production value of
+	// postGrantPreEchoTimeout, which is mutated by other tests in
+	// this package via SetPostGrantPreEchoTimeoutForTest. Running in
+	// parallel would race those overrides.
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()

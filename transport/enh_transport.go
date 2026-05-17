@@ -52,7 +52,12 @@ const arbitrationWindowTimeout = 500 * time.Millisecond
 // 0xAA" case so the write path can't stall indefinitely — 5s is well
 // above any real eBUS transaction duration but still terminates a
 // pathologically stuck txn.
-const postGrantPreEchoTimeout = 5 * time.Second
+//
+// Declared as a var (not const) solely to enable a test-only override via
+// setPostGrantPreEchoTimeoutForTest. Production code MUST treat this as
+// immutable; the override is gated on the _test.go build path and exists
+// because two deadline-expiry tests would otherwise need 5s+ sleeps each.
+var postGrantPreEchoTimeout = 5 * time.Second
 
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
