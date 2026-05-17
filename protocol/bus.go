@@ -1031,9 +1031,10 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// "this 0xAA write IS the structural SYN, not a payload byte".
 	if flagged != nil && expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && echoWasEscaped {
 		b.emitObserverEvent(BusEvent{
-			Kind:    BusEventEchoMismatch,
-			Outcome: BusOutcomeEchoMismatch,
-			Byte:    echo,
+			Kind:           BusEventEchoMismatch,
+			Outcome:        BusOutcomeEchoMismatch,
+			Byte:           echo,
+			EchoWasEscaped: echoWasEscaped, // 2026-05-17 batch-23: split P10 pre_echo_syn (escape-decoded data byte vs raw SYN)
 		})
 		err := fmt.Errorf("echo expected real wire SYN (0x%02X) but received escape-decoded payload 0xAA: %w", raw, ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
@@ -1053,9 +1054,10 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// that we accidentally let through the value check below.
 	if flagged != nil && !expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && !echoWasEscaped {
 		b.emitObserverEvent(BusEvent{
-			Kind:    BusEventEchoMismatch,
-			Outcome: BusOutcomeEchoMismatch,
-			Byte:    echo,
+			Kind:           BusEventEchoMismatch,
+			Outcome:        BusOutcomeEchoMismatch,
+			Byte:           echo,
+			EchoWasEscaped: echoWasEscaped, // 2026-05-17 batch-23: split P10 pre_echo_syn (escape-decoded data byte vs raw SYN)
 		})
 		err := fmt.Errorf("echo for payload 0xAA expected escape-decoded WasEscaped=true but received real wire SYN: %w", ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
@@ -1063,9 +1065,10 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	}
 	if echo != raw {
 		b.emitObserverEvent(BusEvent{
-			Kind:    BusEventEchoMismatch,
-			Outcome: BusOutcomeEchoMismatch,
-			Byte:    echo,
+			Kind:           BusEventEchoMismatch,
+			Outcome:        BusOutcomeEchoMismatch,
+			Byte:           echo,
+			EchoWasEscaped: echoWasEscaped, // 2026-05-17 batch-23: split P10 pre_echo_syn (escape-decoded data byte vs raw SYN)
 		})
 		err := fmt.Errorf("echo mismatch (sent 0x%02x, got 0x%02x): %w", raw, echo, ebuserrors.ErrBusCollision)
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)

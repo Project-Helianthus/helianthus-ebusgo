@@ -71,6 +71,29 @@ type BusEvent struct {
 	Initiator byte
 	Byte      byte
 
+	// EchoWasEscaped is set on BusEventEchoMismatch events emitted at
+	// the sendSymbolWithEcho echo-value check (bus.go ~1054). It
+	// records whether the offending echo byte arrived through the
+	// transport's escape-decoder (i.e. wire pair `A9 01` → logical
+	// 0xAA with the WasEscaped flag set) versus arriving as a raw
+	// wire byte. Consumers (gateway P10 echo_mismatch subclass
+	// classifier) can use this to split the byte-value-only
+	// `pre_echo_syn` label into:
+	//
+	//   - pre_echo_syn_raw           (EchoWasEscaped=false, real
+	//                                 wire SYN — mux SYN-suppression
+	//                                 leak class)
+	//   - pre_echo_syn_escaped_data  (EchoWasEscaped=true, third-
+	//                                 party frame payload 0xAA that
+	//                                 was wire-encoded `A9 01` and
+	//                                 the transport unescaped it)
+	//
+	// Added 2026-05-17 batch-23 (echo_mismatch round-4 classifier
+	// split). Zero-value on events where the flag is not meaningful
+	// (e.g. non-EchoMismatch kinds, or echo events where the byte
+	// arrived through a non-escape-flagged transport).
+	EchoWasEscaped bool
+
 	Attempt        uint16
 	TimeoutRetries uint16
 	NACKRetries    uint16
