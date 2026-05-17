@@ -36,14 +36,23 @@ const arbitrationWindowTimeout = 500 * time.Millisecond
 // the bus layer's first write. The window closes on: (a) the first
 // non-SYN RECEIVED (the real echo, normal case), or (b) this deadline.
 //
-// Deadline prevents a degenerate case where the first legitimate echo
-// happens to be 0xAA (for example, a frame whose first post-arbitration
-// byte is 0xAA) — without a deadline, that echo would be suppressed,
-// the window would never close, and the write path would stall. 50ms is
-// well above TCP latency between STARTED and our first Write returning
-// from conn.Write, but short enough to not materially affect protocol
-// timing (a full eBUS transaction is bounded by larger timeouts).
-const postGrantPreEchoTimeout = 50 * time.Millisecond
+// Sizing (batch-24 round-5, 2026-05-17): widened from 50ms to 5s to
+// cover the entire gateway transaction duration. Under normal operation
+// the window closes on the first non-SYN echo (sub-50ms; mux also
+// invokes closePostGrantPreEchoWindow on the first observed byte echo),
+// so the extended timeout is a fallback that keeps the SYN-suppression
+// contract in force for the full transaction window. This suppresses
+// wire 0xAA intrusion (AUTO-SYN idle ticks on >35ms write gaps OR
+// foreign-master mid-frame injection) for the duration of a long or
+// stuck gateway transaction. Prevents the `pre_echo_syn_raw` leak class
+// measured at ≈4/min in batch-24 round-4 (genuine wire SYN intrusion;
+// not escape-decoded 0xAA data, which round-4 telemetry confirmed at 0/min).
+//
+// Deadline still bounds the degenerate "first legit echo happens to be
+// 0xAA" case so the write path can't stall indefinitely — 5s is well
+// above any real eBUS transaction duration but still terminates a
+// pathologically stuck txn.
+const postGrantPreEchoTimeout = 5 * time.Second
 
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
@@ -143,16 +152,19 @@ type ENHTransport struct {
 	// (gateway mux) to correlate post-window-close SYNs with
 	// echo_mismatch events.
 	//
-	// F-XX (batch-22 Attack 2 instrumentation, 2026-05-15):
-	// the 50 ms postGrantPreEchoTimeout intentionally bounds the
-	// window so a degenerate first-echo-is-0xAA case doesn't stall
-	// the read path. After expiry the SYN-suppression contract
-	// ends — any subsequent idle 0xAA passes through to the
-	// pendingEvents queue and may leak as the next ReadByte caller's
-	// echo (the pre_echo_syn root cause Attack 2 targets). This
-	// counter measures how often that window closes by expiry, so
-	// the gateway can correlate the rate with mux-side echo_mismatch
-	// events.
+	// F-XX (batch-22 Attack 2 instrumentation, 2026-05-15;
+	// batch-24 round-5 timeout widening, 2026-05-17):
+	// postGrantPreEchoTimeout intentionally bounds the window so a
+	// degenerate first-echo-is-0xAA case doesn't stall the read path.
+	// After expiry the SYN-suppression contract ends — any subsequent
+	// idle 0xAA passes through to the pendingEvents queue and may leak
+	// as the next ReadByte caller's echo (the pre_echo_syn root cause
+	// Attack 2 targets). This counter measures how often that window
+	// closes by expiry, so the gateway can correlate the rate with
+	// mux-side echo_mismatch events. Round-5 widened the timeout from
+	// 50ms to 5s so the window now covers the full gateway transaction
+	// duration; expiry-path closures should become rare and indicate a
+	// stuck/long txn rather than ordinary post-grant settling.
 	postGrantWindowExpiredCount atomic.Uint64
 	// escDecoder unescapes eBUS byte-stuffing on the steady-state byte
 	// stream so the BytesAreUnescaped() contract is honest. Accessed
