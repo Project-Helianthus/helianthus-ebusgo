@@ -134,6 +134,26 @@ type ENHTransport struct {
 	// postGrantPreEchoTimeout for timing rationale.
 	postGrantPreEcho         atomic.Bool
 	postGrantPreEchoDeadline atomic.Int64
+
+	// postGrantWindowExpiredCount counts the number of times the
+	// postGrantPreEcho window closed via DEADLINE EXPIRY (case b in
+	// the field doc above), as opposed to closure via first-real-
+	// echo arrival (case a) or lifecycle reset (case c). Surfaced
+	// via PostGrantWindowExpiredCount() for downstream consumers
+	// (gateway mux) to correlate post-window-close SYNs with
+	// echo_mismatch events.
+	//
+	// F-XX (batch-22 Attack 2 instrumentation, 2026-05-15):
+	// the 50 ms postGrantPreEchoTimeout intentionally bounds the
+	// window so a degenerate first-echo-is-0xAA case doesn't stall
+	// the read path. After expiry the SYN-suppression contract
+	// ends — any subsequent idle 0xAA passes through to the
+	// pendingEvents queue and may leak as the next ReadByte caller's
+	// echo (the pre_echo_syn root cause Attack 2 targets). This
+	// counter measures how often that window closes by expiry, so
+	// the gateway can correlate the rate with mux-side echo_mismatch
+	// events.
+	postGrantWindowExpiredCount atomic.Uint64
 	// escDecoder unescapes eBUS byte-stuffing on the steady-state byte
 	// stream so the BytesAreUnescaped() contract is honest. Accessed
 	// only under readMu (every byte-emission site that feeds into it
@@ -1105,6 +1125,10 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				if t.postGrantPreEcho.Load() {
 					if t.postGrantPreEchoExpired() {
 						t.closePostGrantPreEchoWindow()
+						// F-XX (batch-22 Attack 2 instrumentation):
+						// expiry-path close — distinct from first-echo
+						// close. See postGrantWindowExpiredCount field doc.
+						t.postGrantWindowExpiredCount.Add(1)
 						// Fall through: deliver this byte.
 					} else if decoded == ebusSymbolSyn && !wasEscaped {
 						// Idle bus SYN — suppress. An escape-decoded
@@ -1346,6 +1370,20 @@ func (t *ENHTransport) DecodeFaultTotal() uint64 {
 	return t.decodeFaultTotal.Load()
 }
 
+// PostGrantWindowExpiredCount returns the cumulative count of
+// postGrantPreEcho window-close-by-deadline-expiry events (as opposed
+// to closure via the first non-SYN echo arrival or lifecycle reset).
+// Used by downstream consumers (gateway adaptermux) to correlate
+// post-window-close idle 0xAA SYN arrivals with echo_mismatch events
+// in the next gateway transaction. Forensic-only signal — no behavior
+// implication on its own. Safe to call without holding readMu.
+//
+// F-XX (batch-22 Attack 2 instrumentation, 2026-05-15): see
+// postGrantWindowExpiredCount field doc for full rationale.
+func (t *ENHTransport) PostGrantWindowExpiredCount() uint64 {
+	return t.postGrantWindowExpiredCount.Load()
+}
+
 func (t *ENHTransport) surfaceResetLocked() {
 	t.resetStateLocked()
 	t.resets++
@@ -1464,6 +1502,10 @@ func (t *ENHTransport) fillPendingLocked() error {
 			if t.postGrantPreEcho.Load() {
 				if t.postGrantPreEchoExpired() {
 					t.closePostGrantPreEchoWindow()
+					// F-XX (batch-22 Attack 2 instrumentation):
+					// expiry-path close — distinct from first-echo
+					// close. See postGrantWindowExpiredCount field doc.
+					t.postGrantWindowExpiredCount.Add(1)
 					// Fall through: deliver this byte.
 				} else if decoded == ebusSymbolSyn && !wasEscaped {
 					// Idle bus SYN — suppress. An escape-decoded
