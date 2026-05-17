@@ -370,6 +370,161 @@ func TestBus_EscapeAware_PayloadAAEcho_RealWireSynIsCollision(t *testing.T) {
 	}
 }
 
+// TestBus_EchoMismatchEvent_PropagatesEchoWasEscaped_True pins the
+// batch-23 (2026-05-17) round-4 plumbing: the BusEventEchoMismatch
+// emitted by sendRawWithEcho's escape-aware guards MUST carry
+// EchoWasEscaped from the transport. Downstream consumers (gateway
+// P10 echo_mismatch subclass classifier) rely on this to split the
+// byte-value-only `pre_echo_syn` label into raw-SYN vs escape-
+// decoded-data subclasses.
+//
+// Scenario: we write a TELEGRAM PAYLOAD byte 0xAA (expectRawSyn=
+// false). Echo arrives as a REAL wire SYN (WasEscaped=false) —
+// this is the round-4 round-4 guard at bus.go ~1054, which emits
+// BusEventEchoMismatch with EchoWasEscaped=false (forwarded from
+// the echoWasEscaped local).
+func TestBus_EchoMismatchEvent_PropagatesEchoWasEscaped_False(t *testing.T) {
+	t.Parallel()
+
+	tr := &echoF23TestTransport{unescaped: true}
+
+	var observed []protocol.BusEvent
+	var obsMu sync.Mutex
+	observer := protocol.BusObserverFunc(func(ev protocol.BusEvent) error {
+		obsMu.Lock()
+		defer obsMu.Unlock()
+		if ev.Kind == protocol.BusEventEchoMismatch {
+			observed = append(observed, ev)
+		}
+		return nil
+	})
+
+	cfg := protocol.DefaultBusConfig()
+	cfg.Observer = observer
+	bus := protocol.NewBus(tr, cfg, 8)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+	ctx := context.Background()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0xB5,
+		Secondary: 0x16,
+		Data:      []byte{protocol.SymbolSyn},
+	}
+	telegram := []byte{
+		protocol.AddressBroadcast, 0xB5, 0x16, 0x01, protocol.SymbolSyn,
+	}
+	telegram = append(telegram, protocol.CRC(append([]byte{0x10}, telegram...)))
+	tr.mu.Lock()
+	tr.echo = nil
+	for _, b := range telegram[:4] {
+		tr.echo = append(tr.echo, echoF23Event{value: b, wasEscaped: false})
+	}
+	// Payload 0xAA position poisoned by real wire SYN.
+	tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: false})
+	tr.mu.Unlock()
+
+	_, err := bus.Send(ctx, frame)
+	if err == nil {
+		t.Fatal("setup: expected ErrBusCollision")
+	}
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("setup: want wrapped ErrBusCollision, got %v", err)
+	}
+
+	obsMu.Lock()
+	defer obsMu.Unlock()
+	if len(observed) == 0 {
+		t.Fatal("no BusEventEchoMismatch observed")
+	}
+	// The FIRST echo-mismatch event is the per-byte emission from
+	// sendRawWithEcho's r4 guard. Subsequent ones may come from
+	// emitOutcomeEvent's centralized re-emit; we assert on the
+	// first one (the per-byte direct emission).
+	first := observed[0]
+	if first.Byte != protocol.SymbolSyn {
+		t.Fatalf("first event Byte = 0x%02X, want 0xAA", first.Byte)
+	}
+	if first.EchoWasEscaped {
+		t.Fatalf("first event EchoWasEscaped = true, want false (a real wire SYN intrusion has WasEscaped=false on the wire)")
+	}
+}
+
+// TestBus_EchoMismatchEvent_PropagatesEchoWasEscaped_True pins the
+// other half: when we write a STRUCTURAL end-of-message SYN
+// (expectRawSyn=true) and the echo arrives 0xAA with WasEscaped=
+// true (escape-decoded payload 0xAA from unrelated traffic — the
+// round-3 guard at bus.go ~1032), the emitted BusEventEchoMismatch
+// MUST carry EchoWasEscaped=true so the downstream P10 classifier
+// can attribute this to the "third-party frame payload" subclass
+// rather than to a gateway-internal SYN-suppression leak.
+func TestBus_EchoMismatchEvent_PropagatesEchoWasEscaped_True(t *testing.T) {
+	t.Parallel()
+
+	tr := &echoF23TestTransport{unescaped: true}
+
+	var observed []protocol.BusEvent
+	var obsMu sync.Mutex
+	observer := protocol.BusObserverFunc(func(ev protocol.BusEvent) error {
+		obsMu.Lock()
+		defer obsMu.Unlock()
+		if ev.Kind == protocol.BusEventEchoMismatch {
+			observed = append(observed, ev)
+		}
+		return nil
+	})
+
+	cfg := protocol.DefaultBusConfig()
+	cfg.Observer = observer
+	bus := protocol.NewBus(tr, cfg, 8)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+	ctx := context.Background()
+
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0xB5,
+		Secondary: 0x16,
+		Data:      nil,
+	}
+	telegram := []byte{
+		protocol.AddressBroadcast, 0xB5, 0x16, 0x00,
+	}
+	telegram = append(telegram, protocol.CRC(append([]byte{0x10}, telegram...)))
+	tr.mu.Lock()
+	tr.echo = nil
+	for _, b := range telegram {
+		tr.echo = append(tr.echo, echoF23Event{value: b, wasEscaped: false})
+	}
+	// End-of-message structural SYN slot poisoned by escape-decoded
+	// payload 0xAA from unrelated traffic.
+	tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: true})
+	tr.mu.Unlock()
+
+	_, err := bus.Send(ctx, frame)
+	if err == nil {
+		t.Fatal("setup: expected ErrBusCollision")
+	}
+
+	obsMu.Lock()
+	defer obsMu.Unlock()
+	if len(observed) == 0 {
+		t.Fatal("no BusEventEchoMismatch observed")
+	}
+	first := observed[0]
+	if first.Byte != protocol.SymbolSyn {
+		t.Fatalf("first event Byte = 0x%02X, want 0xAA", first.Byte)
+	}
+	if !first.EchoWasEscaped {
+		t.Fatal("first event EchoWasEscaped = false, want true (escape-decoded payload 0xAA from third-party frame has WasEscaped=true)")
+	}
+}
+
 // TestBus_EscapeAware_NonSynEcho_EscapeDecodedAANotCollision pins
 // the inverse of the above: escape-decoded payload 0xAA arriving
 // when we expected a non-SYN echo is a value-mismatch
@@ -413,5 +568,85 @@ func TestBus_EscapeAware_NonSynEcho_EscapeDecodedAANotCollision(t *testing.T) {
 	}
 	if !errors.Is(err, ebuserrors.ErrBusCollision) {
 		t.Fatalf("Send err = %v; want wrapped ErrBusCollision", err)
+	}
+}
+
+// TestBus_EchoMismatchEvent_RawSynIntrusion_CarriesProvenance pins
+// the batch-23 round-5 (Codex P2 2026-05-17) fix on PR #155. Pre-fix,
+// the ENH "unexpected SYN while waiting for non-SYN echo" guard at
+// bus.go ~1011 returned after only emitOutcomeEvent, which surfaces
+// a BusEventEchoMismatch with zero Byte. Downstream the gateway P10
+// classifier saw Byte=0x00 and recorded "post_grant_ack" instead of
+// "pre_echo_syn_raw" — the very subclass the operator needs to
+// distinguish raw-SYN mux leaks from third-party-escaped 0xAA frames.
+//
+// Scenario: raw=0xFE (the DST byte of a broadcast frame), echo=0xAA
+// (real wire SYN, WasEscaped=false). Post-fix the bus emits a direct
+// BusEventEchoMismatch{Byte: 0xAA, EchoWasEscaped: false} BEFORE the
+// emitOutcomeEvent re-emit; the gateway classifier sees the per-byte
+// event first and tags it `pre_echo_syn_raw`.
+func TestBus_EchoMismatchEvent_RawSynIntrusion_CarriesProvenance(t *testing.T) {
+	t.Parallel()
+
+	tr := &echoF23TestTransport{unescaped: true}
+
+	var observed []protocol.BusEvent
+	var obsMu sync.Mutex
+	observer := protocol.BusObserverFunc(func(ev protocol.BusEvent) error {
+		obsMu.Lock()
+		defer obsMu.Unlock()
+		if ev.Kind == protocol.BusEventEchoMismatch {
+			observed = append(observed, ev)
+		}
+		return nil
+	})
+
+	cfg := protocol.DefaultBusConfig()
+	cfg.Observer = observer
+	bus := protocol.NewBus(tr, cfg, 8)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	bus.Run(runCtx)
+	ctx := context.Background()
+
+	// Broadcast frame: first telegram byte after arbitration is DST=
+	// 0xFE (AddressBroadcast). We poison its echo slot with a real
+	// wire SYN (0xAA, WasEscaped=false) so the bus hits the
+	// `flagged != nil && echo == SymbolSyn && !echoWasEscaped &&
+	// raw != SymbolSyn` guard at bus.go ~1011.
+	frame := protocol.Frame{
+		Source:    0x10,
+		Target:    protocol.AddressBroadcast,
+		Primary:   0xB5,
+		Secondary: 0x16,
+		Data:      nil,
+	}
+	tr.mu.Lock()
+	tr.echo = []echoF23Event{
+		{value: protocol.SymbolSyn, wasEscaped: false},
+	}
+	tr.mu.Unlock()
+
+	_, err := bus.Send(ctx, frame)
+	if err == nil {
+		t.Fatal("setup: expected ErrBusCollision (raw SYN intrusion)")
+	}
+	if !errors.Is(err, ebuserrors.ErrBusCollision) {
+		t.Fatalf("setup: want wrapped ErrBusCollision, got %v", err)
+	}
+
+	obsMu.Lock()
+	defer obsMu.Unlock()
+	if len(observed) == 0 {
+		t.Fatal("no BusEventEchoMismatch observed (provenance lost — Codex P2 batch-23 regression)")
+	}
+	// The first event is the per-byte direct emission from the
+	// r5 guard; the centralized emitOutcomeEvent re-emit follows.
+	first := observed[0]
+	if first.Byte != protocol.SymbolSyn {
+		t.Fatalf("first event Byte = 0x%02X, want 0xAA (raw SYN intrusion byte)", first.Byte)
+	}
+	if first.EchoWasEscaped {
+		t.Fatalf("first event EchoWasEscaped = true, want false (real wire SYN has WasEscaped=false)")
 	}
 }

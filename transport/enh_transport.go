@@ -36,14 +36,28 @@ const arbitrationWindowTimeout = 500 * time.Millisecond
 // the bus layer's first write. The window closes on: (a) the first
 // non-SYN RECEIVED (the real echo, normal case), or (b) this deadline.
 //
-// Deadline prevents a degenerate case where the first legitimate echo
-// happens to be 0xAA (for example, a frame whose first post-arbitration
-// byte is 0xAA) — without a deadline, that echo would be suppressed,
-// the window would never close, and the write path would stall. 50ms is
-// well above TCP latency between STARTED and our first Write returning
-// from conn.Write, but short enough to not materially affect protocol
-// timing (a full eBUS transaction is bounded by larger timeouts).
-const postGrantPreEchoTimeout = 50 * time.Millisecond
+// Sizing (batch-24 round-5, 2026-05-17): widened from 50ms to 5s to
+// cover the entire gateway transaction duration. Under normal operation
+// the window closes on the first non-SYN echo (sub-50ms; mux also
+// invokes closePostGrantPreEchoWindow on the first observed byte echo),
+// so the extended timeout is a fallback that keeps the SYN-suppression
+// contract in force for the full transaction window. This suppresses
+// wire 0xAA intrusion (AUTO-SYN idle ticks on >35ms write gaps OR
+// foreign-initiator mid-frame injection) for the duration of a long or
+// stuck gateway transaction. Prevents the `pre_echo_syn_raw` leak class
+// measured at ≈4/min in batch-24 round-4 (genuine wire SYN intrusion;
+// not escape-decoded 0xAA data, which round-4 telemetry confirmed at 0/min).
+//
+// Deadline still bounds the degenerate "first legit echo happens to be
+// 0xAA" case so the write path can't stall indefinitely — 5s is well
+// above any real eBUS transaction duration but still terminates a
+// pathologically stuck txn.
+//
+// Declared as a var (not const) solely to enable a test-only override via
+// setPostGrantPreEchoTimeoutForTest. Production code MUST treat this as
+// immutable; the override is gated on the _test.go build path and exists
+// because two deadline-expiry tests would otherwise need 5s+ sleeps each.
+var postGrantPreEchoTimeout = 5 * time.Second
 
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
@@ -134,6 +148,29 @@ type ENHTransport struct {
 	// postGrantPreEchoTimeout for timing rationale.
 	postGrantPreEcho         atomic.Bool
 	postGrantPreEchoDeadline atomic.Int64
+
+	// postGrantWindowExpiredCount counts the number of times the
+	// postGrantPreEcho window closed via DEADLINE EXPIRY (case b in
+	// the field doc above), as opposed to closure via first-real-
+	// echo arrival (case a) or lifecycle reset (case c). Surfaced
+	// via PostGrantWindowExpiredCount() for downstream consumers
+	// (gateway mux) to correlate post-window-close SYNs with
+	// echo_mismatch events.
+	//
+	// F-XX (batch-22 Attack 2 instrumentation, 2026-05-15;
+	// batch-24 round-5 timeout widening, 2026-05-17):
+	// postGrantPreEchoTimeout intentionally bounds the window so a
+	// degenerate first-echo-is-0xAA case doesn't stall the read path.
+	// After expiry the SYN-suppression contract ends — any subsequent
+	// idle 0xAA passes through to the pendingEvents queue and may leak
+	// as the next ReadByte caller's echo (the pre_echo_syn root cause
+	// Attack 2 targets). This counter measures how often that window
+	// closes by expiry, so the gateway can correlate the rate with
+	// mux-side echo_mismatch events. Round-5 widened the timeout from
+	// 50ms to 5s so the window now covers the full gateway transaction
+	// duration; expiry-path closures should become rare and indicate a
+	// stuck/long txn rather than ordinary post-grant settling.
+	postGrantWindowExpiredCount atomic.Uint64
 	// escDecoder unescapes eBUS byte-stuffing on the steady-state byte
 	// stream so the BytesAreUnescaped() contract is honest. Accessed
 	// only under readMu (every byte-emission site that feeds into it
@@ -1038,7 +1075,49 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						t.arbitrationDeadline.Store(0)
 						// Fall through to the normal decode path below.
 					} else {
-						_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
+						// F-38 (batch-33, iter16, 2026-05-15): forward wire
+						// SYN bytes to upstream consumers even during
+						// awaitingStart. Suppress non-SYN bytes only.
+						//
+						// Consultant iter15 root-cause analysis: ebusd's
+						// bus state machine has SYN_TIMEOUT = 51 ms (per
+						// upstream `src/lib/ebus/protocol.h`). When wire
+						// SYNs are suppressed for >51 ms during a
+						// gateway-pending START, ebusd's bs_ready→bs_skip
+						// transition fires from its receive-timeout. When
+						// ENH_RES_STARTED finally reaches ebusd, its
+						// m_state is bs_skip → "arbitration won in invalid
+						// state skip" — the dominant residual cause of
+						// the silent-drop cascade observed in iter10-iter14
+						// (73% of grants dropped silently, ~3 invalid-state
+						// events/sec under tight load).
+						//
+						// Pre-F-38 the suppression was conservative:
+						// "freeze the world during pending START". But wire
+						// SYNs are bus-idle markers — they're safe and
+						// even essential to forward to ENH clients during
+						// pending. Other wire bytes (data of unrelated
+						// foreign initiator frames) are still suppressed so
+						// the consumer doesn't see them as gateway-pending
+						// arbitration results.
+						//
+						// Live evidence: 130 ms silence windows pre-failing
+						// STARTED at /tmp/iter10-enh.txt ts 1778791860.955
+						// → 1778791861.085, exactly matching ebusd's
+						// SYN_TIMEOUT firing.
+						decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
+						if ok && decoded == ebusSymbolSyn && !wasEscaped {
+							// Real wire SYN — emit as StreamEventWireSyn so
+							// external bus reconstructors (downstream via
+							// ReadEvent) observe bus-idle markers, while
+							// the active sender's ReadByte loop SKIPS the
+							// event (kind != StreamEventByte). PR #155 P1
+							// fix: prevents pre-grant SYNs from being drained
+							// as the first echo by sendRawWithEcho's wait
+							// loop, which would mis-classify them as a wire
+							// collision.
+							t.appendWireSynLocked()
+						}
 						continue
 					}
 				}
@@ -1063,6 +1142,10 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				if t.postGrantPreEcho.Load() {
 					if t.postGrantPreEchoExpired() {
 						t.closePostGrantPreEchoWindow()
+						// F-XX (batch-22 Attack 2 instrumentation):
+						// expiry-path close — distinct from first-echo
+						// close. See postGrantWindowExpiredCount field doc.
+						t.postGrantWindowExpiredCount.Add(1)
 						// Fall through: deliver this byte.
 					} else if decoded == ebusSymbolSyn && !wasEscaped {
 						// Idle bus SYN — suppress. An escape-decoded
@@ -1169,21 +1252,33 @@ func (t *ENHTransport) Close() error {
 
 // appendControlEventLocked queues a control event (STARTED/FAILED/Reset)
 // that MUST NOT be silently dropped. If the pendingEvents cap is reached,
-// the oldest StreamEventByte is evicted to make room. Control events
-// preserve ordering relative to each other; byte ordering is preserved
-// among non-evicted bytes. Caller must hold readMu.
+// the oldest evictable entry (StreamEventByte or StreamEventWireSyn) is
+// dropped to make room. Control events preserve ordering relative to
+// each other; byte ordering is preserved among non-evicted bytes.
+// Caller must hold readMu.
+//
+// PR #155 P2 (Codex review): StreamEventWireSyn is explicitly lossy/
+// capped backlog (idle bus markers fed during the awaitingStart window
+// for downstream bus-reconstructor consumers). Under a SYN flood that
+// fills pendingEvents alongside an earlier STARTED/FAILED/RESETTED,
+// the next real control event must NOT evict that earlier control
+// boundary — instead it must drop a passive SYN marker. Including
+// WireSyn in the evictable class makes that ordering invariant
+// strict.
 func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
 	if len(t.pendingEvents) >= maxPendingEvents {
-		// Evict oldest byte event first (data is recoverable; gateway
-		// re-reads bus state). If no byte event exists (queue is all
-		// control events — pathological, e.g. repeated STARTED/FAILED/
-		// RESETTED under adapter fault), evict the oldest control event.
-		// This preserves the bounded-backpressure guarantee strictly
-		// while keeping the most recent control event (always more
-		// relevant than a stale one from an earlier arbitration cycle).
+		// Evict oldest evictable entry first — byte events (data is
+		// recoverable; gateway re-reads bus state) or passive wire-SYN
+		// markers (explicitly lossy backlog per the kind's contract).
+		// If no evictable entry exists (queue is all control events —
+		// pathological, e.g. repeated STARTED/FAILED/RESETTED under
+		// adapter fault), evict the oldest control event. This
+		// preserves the bounded-backpressure guarantee strictly while
+		// keeping the most recent control event (always more relevant
+		// than a stale one from an earlier arbitration cycle).
 		evicted := false
 		for i, existing := range t.pendingEvents {
-			if existing.Kind == StreamEventByte {
+			if existing.Kind == StreamEventByte || existing.Kind == StreamEventWireSyn {
 				t.pendingEvents = append(t.pendingEvents[:i], t.pendingEvents[i+1:]...)
 				evicted = true
 				break
@@ -1274,6 +1369,26 @@ func (t *ENHTransport) appendDecodedByteLocked(decoded byte, wasEscaped bool) {
 	}
 }
 
+// appendWireSynLocked emits a passive wire-SYN marker (StreamEventWireSyn)
+// during the awaitingStart window so ReadEvent consumers downstream
+// (gateway adaptermux → ebusd) observe bus-idle cadence and avoid
+// triggering their receive-state-machine timeouts. Critically, the
+// non-Byte kind makes ReadByte SKIP this event — the active sender's
+// echo-wait drain never sees pre-grant SYNs and so cannot mistake them
+// for the first echo. Subject to maxPendingEvents cap to prevent
+// unbounded growth on a sustained pre-grant window.
+//
+// F-38-fix (PR #155 P1, 2026-05-15): replaces the original F-38 use of
+// appendDecodedByteLocked which pollutes the echo-drain path.
+func (t *ENHTransport) appendWireSynLocked() {
+	if len(t.pendingEvents) < maxPendingEvents {
+		t.pendingEvents = append(t.pendingEvents, StreamEvent{
+			Kind: StreamEventWireSyn,
+			Byte: ebusSymbolSyn,
+		})
+	}
+}
+
 // DecodeFaultTotal returns the cumulative count of invalid eBUS escape
 // pairs observed on the wire (a 0xA9 lead followed by a byte other
 // than 0x00 or 0x01). Non-fatal — the decoder drops the offending
@@ -1282,6 +1397,20 @@ func (t *ENHTransport) appendDecodedByteLocked(decoded byte, wasEscaped bool) {
 // Safe to call without holding readMu.
 func (t *ENHTransport) DecodeFaultTotal() uint64 {
 	return t.decodeFaultTotal.Load()
+}
+
+// PostGrantWindowExpiredCount returns the cumulative count of
+// postGrantPreEcho window-close-by-deadline-expiry events (as opposed
+// to closure via the first non-SYN echo arrival or lifecycle reset).
+// Used by downstream consumers (gateway adaptermux) to correlate
+// post-window-close idle 0xAA SYN arrivals with echo_mismatch events
+// in the next gateway transaction. Forensic-only signal — no behavior
+// implication on its own. Safe to call without holding readMu.
+//
+// F-XX (batch-22 Attack 2 instrumentation, 2026-05-15): see
+// postGrantWindowExpiredCount field doc for full rationale.
+func (t *ENHTransport) PostGrantWindowExpiredCount() uint64 {
+	return t.postGrantWindowExpiredCount.Load()
 }
 
 func (t *ENHTransport) surfaceResetLocked() {
@@ -1356,10 +1485,29 @@ func (t *ENHTransport) fillPendingLocked() error {
 					t.arbitrationDeadline.Store(0)
 					// Fall through to the normal decode path below.
 				} else {
-					// Window still active: feed the decoder (so
-					// leads from this byte don't strand across the
-					// next non-dropped boundary) and drop emission.
-					_, _, _ = t.feedEscapeDecoderLocked(msg.Data)
+					// F-38 (batch-33, iter16, 2026-05-15): forward
+					// wire SYN bytes to upstream consumers even
+					// during awaitingStart. ebusd's bus state
+					// machine has SYN_TIMEOUT = 51 ms (upstream
+					// `src/lib/ebus/protocol.h`); without periodic
+					// SYN markers, its reconstructor transitions
+					// bs_ready → bs_skip on receive timeout and
+					// silently drops the eventual STARTED. See
+					// the RequestInfo path at line ~1034 for the
+					// full rationale.
+					//
+					// This is the DOMINANT data path; the prior
+					// commit only patched RequestInfo (less common
+					// path). fillPendingLocked is the hot loop.
+					decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
+					if ok && decoded == ebusSymbolSyn && !wasEscaped {
+						// PR #155 P1 fix: emit as StreamEventWireSyn so
+						// the active sender's ReadByte echo-wait skips it
+						// instead of consuming the pre-grant SYN as the
+						// first echo (which sendRawWithEcho's collision
+						// guard would reject as unexpected wire SYN).
+						t.appendWireSynLocked()
+					}
 					continue
 				}
 			}
@@ -1383,6 +1531,10 @@ func (t *ENHTransport) fillPendingLocked() error {
 			if t.postGrantPreEcho.Load() {
 				if t.postGrantPreEchoExpired() {
 					t.closePostGrantPreEchoWindow()
+					// F-XX (batch-22 Attack 2 instrumentation):
+					// expiry-path close — distinct from first-echo
+					// close. See postGrantWindowExpiredCount field doc.
+					t.postGrantWindowExpiredCount.Add(1)
 					// Fall through: deliver this byte.
 				} else if decoded == ebusSymbolSyn && !wasEscaped {
 					// Idle bus SYN — suppress. An escape-decoded
