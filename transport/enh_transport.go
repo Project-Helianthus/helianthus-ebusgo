@@ -1235,21 +1235,33 @@ func (t *ENHTransport) Close() error {
 
 // appendControlEventLocked queues a control event (STARTED/FAILED/Reset)
 // that MUST NOT be silently dropped. If the pendingEvents cap is reached,
-// the oldest StreamEventByte is evicted to make room. Control events
-// preserve ordering relative to each other; byte ordering is preserved
-// among non-evicted bytes. Caller must hold readMu.
+// the oldest evictable entry (StreamEventByte or StreamEventWireSyn) is
+// dropped to make room. Control events preserve ordering relative to
+// each other; byte ordering is preserved among non-evicted bytes.
+// Caller must hold readMu.
+//
+// PR #155 P2 (Codex review): StreamEventWireSyn is explicitly lossy/
+// capped backlog (idle bus markers fed during the awaitingStart window
+// for downstream bus-reconstructor consumers). Under a SYN flood that
+// fills pendingEvents alongside an earlier STARTED/FAILED/RESETTED,
+// the next real control event must NOT evict that earlier control
+// boundary — instead it must drop a passive SYN marker. Including
+// WireSyn in the evictable class makes that ordering invariant
+// strict.
 func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
 	if len(t.pendingEvents) >= maxPendingEvents {
-		// Evict oldest byte event first (data is recoverable; gateway
-		// re-reads bus state). If no byte event exists (queue is all
-		// control events — pathological, e.g. repeated STARTED/FAILED/
-		// RESETTED under adapter fault), evict the oldest control event.
-		// This preserves the bounded-backpressure guarantee strictly
-		// while keeping the most recent control event (always more
-		// relevant than a stale one from an earlier arbitration cycle).
+		// Evict oldest evictable entry first — byte events (data is
+		// recoverable; gateway re-reads bus state) or passive wire-SYN
+		// markers (explicitly lossy backlog per the kind's contract).
+		// If no evictable entry exists (queue is all control events —
+		// pathological, e.g. repeated STARTED/FAILED/RESETTED under
+		// adapter fault), evict the oldest control event. This
+		// preserves the bounded-backpressure guarantee strictly while
+		// keeping the most recent control event (always more relevant
+		// than a stale one from an earlier arbitration cycle).
 		evicted := false
 		for i, existing := range t.pendingEvents {
-			if existing.Kind == StreamEventByte {
+			if existing.Kind == StreamEventByte || existing.Kind == StreamEventWireSyn {
 				t.pendingEvents = append(t.pendingEvents[:i], t.pendingEvents[i+1:]...)
 				evicted = true
 				break
