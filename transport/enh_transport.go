@@ -43,7 +43,7 @@ const arbitrationWindowTimeout = 500 * time.Millisecond
 // so the extended timeout is a fallback that keeps the SYN-suppression
 // contract in force for the full transaction window. This suppresses
 // wire 0xAA intrusion (AUTO-SYN idle ticks on >35ms write gaps OR
-// foreign-master mid-frame injection) for the duration of a long or
+// foreign-initiator mid-frame injection) for the duration of a long or
 // stuck gateway transaction. Prevents the `pre_echo_syn_raw` leak class
 // measured at ≈4/min in batch-24 round-4 (genuine wire SYN intrusion;
 // not escape-decoded 0xAA data, which round-4 telemetry confirmed at 0/min).
