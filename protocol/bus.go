@@ -118,6 +118,7 @@ type Bus struct {
 	// change — the probe drains additional bytes for classification only,
 	// then falls through to the existing error path.
 	firstByteWireSynObserved              atomic.Uint64
+	r3MidFrameObserved                    atomic.Uint64 // r8 round-2: events where isFirstByteAfterArbitration=false
 	firstByteSynDrain_wouldRecoverReal    atomic.Uint64
 	firstByteSynDrain_wouldHitForeignInit atomic.Uint64
 	firstByteSynDrain_wouldHitOther       atomic.Uint64
@@ -1078,16 +1079,26 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// construction (the guard requires it); the explicit forward keeps
 	// the emission pattern symmetric with the other r3/r4 sites.
 	if flagged != nil && echo == SymbolSyn && !echoWasEscaped && raw != SymbolSyn {
-		// batch-26 round-8 forensic probe: when the FIRST byte after
-		// arbitration sees a wire-SYN echo, characterize what's coming
-		// next on the wire to inform the round-9 drain-fix design. NO
-		// behavior change — we drain up to probeCap bytes for the
-		// counters, then fall through to the existing error emit.
-		// Drained bytes are consumed but the outer ErrBusCollision is
-		// unchanged, so sendWithRetries re-arbitrates anyway (same
-		// flow as pre-probe).
-		if isFirstByteAfterArbitration {
+		// batch-26 round-8 forensic probe: characterize what's coming
+		// next on the wire when this r3-guard fires. NO behavior change
+		// — we drain up to probeCap bytes for the counters, then fall
+		// through to the existing error emit. Drained bytes are
+		// consumed but the outer ErrBusCollision is unchanged, so
+		// sendWithRetries re-arbitrates anyway.
+		//
+		// r8 round-2 (2026-05-18T13:30 UTC): the original probe was
+		// gated on isFirstByteAfterArbitration only and fired 0× despite
+		// 20+ active echo_mismatch events — proving the leaks are NOT
+		// first-byte. Probe now fires on ANY r3-guard match. The new
+		// counter r3MidFrameObserved tracks events where
+		// isFirstByteAfterArbitration=false (mid-frame leaks).
+		// firstByteWireSynObserved is retained for backwards-compat
+		// and counts the total (first+midFrame).
+		{
 			b.firstByteWireSynObserved.Add(1)
+			if !isFirstByteAfterArbitration {
+				b.r3MidFrameObserved.Add(1)
+			}
 			const probeCap = 8
 			synCount := 0
 			classified := false
@@ -1388,10 +1399,17 @@ func (b *Bus) ObserverFaultSnapshot() ObserverFaultSnapshot {
 }
 
 // FirstByteWireSynObserved returns the number of times sendRawWithEcho
-// observed a wire SYN echo on the FIRST byte after arbitration. Used
-// by the batch-26 round-8 forensic probe; informs round-9 drain-fix
-// cap selection.
+// observed a wire SYN echo on ANY byte position (round-8 r2 broadened
+// the probe to also capture mid-frame events). Slice via
+// R3MidFrameObserved() to separate first-byte vs mid-frame.
 func (b *Bus) FirstByteWireSynObserved() uint64 { return b.firstByteWireSynObserved.Load() }
+
+// R3MidFrameObserved returns the subset of FirstByteWireSynObserved
+// events that fired WITH isFirstByteAfterArbitration=false (i.e., the
+// leak is NOT in the grant→first-byte window). Added in round-8 r2 to
+// disprove Codex's first-byte hypothesis and pin the actual leak
+// position.
+func (b *Bus) R3MidFrameObserved() uint64 { return b.r3MidFrameObserved.Load() }
 
 // FirstByteSynDrainWouldRecoverReal returns the number of probe events
 // where, after draining N idle SYNs, the next wire byte matched the
