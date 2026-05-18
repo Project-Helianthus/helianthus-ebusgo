@@ -828,7 +828,9 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		segment = append(segment, lengthSym)
 		segment = append(segment, data...)
 		if CRC(segment) != crcValue {
-			if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolNack, true); err != nil {
+			// ACK/NACK are response-phase sends — never the first wire byte
+			// after arbitration, so isFirstByteAfterArbitration=false.
+			if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolNack, true, false); err != nil {
 				return nil, err
 			}
 			b.emitObserverEvent(BusEvent{
@@ -861,7 +863,9 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 			return nil, err
 		}
 
-		if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolAck, true); err != nil {
+		// ACK/NACK are response-phase sends — never the first wire byte
+		// after arbitration, so isFirstByteAfterArbitration=false.
+		if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolAck, true, false); err != nil {
 			return nil, err
 		}
 		response := &Frame{
