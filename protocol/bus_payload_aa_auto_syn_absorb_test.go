@@ -3,6 +3,7 @@ package protocol_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -343,6 +344,14 @@ func TestPayloadAaAutoSynAbsorb_DrainHitsNonSynMismatch_RoutesToValueMismatch(t 
 	}
 	if !errors.Is(err, ebuserrors.ErrBusCollision) {
 		t.Fatalf("Send err = %v; want wrapped ErrBusCollision", err)
+	}
+	// Codex r6 P1 (batch-26 round-9): non-SYN drain break must route
+	// to BusOutcomeEchoMismatch via busOutcomeFromError. The
+	// fall-through path lets the generic `if echo != raw` branch fire,
+	// whose error message contains "echo mismatch" and triggers the
+	// containsEchoMismatch substring check.
+	if !strings.Contains(err.Error(), "echo mismatch") {
+		t.Errorf("err = %q; want substring \"echo mismatch\" so busOutcomeFromError routes to BusOutcomeEchoMismatch (non-SYN drain break)", err.Error())
 	}
 
 	if got := bus.PayloadAaAutoSynAbsorbed(); got != 1 {

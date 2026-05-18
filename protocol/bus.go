@@ -1202,21 +1202,33 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 		if drainExhausted {
 			// All `absorbed` iterations were wire-SYN continues and the
 			// loop bound was reached without finding the real echo —
-			// surface the exhaustion counter, then fall through to emit
-			// the payload-0xAA echo_mismatch as before. This preserves
-			// the pre-round-9 collision-error invariant for adapter-
-			// genuinely-stuck cases.
+			// surface the exhaustion counter, then emit the payload-
+			// 0xAA "received real wire SYN" error which routes through
+			// BusOutcomeCollision (preserves the pre-round-9
+			// adapter-genuinely-stuck classification).
 			b.payloadAaAutoSynDrainExhausted.Add(1)
+			b.emitObserverEvent(BusEvent{
+				Kind:           BusEventEchoMismatch,
+				Outcome:        BusOutcomeEchoMismatch,
+				Byte:           echo,
+				EchoWasEscaped: echoWasEscaped,
+			})
+			err := fmt.Errorf("echo for payload 0xAA expected escape-decoded WasEscaped=true but received real wire SYN: %w", ebuserrors.ErrBusCollision)
+			b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+			return err
 		}
-		b.emitObserverEvent(BusEvent{
-			Kind:           BusEventEchoMismatch,
-			Outcome:        BusOutcomeEchoMismatch,
-			Byte:           echo,
-			EchoWasEscaped: echoWasEscaped, // 2026-05-17 batch-23: split P10 pre_echo_syn (escape-decoded data byte vs raw SYN)
-		})
-		err := fmt.Errorf("echo for payload 0xAA expected escape-decoded WasEscaped=true but received real wire SYN: %w", ebuserrors.ErrBusCollision)
-		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
-		return err
+		// Non-SYN drained byte path (drainExhausted=false): `echo` and
+		// `echoWasEscaped` were updated above to reflect the drained
+		// byte. FALL THROUGH past the payload-0xAA-specific guard so
+		// the generic `if echo != raw` value-mismatch branch below
+		// fires with the actual drained byte — its error message
+		// contains "echo mismatch" which routes to
+		// BusOutcomeEchoMismatch via busOutcomeFromError, matching
+		// the user invariant that "non-SYN drained byte routes to
+		// generic value-mismatch". (Codex r6 P1, batch-26 round-9:
+		// prior version of this guard returned the "received real
+		// wire SYN" error even on the non-SYN-drain break path,
+		// misclassifying as Collision.)
 	}
 	if echo != raw {
 		// batch-26 round-7 — first-byte-after-arbitration foreign-
