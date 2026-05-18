@@ -36,28 +36,33 @@ const arbitrationWindowTimeout = 500 * time.Millisecond
 // the bus layer's first write. The window closes on: (a) the first
 // non-SYN RECEIVED (the real echo, normal case), or (b) this deadline.
 //
-// Sizing (batch-24 round-5, 2026-05-17): widened from 50ms to 5s to
-// cover the entire gateway transaction duration. Under normal operation
-// the window closes on the first non-SYN echo (sub-50ms; mux also
-// invokes closePostGrantPreEchoWindow on the first observed byte echo),
-// so the extended timeout is a fallback that keeps the SYN-suppression
-// contract in force for the full transaction window. This suppresses
-// wire 0xAA intrusion (AUTO-SYN idle ticks on >35ms write gaps OR
-// foreign-initiator mid-frame injection) for the duration of a long or
-// stuck gateway transaction. Prevents the `pre_echo_syn_raw` leak class
-// measured at ≈4/min in batch-24 round-4 (genuine wire SYN intrusion;
-// not escape-decoded 0xAA data, which round-4 telemetry confirmed at 0/min).
+// Sizing: 50ms — matches the pre-batch-24 production value. The widening
+// to 5s in batch-24 round-5 was reverted in batch-25 hotfix after the live
+// Prometheus history (helianthus-ebusgateway PR #634, 2026-05-17) showed:
 //
-// Deadline still bounds the degenerate "first legit echo happens to be
-// 0xAA" case so the write path can't stall indefinitely — 5s is well
-// above any real eBUS transaction duration but still terminates a
-// pathologically stuck txn.
+//   - Per-frame echo_mismatch ratio JUMPED from 5-11% to 12-23% on round-5
+//     deploy. Absolute echo_mismatch count dropped only because gateway
+//     throughput collapsed: passive frame rate fell from 1.0-1.3 c/s to
+//     0.0-0.5 c/s (~70% reduction).
+//   - Post-revert (binary injected at 05:00 UTC 2026-05-18), per-frame
+//     ratio dropped to 2.86%, traffic recovering toward baseline.
+//
+// Root cause hypothesis: the 5s window's SYN-suppression contract holds
+// during the gateway's own bus.Send. When gateway writes a wire SYN (e.g.
+// the terminal SYN that ends every M2S frame) the wire echo is a real SYN
+// with WasEscaped=false — exactly the predicate that the transport-layer
+// suppresses. The window normally closes on the first non-SYN echo so
+// subsequent SYN echoes pass, but degenerate paths (FAILED before any
+// echo, single-byte broadcasts, idle-grace recovery races) can leave the
+// window open across the gateway's own SYN write, blocking its bus.Send
+// indefinitely (up to 5s). The 50ms value bounds this to a single
+// AUTO-SYN tick and matches the pre-investigation baseline behavior.
 //
 // Declared as a var (not const) solely to enable a test-only override via
 // setPostGrantPreEchoTimeoutForTest. Production code MUST treat this as
 // immutable; the override is gated on the _test.go build path and exists
-// because two deadline-expiry tests would otherwise need 5s+ sleeps each.
-var postGrantPreEchoTimeout = 5 * time.Second
+// because two deadline-expiry tests would otherwise need 50ms+ sleeps each.
+var postGrantPreEchoTimeout = 50 * time.Millisecond
 
 // ENHTransportOption configures optional ENHTransport behavior.
 type ENHTransportOption func(*ENHTransport)
