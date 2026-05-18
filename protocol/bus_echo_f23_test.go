@@ -312,18 +312,21 @@ func TestBus_EscapeAware_PayloadAAEcho_WithWasEscapedAccepted(t *testing.T) {
 }
 
 // TestBus_EscapeAware_PayloadAAEcho_RealWireSynIsCollision pins the
-// Codex bot r4 finding on PR #154: symmetric to the round-3
-// PayloadAAEcho_WithWasEscapedAccepted test. We write a TELEGRAM
-// PAYLOAD byte equal to 0xAA (expectRawSyn=false). The legitimate
-// echo would arrive WasEscaped=true (adapter wire-escaped). Instead,
-// a real wire SYN (WasEscaped=false) arrives first — this is an
-// unrelated bus event, NOT our payload echo, and MUST be rejected
-// as ErrBusCollision.
+// Codex bot r4 finding on PR #154 (original intent): a real wire SYN
+// arriving where the escape-decoded payload-0xAA echo was expected
+// MUST be rejected as ErrBusCollision so the bus is not silently
+// false-accepted.
 //
-// Pre-r4 fix, all four existing guards skipped: the ENH SYN-intrusion
-// guard requires raw != SymbolSyn; the structural-SYN rejection
-// requires expectRawSyn=true; the value-mismatch check has echo ==
-// raw == 0xAA. Result: false accept. The new guard plugs that hole.
+// batch-26 round-9 update (2026-05-18): per the ENS-transmit-token
+// invariant, ONE intervening wire SYN is now absorbed by the bounded
+// drain in sendRawWithEcho — it is bus-idle interference from the
+// adapter's TCP buffering, not our payload echo. The "real-wire-SYN
+// means collision" contract is now expressed as: when the drain cap is
+// reached (≥maxPayloadAaAutoSynDrains=3 consecutive wire SYNs with no
+// real escape-decoded echo following), the original ErrBusCollision +
+// echo_mismatch path fires. This test pins the cap-exhausted boundary
+// at 4 wire SYNs — one more than the cap — which exercises the
+// PayloadAaAutoSynDrainExhausted counter increment.
 func TestBus_EscapeAware_PayloadAAEcho_RealWireSynIsCollision(t *testing.T) {
 	t.Parallel()
 
@@ -350,20 +353,22 @@ func TestBus_EscapeAware_PayloadAAEcho_RealWireSynIsCollision(t *testing.T) {
 
 	tr.mu.Lock()
 	tr.echo = nil
-	// First four bytes echo normally (DST PB SB LEN). The fifth
-	// echo (DATA[0]=0xAA) is poisoned: a real wire SYN arrives
-	// where the escape-decoded payload echo should have been. Bus
-	// must reject as collision before reaching the value check.
-	for i, b := range telegram[:4] {
-		_ = i
+	// First four bytes echo normally (DST PB SB LEN). The fifth echo
+	// position (DATA[0]=0xAA) and three more are all real wire SYNs:
+	// the round-9 drain absorbs the first three, hits the cap, and
+	// falls through to the original ErrBusCollision emit using the
+	// fourth SYN's byte/escape provenance.
+	for _, b := range telegram[:4] {
 		tr.echo = append(tr.echo, echoF23Event{value: b, wasEscaped: false})
 	}
-	tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: false})
+	for i := 0; i < 4; i++ {
+		tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: false})
+	}
 	tr.mu.Unlock()
 
 	_, err := bus.Send(ctx, frame)
 	if err == nil {
-		t.Fatalf("Send err = nil; want ErrBusCollision (real wire SYN where escape-decoded payload 0xAA was expected MUST be a collision)")
+		t.Fatalf("Send err = nil; want ErrBusCollision (drain cap exhausted on real wire SYN MUST be a collision)")
 	}
 	if !errors.Is(err, ebuserrors.ErrBusCollision) {
 		t.Fatalf("Send err = %v; want wrapped ErrBusCollision", err)
@@ -379,10 +384,11 @@ func TestBus_EscapeAware_PayloadAAEcho_RealWireSynIsCollision(t *testing.T) {
 // decoded-data subclasses.
 //
 // Scenario: we write a TELEGRAM PAYLOAD byte 0xAA (expectRawSyn=
-// false). Echo arrives as a REAL wire SYN (WasEscaped=false) —
-// this is the round-4 round-4 guard at bus.go ~1054, which emits
-// BusEventEchoMismatch with EchoWasEscaped=false (forwarded from
-// the echoWasEscaped local).
+// false). Echo position is poisoned by ≥4 real wire SYNs — the
+// round-9 drain (cap=3) absorbs the first three, hits exhaustion,
+// and emits BusEventEchoMismatch using the drained provenance
+// (Byte=0xAA, EchoWasEscaped=false). This pins both the round-4
+// emission shape AND the round-9 drain-exhausted boundary.
 func TestBus_EchoMismatchEvent_PropagatesEchoWasEscaped_False(t *testing.T) {
 	t.Parallel()
 
@@ -423,8 +429,11 @@ func TestBus_EchoMismatchEvent_PropagatesEchoWasEscaped_False(t *testing.T) {
 	for _, b := range telegram[:4] {
 		tr.echo = append(tr.echo, echoF23Event{value: b, wasEscaped: false})
 	}
-	// Payload 0xAA position poisoned by real wire SYN.
-	tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: false})
+	// Payload 0xAA position poisoned by 4 real wire SYNs (cap+1):
+	// drain absorbs 3, then the 4th surfaces as the mismatch byte.
+	for i := 0; i < 4; i++ {
+		tr.echo = append(tr.echo, echoF23Event{value: protocol.SymbolSyn, wasEscaped: false})
+	}
 	tr.mu.Unlock()
 
 	_, err := bus.Send(ctx, frame)
@@ -441,9 +450,10 @@ func TestBus_EchoMismatchEvent_PropagatesEchoWasEscaped_False(t *testing.T) {
 		t.Fatal("no BusEventEchoMismatch observed")
 	}
 	// The FIRST echo-mismatch event is the per-byte emission from
-	// sendRawWithEcho's r4 guard. Subsequent ones may come from
-	// emitOutcomeEvent's centralized re-emit; we assert on the
-	// first one (the per-byte direct emission).
+	// sendRawWithEcho's r4 guard (now post-drain-exhausted).
+	// Subsequent ones may come from emitOutcomeEvent's centralized
+	// re-emit; we assert on the first one (the per-byte direct
+	// emission).
 	first := observed[0]
 	if first.Byte != protocol.SymbolSyn {
 		t.Fatalf("first event Byte = 0x%02X, want 0xAA", first.Byte)
