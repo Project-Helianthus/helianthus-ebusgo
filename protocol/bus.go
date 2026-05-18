@@ -828,7 +828,9 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 		segment = append(segment, lengthSym)
 		segment = append(segment, data...)
 		if CRC(segment) != crcValue {
-			if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolNack, true); err != nil {
+			// ACK/NACK are response-phase sends — never the first wire byte
+			// after arbitration, so isFirstByteAfterArbitration=false.
+			if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolNack, true, false); err != nil {
 				return nil, err
 			}
 			b.emitObserverEvent(BusEvent{
@@ -861,7 +863,9 @@ func (b *Bus) sendTransaction(runCtx, reqCtx context.Context, frame Frame, attem
 			return nil, err
 		}
 
-		if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolAck, true); err != nil {
+		// ACK/NACK are response-phase sends — never the first wire byte
+		// after arbitration, so isFirstByteAfterArbitration=false.
+		if err := b.sendSymbolWithEcho(runCtx, reqCtx, SymbolAck, true, false); err != nil {
 			return nil, err
 		}
 		response := &Frame{
@@ -900,7 +904,19 @@ func (b *Bus) sendInitiatorTelegram(runCtx, reqCtx context.Context, telegram []b
 		start = 1
 	}
 	for i := start; i < len(telegram); i++ {
-		if err := b.sendSymbolWithEcho(runCtx, reqCtx, telegram[i], true); err != nil {
+		// batch-26 round-7 — first-byte arbitration-loss split. The
+		// first iteration of this loop writes the first wire byte
+		// AFTER arbitration: with includeSource=false (ENH path) it's
+		// telegram[1] (DST); with includeSource=true (plain-path
+		// NACK-retry) it's telegram[0] (SRC re-sent without
+		// re-arbitrating). In both cases i==start identifies the
+		// position. sendSymbolWithEcho receives the flag and the
+		// downstream sendRawWithEcho classifies a mismatch from a
+		// foreign master-class byte as ErrBusCollision rather than
+		// ErrBusCollision-via-"echo mismatch" string (which routes
+		// through BusOutcomeEchoMismatch).
+		isFirstByte := i == start
+		if err := b.sendSymbolWithEcho(runCtx, reqCtx, telegram[i], true, isFirstByte); err != nil {
 			return err
 		}
 	}
@@ -908,10 +924,13 @@ func (b *Bus) sendInitiatorTelegram(runCtx, reqCtx context.Context, telegram []b
 }
 
 func (b *Bus) sendEndOfMessage(runCtx, reqCtx context.Context) error {
-	return b.sendSymbolWithEcho(runCtx, reqCtx, SymbolSyn, false)
+	// End-of-message SYN is never the first byte after arbitration —
+	// it terminates a frame whose first byte fired far earlier in
+	// sendInitiatorTelegram. Pass isFirstByteAfterArbitration=false.
+	return b.sendSymbolWithEcho(runCtx, reqCtx, SymbolSyn, false, false)
 }
 
-func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, escape bool) error {
+func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, escape bool, isFirstByteAfterArbitration bool) error {
 	if b.unescapedTransport || !escape || (symbol != SymbolEscape && symbol != SymbolSyn) {
 		// F-23 (Codex bot r3 on #154): for ENH-class transports, a
 		// `raw == SymbolSyn` write can be either a structural
@@ -923,7 +942,7 @@ func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, es
 		// fire on the FIRST case — otherwise legitimate payload
 		// 0xAA echoes are misclassified as bus collisions.
 		expectRawSyn := !escape && symbol == SymbolSyn
-		return b.sendRawWithEcho(runCtx, reqCtx, symbol, expectRawSyn)
+		return b.sendRawWithEcho(runCtx, reqCtx, symbol, expectRawSyn, isFirstByteAfterArbitration)
 	}
 
 	// Plain transport: wire-level escape for 0xA9/0xAA symbols. The
@@ -932,14 +951,19 @@ func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, es
 	// expectRawSyn=false for both. The new ENH guards only fire on
 	// unescapedTransport=true anyway, so this is defensive parameter
 	// hygiene rather than load-bearing.
-	if err := b.sendRawWithEcho(runCtx, reqCtx, SymbolEscape, false); err != nil {
+	//
+	// First-byte-after-arbitration semantics for the escape pair: the
+	// FIRST wire byte is the escape lead (0xA9) — that is what the
+	// adapter is going to transmit on the wire. So the lead carries
+	// the isFirstByte flag; the trailing escape data byte does NOT.
+	if err := b.sendRawWithEcho(runCtx, reqCtx, SymbolEscape, false, isFirstByteAfterArbitration); err != nil {
 		return err
 	}
 	esc := byte(0x00)
 	if symbol == SymbolSyn {
 		esc = 0x01
 	}
-	return b.sendRawWithEcho(runCtx, reqCtx, esc, false)
+	return b.sendRawWithEcho(runCtx, reqCtx, esc, false, false)
 }
 
 // sendRawWithEcho writes a single byte and validates the wire echo.
@@ -949,7 +973,18 @@ func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, es
 // false, raw is a payload byte: the adapter may legitimately
 // wire-escape values 0xA9/0xAA, and the echo's WasEscaped flag
 // reflects that without indicating collision.
-func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRawSyn bool) error {
+//
+// isFirstByteAfterArbitration (batch-26 round-7) — when true, this
+// write is the first wire byte sent AFTER arbitration completed. A
+// mismatch where the echo arrives as a foreign-initiator-class byte
+// (AddressClassMaster, value ≠ raw) is unambiguous evidence of
+// arbitration loss to a concurrent master, NOT a generic echo
+// mismatch. Classify as Collision rather than EchoMismatch so the
+// retry path (Is(ErrBusCollision) AND NOT contains("echo mismatch"))
+// routes through BusOutcomeCollision, and the gateway P10 counter
+// surface records the event under the collision class rather than
+// inflating the echo_mismatch population.
+func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRawSyn bool, isFirstByteAfterArbitration bool) error {
 	written, err := b.transport.Write([]byte{raw})
 	if err != nil {
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
@@ -1090,6 +1125,56 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 		return err
 	}
 	if echo != raw {
+		// batch-26 round-7 — first-byte-after-arbitration foreign-
+		// initiator split. When the echo of the FIRST byte after
+		// arbitration comes back as a master-class byte that is NOT
+		// our raw write AND was NOT escape-decoded, that is the
+		// classic arbitration-loss shape: a concurrent master won
+		// the bus and its SOF is on the wire instead of our echoed
+		// byte. Classify as Collision rather than EchoMismatch so:
+		//   - busOutcomeFromError routes to BusOutcomeCollision
+		//     (the routing keys off Is(ErrBusCollision) AND the
+		//     "echo mismatch" substring; the new error message below
+		//     omits that substring deliberately so the existing
+		//     classifier discriminates without changing).
+		//   - downstream observability records via the existing
+		//     BusEventRetry / BusOutcomeCollision arm in
+		//     bus_observability_store.go — no new BusEventKind is
+		//     needed (Codex r2 defect 2 — MEDIUM).
+		//
+		// Guard layering:
+		//   - isFirstByteAfterArbitration: only the first wire byte
+		//     after arbitration can be an arbitration-loss observation.
+		//     Mid-frame mismatches are echo-stream corruption, not
+		//     arbitration races.
+		//   - !echoWasEscaped: an escape-decoded payload byte arriving
+		//     as the "echo" is not a wire-level foreign-initiator
+		//     signal — it's escape-stream contamination, which the
+		//     existing F-23 / batch-23 round-5 guards already
+		//     classify as EchoMismatch with the right subclass.
+		//   - AddressClassOf(echo) == AddressClassMaster: only foreign
+		//     master-class bytes are arbitration-loss evidence. A
+		//     slave/broadcast/reserved byte in echo position would be
+		//     wire corruption or bit-flip — keep generic EchoMismatch
+		//     for those.
+		if isFirstByteAfterArbitration && !echoWasEscaped && AddressClassOf(echo) == AddressClassMaster {
+			// batch-26 round-7 (Codex r2 defect 2 — MEDIUM): no direct
+			// BusEvent emission for this branch. Routing already works
+			// via the standard outcome path:
+			//   - error wraps ErrBusCollision WITHOUT "echo mismatch"
+			//     substring → busOutcomeFromError → BusOutcomeCollision.
+			//   - the bus retry path emits BusEventRetry with
+			//     Outcome=BusOutcomeCollision via busOutcomeFromError;
+			//     the gateway-side BusObservabilityStore.OnBusEvent
+			//     increments ebus_errors_total{class="collision",
+			//     scope="active",phase="request"} on that retry event.
+			// Emitting a separate BusEventCollision here would be a
+			// dead-letter event with no downstream consumer, so we drop
+			// it. The error wrapping is the load-bearing signal.
+			err := fmt.Errorf("first-byte arbitration loss: wrote 0x%02X, wire echo 0x%02X (foreign initiator): %w", raw, echo, ebuserrors.ErrBusCollision)
+			b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+			return err
+		}
 		b.emitObserverEvent(BusEvent{
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
