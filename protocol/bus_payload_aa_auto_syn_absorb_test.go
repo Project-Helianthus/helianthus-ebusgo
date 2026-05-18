@@ -330,7 +330,7 @@ func TestPayloadAaAutoSynAbsorb_DrainHitsNonSynMismatch_RoutesToValueMismatch(t 
 		tr.echo = append(tr.echo, echoF23Event{value: b, wasEscaped: false})
 	}
 	// Byte 4 echo: AUTO-SYN absorbed, then drained byte is 0x55 (a
-	// non-SYN, non-master-class byte). break path runs; emit uses the
+	// non-SYN, non-initiator-class byte). break path runs; emit uses the
 	// drained byte's provenance.
 	tr.echo = append(tr.echo,
 		echoF23Event{value: protocol.SymbolSyn, wasEscaped: false},
