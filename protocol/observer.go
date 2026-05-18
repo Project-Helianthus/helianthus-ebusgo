@@ -25,19 +25,6 @@ const (
 	BusEventRequestComplete
 	BusEventObserverFault
 	BusEventAdapterReset
-	// BusEventCollision is emitted when bus.Send observes evidence of an
-	// arbitration-class loss DURING a send sequence — i.e. distinct from
-	// the BusEventArbitration emitted at StartArbitration time. The
-	// canonical case is first-byte-after-arbitration foreign-initiator
-	// echo (round-7 / batch-26): we wrote raw=X expecting echo=X, but
-	// the wire echoed a master-class byte (per AddressClassMaster) that
-	// is not X. Pre-round-7 this fired BusEventEchoMismatch and was
-	// routed by the gateway P10 classifier to the echo_mismatch bucket;
-	// post-round-7 it routes through BusOutcomeCollision so retry
-	// behavior (which only fires on Is(ErrBusCollision) WITHOUT the
-	// "echo mismatch" substring) classifies arbitration losses
-	// distinctly from genuine echo mismatches.
-	BusEventCollision
 )
 
 // BusOutcomeClass is the bounded transaction outcome vocabulary exposed to

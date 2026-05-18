@@ -1137,10 +1137,10 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 		//     "echo mismatch" substring; the new error message below
 		//     omits that substring deliberately so the existing
 		//     classifier discriminates without changing).
-		//   - The observer event emits BusEventCollision (not
-		//     BusEventEchoMismatch) so downstream gateway P10 counters
-		//     route to ebus_errors_total{class="collision"} rather
-		//     than {class="echo_mismatch"}.
+		//   - downstream observability records via the existing
+		//     BusEventRetry / BusOutcomeCollision arm in
+		//     bus_observability_store.go — no new BusEventKind is
+		//     needed (Codex r2 defect 2 — MEDIUM).
 		//
 		// Guard layering:
 		//   - isFirstByteAfterArbitration: only the first wire byte
@@ -1158,12 +1158,19 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 		//     wire corruption or bit-flip — keep generic EchoMismatch
 		//     for those.
 		if isFirstByteAfterArbitration && !echoWasEscaped && AddressClassOf(echo) == AddressClassMaster {
-			b.emitObserverEvent(BusEvent{
-				Kind:           BusEventCollision,
-				Outcome:        BusOutcomeCollision,
-				Byte:           echo,
-				EchoWasEscaped: echoWasEscaped,
-			})
+			// batch-26 round-7 (Codex r2 defect 2 — MEDIUM): no direct
+			// BusEvent emission for this branch. Routing already works
+			// via the standard outcome path:
+			//   - error wraps ErrBusCollision WITHOUT "echo mismatch"
+			//     substring → busOutcomeFromError → BusOutcomeCollision.
+			//   - the bus retry path emits BusEventRetry with
+			//     Outcome=BusOutcomeCollision via busOutcomeFromError;
+			//     the gateway-side BusObservabilityStore.OnBusEvent
+			//     increments ebus_errors_total{class="collision",
+			//     scope="active",phase="request"} on that retry event.
+			// Emitting a separate BusEventCollision here would be a
+			// dead-letter event with no downstream consumer, so we drop
+			// it. The error wrapping is the load-bearing signal.
 			err := fmt.Errorf("first-byte arbitration loss: wrote 0x%02X, wire echo 0x%02X (foreign initiator): %w", raw, echo, ebuserrors.ErrBusCollision)
 			b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 			return err
