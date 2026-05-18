@@ -112,6 +112,20 @@ type Bus struct {
 
 	outCap             int
 	unescapedTransport bool // true when transport delivers pre-unescaped bytes (ENH)
+
+	// batch-26 round-8 forensic counters: probe the firstByte-after-arbitration
+	// wire-SYN echo case to inform round-9 drain-fix design. NO behavior
+	// change — the probe drains additional bytes for classification only,
+	// then falls through to the existing error path.
+	firstByteWireSynObserved              atomic.Uint64
+	firstByteSynDrain_wouldRecoverReal    atomic.Uint64
+	firstByteSynDrain_wouldHitForeignInit atomic.Uint64
+	firstByteSynDrain_wouldHitOther       atomic.Uint64
+	firstByteSynDrain_exhausted           atomic.Uint64
+	// Histogram bucket [i] = events with exactly i SYN drains before a
+	// non-SYN was observed (i ∈ [0, 8]). Bucket 8 also includes the
+	// "exhausted" case (all 8 probe reads were idle SYNs).
+	firstByteSynDrainHistogram [9]atomic.Uint64
 }
 
 // NewBus initializes a Bus with transport, config, and optional queue capacity.
@@ -1064,6 +1078,57 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// construction (the guard requires it); the explicit forward keeps
 	// the emission pattern symmetric with the other r3/r4 sites.
 	if flagged != nil && echo == SymbolSyn && !echoWasEscaped && raw != SymbolSyn {
+		// batch-26 round-8 forensic probe: when the FIRST byte after
+		// arbitration sees a wire-SYN echo, characterize what's coming
+		// next on the wire to inform the round-9 drain-fix design. NO
+		// behavior change — we drain up to probeCap bytes for the
+		// counters, then fall through to the existing error emit.
+		// Drained bytes are consumed but the outer ErrBusCollision is
+		// unchanged, so sendWithRetries re-arbitrates anyway (same
+		// flow as pre-probe).
+		if isFirstByteAfterArbitration {
+			b.firstByteWireSynObserved.Add(1)
+			const probeCap = 8
+			synCount := 0
+			classified := false
+			for i := 0; i < probeCap; i++ {
+				next, nextEscaped, perr := b.readByteWithEscape(runCtx, reqCtx, flagged)
+				if perr != nil {
+					// Treat mid-probe read error as exhaustion at the
+					// current SYN count. The outer return still surfaces
+					// the original collision error so behavior is unchanged.
+					if synCount >= 0 && synCount <= probeCap {
+						b.firstByteSynDrainHistogram[synCount].Add(1)
+					}
+					b.firstByteSynDrain_exhausted.Add(1)
+					classified = true
+					break
+				}
+				if next == SymbolSyn && !nextEscaped {
+					synCount++
+					continue
+				}
+				bucket := synCount
+				if bucket > probeCap {
+					bucket = probeCap
+				}
+				b.firstByteSynDrainHistogram[bucket].Add(1)
+				switch {
+				case next == raw:
+					b.firstByteSynDrain_wouldRecoverReal.Add(1)
+				case AddressClassOf(next) == AddressClassMaster && !nextEscaped:
+					b.firstByteSynDrain_wouldHitForeignInit.Add(1)
+				default:
+					b.firstByteSynDrain_wouldHitOther.Add(1)
+				}
+				classified = true
+				break
+			}
+			if !classified {
+				b.firstByteSynDrainHistogram[probeCap].Add(1)
+				b.firstByteSynDrain_exhausted.Add(1)
+			}
+		}
 		b.emitObserverEvent(BusEvent{
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
@@ -1320,6 +1385,56 @@ func (b *Bus) ObserverFaultSnapshot() ObserverFaultSnapshot {
 	b.observerFaultMu.Lock()
 	defer b.observerFaultMu.Unlock()
 	return b.observerFault
+}
+
+// FirstByteWireSynObserved returns the number of times sendRawWithEcho
+// observed a wire SYN echo on the FIRST byte after arbitration. Used
+// by the batch-26 round-8 forensic probe; informs round-9 drain-fix
+// cap selection.
+func (b *Bus) FirstByteWireSynObserved() uint64 { return b.firstByteWireSynObserved.Load() }
+
+// FirstByteSynDrainWouldRecoverReal returns the number of probe events
+// where, after draining N idle SYNs, the next wire byte matched the
+// gateway's expected echo (raw). Hypothesis-validating: a non-zero
+// count proves the proposed round-9 drain fix would recover real txns.
+func (b *Bus) FirstByteSynDrainWouldRecoverReal() uint64 {
+	return b.firstByteSynDrain_wouldRecoverReal.Load()
+}
+
+// FirstByteSynDrainWouldHitForeignInit returns events where the post-
+// drain byte was a master/initiator-class byte (true arbitration loss
+// to a foreign initiator). Already-handled by the round-7 first-byte
+// collision split.
+func (b *Bus) FirstByteSynDrainWouldHitForeignInit() uint64 {
+	return b.firstByteSynDrain_wouldHitForeignInit.Load()
+}
+
+// FirstByteSynDrainWouldHitOther returns events where the post-drain
+// byte was neither raw nor a master-class byte — a genuine value
+// mismatch that the round-9 drain fix would still classify as
+// echo_mismatch.
+func (b *Bus) FirstByteSynDrainWouldHitOther() uint64 {
+	return b.firstByteSynDrain_wouldHitOther.Load()
+}
+
+// FirstByteSynDrainExhausted returns events where the SYN burst exceeded
+// the probe cap (8 idle SYNs in a row) OR a mid-probe read error. If
+// this number is significant relative to wouldRecoverReal, round-9
+// should raise the drain cap.
+func (b *Bus) FirstByteSynDrainExhausted() uint64 {
+	return b.firstByteSynDrain_exhausted.Load()
+}
+
+// FirstByteSynDrainHistogram returns the per-bucket histogram of SYN
+// counts before a non-SYN was observed: bucket[i] for i ∈ [0, 8].
+// Bucket 0 means the first probe read was already non-SYN (no SYNs to
+// drain). Bucket 8 = burst exceeded cap.
+func (b *Bus) FirstByteSynDrainHistogram() [9]uint64 {
+	var out [9]uint64
+	for i := range out {
+		out[i] = b.firstByteSynDrainHistogram[i].Load()
+	}
+	return out
 }
 
 func (b *Bus) emitAttemptComplete(request Frame, response *Frame, frameType FrameType, attempt uint16, startedAt time.Time) {
