@@ -112,6 +112,24 @@ type Bus struct {
 
 	outCap             int
 	unescapedTransport bool // true when transport delivers pre-unescaped bytes (ENH)
+
+	// batch-26 round-9 (2026-05-18): bounded-absorption counters for the
+	// payload-0xAA echo path. When the gateway writes a payload byte
+	// equal to SymbolSyn (0xAA, wire-escaped as `A9 01`) and a real wire
+	// SYN arrives at the echo position with WasEscaped=false, the wire
+	// SYN is bus-idle interference that fired BEFORE the adapter's
+	// buffered escape pair reached the wire (TCP latency between
+	// gateway→adapter→wire). Per the user's ENS-transmit-token invariant,
+	// while the gateway holds the transmit token, AUTO-SYNs from the wire
+	// must be DROPPED rather than propagated as echo failures. The fix
+	// absorbs up to maxPayloadAaAutoSynDrains intervening wire SYNs and
+	// retries the echo read; if the real escape-decoded payload echo
+	// arrives within the cap, the transaction succeeds normally with no
+	// error. These three counters surface drain frequency, recovery
+	// success, and cap-exhaustion for downstream observability.
+	payloadAaAutoSynAbsorbed       atomic.Uint64
+	payloadAaAutoSynRecovered      atomic.Uint64
+	payloadAaAutoSynDrainExhausted atomic.Uint64
 }
 
 // NewBus initializes a Bus with transport, config, and optional queue capacity.
@@ -1110,10 +1128,86 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// initiator's structural marker). Pre-F-23 the wire bytes for
 	// our payload would have been `A9, 01` (first one ≠ 0xAA so
 	// the bare-value match would fail). Post-F-23 our payload
-	// echo is logical 0xAA with WasEscaped=true; we must reject
-	// any 0xAA with WasEscaped=false as a real wire SYN intrusion
-	// that we accidentally let through the value check below.
+	// echo is logical 0xAA with WasEscaped=true.
+	//
+	// batch-26 round-9 (2026-05-18, user architectural insight):
+	// the gateway holds the ENS transmit token while sendRawWithEcho
+	// is active. A wire SYN echo arriving with WasEscaped=false on a
+	// payload-0xAA write means an AUTO-SYN fired on the bus (the
+	// adapter buffers the full escape pair before writing it to wire
+	// due to TCP latency between gateway→adapter→wire — the AUTO-SYN
+	// we see is bus-idle interference BEFORE our `A9 01` pair reaches
+	// the wire). The REAL echo (0xAA wasEscaped=true) follows
+	// immediately.
+	//
+	// Per the invariant: while holding the transmit token, AUTO-SYNs
+	// must be dropped, not propagated as failures. Absorb the wire-SYN
+	// and re-read the next byte; if it matches our expected escape-
+	// decoded echo, the transaction succeeds normally with no
+	// observable error and no retry. The drain is bounded at
+	// maxPayloadAaAutoSynDrains (3 — typical AUTO-SYN bursts are 1-2
+	// bytes; cap prevents unbounded blocking on a hung adapter). If the
+	// drained byte is a non-SYN value, the next-byte echo is treated as
+	// the real (mismatched) echo and falls through to the existing
+	// emit + ErrBusCollision return; if the cap is reached without
+	// recovery, the original payload-0xAA echo_mismatch fires.
+	//
+	// Round-8 forensic data (100% of residual pre_echo_syn_raw events
+	// fire here, all mid-frame, never at the line-1066 plain/F-23
+	// SYN-intrusion guard) drove this scoping: the absorb is applied
+	// only at this site. The sibling guard at ~1066 (non-payload-0xAA
+	// path) is not modified — round-8 measurements showed it has zero
+	// production fires, and absorbing wire SYNs there would mask
+	// legitimate arbitration collisions where we wrote a non-SYN and
+	// the bus is idle (a real defect, not buffering interference).
 	if flagged != nil && !expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && !echoWasEscaped {
+		const maxPayloadAaAutoSynDrains = 3
+		absorbed := 0
+		drainExhausted := true // assume cap-exhausted; flipped to false on any non-SYN break
+		for absorbed < maxPayloadAaAutoSynDrains {
+			nextEcho, nextWasEscaped, drainErr := b.readByteWithEscape(runCtx, reqCtx, flagged)
+			if drainErr != nil {
+				// Read error during drain (timeout, transport close,
+				// ctx cancel): propagate AS-IS without classifying as
+				// echo mismatch — it is a transport-layer fault, not
+				// an echo discrepancy.
+				b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, drainErr)
+				return drainErr
+			}
+			absorbed++
+			b.payloadAaAutoSynAbsorbed.Add(1)
+			if nextEcho == SymbolSyn && nextWasEscaped {
+				// The real escape-decoded payload echo arrived — the
+				// preceding wire SYN(s) were AUTO-SYN buffering
+				// interference. Transaction succeeds normally with no
+				// error emitted and no retry triggered.
+				b.payloadAaAutoSynRecovered.Add(1)
+				return nil
+			}
+			if nextEcho == SymbolSyn && !nextWasEscaped {
+				// Another AUTO-SYN: continue draining within the cap.
+				continue
+			}
+			// Non-SYN drained byte: this is a real echo mismatch (e.g.
+			// adapter corruption or a missed arbitration race). Update
+			// `echo` and `echoWasEscaped` so the downstream emit reflects
+			// what we actually observed; the exhaustion counter MUST NOT
+			// increment for this path (we exited on a real mismatch, not
+			// on running out of cap), so flip drainExhausted to false.
+			echo = nextEcho
+			echoWasEscaped = nextWasEscaped
+			drainExhausted = false
+			break
+		}
+		if drainExhausted {
+			// All `absorbed` iterations were wire-SYN continues and the
+			// loop bound was reached without finding the real echo —
+			// surface the exhaustion counter, then fall through to emit
+			// the payload-0xAA echo_mismatch as before. This preserves
+			// the pre-round-9 collision-error invariant for adapter-
+			// genuinely-stuck cases.
+			b.payloadAaAutoSynDrainExhausted.Add(1)
+		}
 		b.emitObserverEvent(BusEvent{
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
@@ -1320,6 +1414,36 @@ func (b *Bus) ObserverFaultSnapshot() ObserverFaultSnapshot {
 	b.observerFaultMu.Lock()
 	defer b.observerFaultMu.Unlock()
 	return b.observerFault
+}
+
+// PayloadAaAutoSynAbsorbed returns the cumulative count of wire SYN bytes
+// absorbed by the round-9 AUTO-SYN drain at the payload-0xAA echo site in
+// sendRawWithEcho. Each increment represents one ReadByteWithEscape call
+// whose result was an unexpected wire SYN (WasEscaped=false) and was
+// dropped per the ENS-transmit-token invariant. Surface as a Prometheus
+// gauge/counter for observability.
+func (b *Bus) PayloadAaAutoSynAbsorbed() uint64 {
+	return b.payloadAaAutoSynAbsorbed.Load()
+}
+
+// PayloadAaAutoSynRecovered returns the cumulative count of transactions
+// rescued by the round-9 AUTO-SYN drain — i.e. cases where the absorb
+// loop found the real escape-decoded payload echo within the cap and the
+// transaction succeeded without emitting an echo_mismatch or returning
+// ErrBusCollision. The ratio Recovered / (Absorbed events) approximates
+// the round-9 retry-rate reduction.
+func (b *Bus) PayloadAaAutoSynRecovered() uint64 {
+	return b.payloadAaAutoSynRecovered.Load()
+}
+
+// PayloadAaAutoSynDrainExhausted returns the cumulative count of
+// transactions where the round-9 absorb loop reached
+// maxPayloadAaAutoSynDrains intervening wire SYNs without finding the
+// real payload echo. These fall through to the original payload-0xAA
+// echo_mismatch + ErrBusCollision retry path, preserving the pre-round-9
+// behavior for adapter-genuinely-stuck cases.
+func (b *Bus) PayloadAaAutoSynDrainExhausted() uint64 {
+	return b.payloadAaAutoSynDrainExhausted.Load()
 }
 
 func (b *Bus) emitAttemptComplete(request Frame, response *Frame, frameType FrameType, attempt uint16, startedAt time.Time) {
