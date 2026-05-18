@@ -162,12 +162,18 @@ func TestFirstEchoSynDrainProbe_SingleSynThenRealEcho_HistogramBucket1_RecoverRe
 	if got := bus.FirstByteSynDrainExhausted(); got != 0 {
 		t.Errorf("FirstByteSynDrainExhausted = %d; want 0", got)
 	}
+	// Histogram bucket semantics: bucket[N] = N SYNs counted INSIDE the
+	// probe loop (i.e., AFTER the trigger SYN that the outer
+	// sendRawWithEcho already consumed). Here the queue is
+	// [SYN-trigger, real-echo]. The outer read consumes the SYN and
+	// triggers the probe; the probe's FIRST read returns the real echo
+	// directly → 0 SYNs inside the probe → bucket 0.
 	hist := bus.FirstByteSynDrainHistogram()
-	if hist[1] != 1 {
-		t.Errorf("Histogram[1] = %d; want 1 (one SYN drained before real echo)", hist[1])
+	if hist[0] != 1 {
+		t.Errorf("Histogram[0] = %d; want 1 (probe's first read landed on real echo immediately)", hist[0])
 	}
 	for i, v := range hist {
-		if i == 1 {
+		if i == 0 {
 			continue
 		}
 		if v != 0 {
@@ -197,7 +203,7 @@ func TestFirstEchoSynDrainProbe_ThreeSynsThenForeignInit_HistogramBucket3_WouldH
 		{value: protocol.SymbolSyn, wasEscaped: false}, // drain[0]
 		{value: protocol.SymbolSyn, wasEscaped: false}, // drain[1]
 		{value: protocol.SymbolSyn, wasEscaped: false}, // drain[2]
-		{value: 0x31, wasEscaped: false},               // foreign-initiator SOF (P1 master)
+		{value: 0x31, wasEscaped: false},               // foreign-initiator SOF (P1 initiator)
 	}
 	tr.mu.Unlock()
 
