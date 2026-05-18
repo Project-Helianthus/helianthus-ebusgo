@@ -119,6 +119,8 @@ type Bus struct {
 	// then falls through to the existing error path.
 	firstByteWireSynObserved              atomic.Uint64
 	r3MidFrameObserved                    atomic.Uint64 // r8 round-2: events where isFirstByteAfterArbitration=false
+	r3PayloadAaObserved                   atomic.Uint64 // r8 round-3: payload-0xAA real-wire-SYN echo (line 1192 path)
+	r3PayloadAaObserved_midFrame          atomic.Uint64 // r8 round-3: r3PayloadAa subset where isFirstByteAfterArbitration=false
 	firstByteSynDrain_wouldRecoverReal    atomic.Uint64
 	firstByteSynDrain_wouldHitForeignInit atomic.Uint64
 	firstByteSynDrain_wouldHitOther       atomic.Uint64
@@ -1190,6 +1192,16 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// any 0xAA with WasEscaped=false as a real wire SYN intrusion
 	// that we accidentally let through the value check below.
 	if flagged != nil && !expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && !echoWasEscaped {
+		// batch-26 round-8 r3: this is the "payload 0xAA, real wire SYN
+		// echo" path. The r2 probe at line 1081 fires only for non-SYN
+		// raw — but the live leaks (5 events in 6 min with probe=0)
+		// must be firing HERE. The gateway wrote a payload byte 0xAA
+		// (intending A9 01 wire encoding) and got a real wire SYN
+		// instead. Counter informs round-9 fix design.
+		b.r3PayloadAaObserved.Add(1)
+		if !isFirstByteAfterArbitration {
+			b.r3PayloadAaObserved_midFrame.Add(1)
+		}
 		b.emitObserverEvent(BusEvent{
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
@@ -1410,6 +1422,17 @@ func (b *Bus) FirstByteWireSynObserved() uint64 { return b.firstByteWireSynObser
 // disprove Codex's first-byte hypothesis and pin the actual leak
 // position.
 func (b *Bus) R3MidFrameObserved() uint64 { return b.r3MidFrameObserved.Load() }
+
+// R3PayloadAaObserved returns the number of times sendRawWithEcho's
+// payload-0xAA echo-mismatch guard (bus.go line 1192) fired. The probe
+// at line 1081 (non-SYN raw) showed 0 fires while live leaks were
+// rising — the leaks must be on this OTHER path: gateway wrote a
+// payload byte 0xAA, expected escape-decoded echo, got real wire SYN.
+// Added in round-8 r3.
+func (b *Bus) R3PayloadAaObserved() uint64 { return b.r3PayloadAaObserved.Load() }
+
+// R3PayloadAaObserved_midFrame returns the subset where isFirstByteAfterArbitration=false.
+func (b *Bus) R3PayloadAaObservedMidFrame() uint64 { return b.r3PayloadAaObserved_midFrame.Load() }
 
 // FirstByteSynDrainWouldRecoverReal returns the number of probe events
 // where, after draining N idle SYNs, the next wire byte matched the
