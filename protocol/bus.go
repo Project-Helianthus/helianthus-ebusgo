@@ -130,6 +130,29 @@ type Bus struct {
 	payloadAaAutoSynAbsorbed       atomic.Uint64
 	payloadAaAutoSynRecovered      atomic.Uint64
 	payloadAaAutoSynDrainExhausted atomic.Uint64
+
+	// Phase 1 Step B4 (frame-atomic-v8 §1.8 / §1.12, retained per v8 I8):
+	// activeEchoWaits counts goroutines currently inside the active
+	// echo-wait phase of sendRawWithEcho — i.e. between the successful
+	// raw-byte write and the resolution of its echo (success, mismatch,
+	// or absorb-loop exit). The counter serves as the runtime predicate
+	// inSendRawWithEchoActiveEchoWait(): it MUST be > 0 at any code
+	// location that pretends to be operating on an in-flight echo.
+	//
+	// round9AbsorbFiredProxyMediated counts how many times the round-9
+	// AUTO-SYN absorb predicate fired while the active-echo-wait
+	// predicate held — i.e. legitimate round-9 fires from the
+	// sendRawWithEcho call-stack. Per v8 I8 the round-9 absorb code
+	// stays as a legacy fallback for direct-adapter mode; once the v8
+	// adaptermux classifier is enabled in `enforce`, the proxy MUST
+	// filter wire AUTO-SYNs before they reach the gateway's echo
+	// position, so this counter is expected to stay at zero. The
+	// Prometheus alert `HelianthusRound9FiredUnderProxy` (defined in
+	// helianthus-docs-ebus → gateway deploy manifest, NOT in this
+	// repo) watches the rate of this counter under proxy-mediated
+	// mode; any non-zero rate indicates a v8 invariant violation.
+	activeEchoWaits                atomic.Int32
+	round9AbsorbFiredProxyMediated atomic.Uint64
 }
 
 // NewBus initializes a Bus with transport, config, and optional queue capacity.
@@ -1019,6 +1042,17 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 		Byte:    raw,
 	})
 
+	// Phase 1 Step B4 (frame-atomic-v8 §1.8): mark the bus as being in
+	// the active echo-wait phase from here until this call returns.
+	// inSendRawWithEchoActiveEchoWait() must hold for any round-9
+	// AUTO-SYN absorb fire to count toward the proxy-mediated alert
+	// counter — gating the increment on this predicate prevents future
+	// callers that mimic the absorb shape from outside the
+	// sendRawWithEcho call-stack from tripping the
+	// HelianthusRound9FiredUnderProxy alert (v8 §1.12).
+	b.activeEchoWaits.Add(1)
+	defer b.activeEchoWaits.Add(-1)
+
 	// F-23 (batch-19, Codex bot follow-up review on PR #154): for
 	// ENH-class transports, read the echo via the EscapeFlaggedReader
 	// path so we can distinguish a real wire SYN from an escape-
@@ -1161,6 +1195,21 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// legitimate arbitration collisions where we wrote a non-SYN and
 	// the bus is idle (a real defect, not buffering interference).
 	if flagged != nil && !expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && !echoWasEscaped {
+		// Phase 1 Step B4 (frame-atomic-v8 §1.8): the round-9 absorb
+		// predicate just fired. Gate the proxy-mediated alert counter on
+		// inSendRawWithEchoActiveEchoWait() — true here by construction
+		// (we are inside sendRawWithEcho between Write and echo
+		// resolution), but the explicit predicate documents the
+		// invariant and protects against future refactors that lift
+		// this absorb block out of the active-echo-wait call-stack.
+		// Round-9 absorb itself is RETAINED per v8 I8 as the legacy
+		// fallback for direct-adapter mode; this counter exists ONLY
+		// to power the HelianthusRound9FiredUnderProxy alert (v8 §1.12)
+		// which trips when the adaptermux classifier is in `enforce`
+		// and round-9 still fires (a v8 invariant violation).
+		if b.inSendRawWithEchoActiveEchoWait() {
+			b.round9AbsorbFiredProxyMediated.Add(1)
+		}
 		const maxPayloadAaAutoSynDrains = 3
 		absorbed := 0
 		drainExhausted := true // assume cap-exhausted; flipped to false on any non-SYN break
@@ -1456,6 +1505,47 @@ func (b *Bus) PayloadAaAutoSynRecovered() uint64 {
 // behavior for adapter-genuinely-stuck cases.
 func (b *Bus) PayloadAaAutoSynDrainExhausted() uint64 {
 	return b.payloadAaAutoSynDrainExhausted.Load()
+}
+
+// inSendRawWithEchoActiveEchoWait reports whether the current bus has
+// at least one goroutine currently inside the active echo-wait phase
+// of sendRawWithEcho — i.e. between a successful raw-byte Write and
+// the resolution of its echo. Phase 1 Step B4 (frame-atomic-v8 §1.8)
+// uses this predicate to gate the round-9 proxy-mediated alert
+// counter, ensuring that only round-9 absorb fires originating from
+// the sendRawWithEcho call-stack count toward the
+// HelianthusRound9FiredUnderProxy alert (v8 §1.12). The predicate is
+// always true at the round-9 absorb site by construction; making it
+// explicit documents the invariant and provides defense-in-depth
+// against future refactors that might move the absorb block out of
+// the active-echo-wait context.
+func (b *Bus) inSendRawWithEchoActiveEchoWait() bool {
+	return b.activeEchoWaits.Load() > 0
+}
+
+// Round9AbsorbFiredProxyMediated returns the cumulative count of
+// round-9 AUTO-SYN absorb predicate fires that occurred while the
+// bus was in the active echo-wait phase of sendRawWithEcho. Per
+// frame-atomic-v8 I8, the round-9 absorb code is RETAINED as the
+// legacy fallback for direct-adapter mode (where no proxy is
+// mediating wire AUTO-SYNs); this counter exists ONLY to power the
+// Prometheus alert `HelianthusRound9FiredUnderProxy` (v8 §1.12) which
+// fires when the adaptermux classifier is in `enforce` mode and
+// round-9 still fires (a v8 invariant violation indicating the proxy
+// is not correctly filtering wire AUTO-SYNs before they reach the
+// gateway's echo position).
+//
+// Operators MUST configure the alert in the gateway deployment
+// manifest (see helianthus-docs-ebus → deployment/prometheus-alerts)
+// with expression:
+//
+//	rate(helianthus_round9_absorb_fired_proxy_mediated_total[5m]) > 0
+//	  AND helianthus_adaptermux_classifier_mode == "enforce"
+//
+// The counter is safe to expose via Prometheus regardless of mode;
+// the gating happens in the alert rule, not in the code.
+func (b *Bus) Round9AbsorbFiredProxyMediated() uint64 {
+	return b.round9AbsorbFiredProxyMediated.Load()
 }
 
 func (b *Bus) emitAttemptComplete(request Frame, response *Frame, frameType FrameType, attempt uint16, startedAt time.Time) {
