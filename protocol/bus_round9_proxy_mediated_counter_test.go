@@ -76,7 +76,7 @@ func (t *writeFailTransport) ArbitrationSendsSource() bool  { return true }
 
 // TestRound9AbsorbEntered_SingleEntry asserts that one
 // round-9 absorb entry (regardless of how many bytes are drained
-// inside the loop) increments the proxy-mediated counter exactly once.
+// inside the loop) increments the round9AbsorbEntered counter exactly once.
 func TestRound9AbsorbEntered_SingleEntry(t *testing.T) {
 	t.Parallel()
 
@@ -129,7 +129,7 @@ func TestRound9AbsorbEntered_SingleEntry(t *testing.T) {
 
 // TestRound9AbsorbEntered_PerEntryNotPerByte asserts that
 // when the absorb loop drains multiple bytes within a single entry,
-// the proxy-mediated counter still increments by ONE (per-fire
+// the round9AbsorbEntered counter still increments by ONE (per-fire
 // semantics, not per-byte). This distinguishes it from
 // PayloadAaAutoSynAbsorbed which counts per drained byte.
 func TestRound9AbsorbEntered_PerEntryNotPerByte(t *testing.T) {
@@ -247,7 +247,7 @@ func TestRound9AbsorbEntered_StaysZeroOnCleanEcho(t *testing.T) {
 // (drainExhausted path), the counter still increments — the predicate
 // fires regardless of the absorb outcome. This is critical for the
 // alert: a failing round-9 entry is still a v8 invariant violation
-// under proxy-mediated mode.
+// when the alert that gates on classifier_mode == enforce fires.
 func TestRound9AbsorbEntered_CapExhaustedStillCounts(t *testing.T) {
 	t.Parallel()
 
@@ -418,13 +418,17 @@ func TestRound9AbsorbEntered_ConcurrentSendsRaceFree(t *testing.T) {
 
 // TestRound9AbsorbEntered_WriteErrorLeavesCounterAtZero asserts the
 // write-phase error boundary: when transport.Write fails before
-// sendRawWithEcho enters the active-echo-wait phase, the counter MUST
-// NOT increment and the activeEchoWaits predicate MUST NOT be stuck
-// at >0. The latter is asserted indirectly via a SUBSEQUENT Send call:
-// if the predicate were leaked, the next round-9 fire would either
-// double-count or never re-enter (depending on the leak shape). We
-// use two failed sends in a row plus a count assertion to give the
-// leak a chance to surface.
+// sendRawWithEcho enters the active-echo-wait phase, the
+// Round9AbsorbEntered and PayloadAaAutoSyn* counters MUST NOT
+// increment. This is the boundary the test actually proves — with
+// failOnWrite=1 the function returns before activeEchoWaits.Add(1),
+// so by construction the predicate is never bumped. A "predicate
+// leak" test would need a separate scenario where Write succeeds,
+// the increment-and-defer registers, and the function returns
+// abnormally (panic, runtime.Goexit, etc.); this test is not that
+// scenario. Two sequential failed sends are used purely to confirm
+// the counters stay at zero across multiple attempts (no monotonic
+// surprise).
 func TestRound9AbsorbEntered_WriteErrorLeavesCounterAtZero(t *testing.T) {
 	t.Parallel()
 
