@@ -135,6 +135,24 @@ const (
 	// NACK exhaustion. Per v8 §8 the FSM emits an admin event and
 	// returns to IDLE without injecting synthetic byte-stream events.
 	StateAborted
+
+	// StatePassiveTracking is the composite state for foreign-initiator
+	// telegrams per v8 §3 / §3.1. Internally the FSM runs the SAME
+	// per-byte sub-phase logic as active mode (MASTER_HEADER → … →
+	// WAIT_TERMINATOR_SYN, including MASTER_RETX and SLAVE_RETX), but
+	// the Machine reports State() == StatePassiveTracking to the
+	// caller so the classifier can route bytes through a no-staging
+	// path (the proxy did not originate the bytes, so there's no
+	// staging buffer to FIFO-match against).
+	//
+	// Entry: callers invoke EnterPassiveTracking() when they observe
+	// the first non-SYN byte after IDLE without their own STARTED
+	// event preceding (i.e., a foreign initiator won arbitration on the
+	// wire). The entering byte counts as MASTER_HEADER byte 0 (QQ).
+	//
+	// Exit: terminator SYN observed in WAIT_TERMINATOR_SYN sub-phase
+	// → return to StateIdle (passive flag cleared by ResetToIdle).
+	StatePassiveTracking
 )
 
 // String returns a short identifier suitable for admin logs.
@@ -168,6 +186,8 @@ func (s State) String() string {
 		return "WAIT_TERMINATOR_SYN"
 	case StateAborted:
 		return "ABORTED"
+	case StatePassiveTracking:
+		return "PASSIVE_TRACKING"
 	default:
 		return fmt.Sprintf("State(%d)", s)
 	}
@@ -271,6 +291,15 @@ type Machine struct {
 	// slaveRetxCount counts target-response retransmissions per v8
 	// invariant I6. Independent of masterRetxCount.
 	slaveRetxCount byte
+
+	// passive indicates that the Machine is tracking a foreign-
+	// initiator telegram (PASSIVE_TRACKING composite state per v8
+	// §3.1). When true, State() returns StatePassiveTracking instead
+	// of the internal sub-phase. The per-phase Feed handlers behave
+	// identically regardless of this flag — the difference is purely
+	// the entry point (EnterArbitrating vs EnterPassiveTracking) and
+	// the externally-reported State.
+	passive bool
 }
 
 // MaxRetxPerPhase is the eBUS V1.3.1 single-retransmit cap per phase
@@ -308,10 +337,34 @@ func New() *Machine {
 	return &Machine{state: StateIdle}
 }
 
-// State returns the Machine's current state. Useful for admin
-// observability and tests.
+// State returns the Machine's current state. When the Machine is
+// tracking a foreign-initiator telegram (after EnterPassiveTracking),
+// State() returns StatePassiveTracking for any non-IDLE internal
+// sub-phase — this is the user-facing composite state per v8 §3.1.
+// To inspect the internal sub-phase during passive tracking (e.g.,
+// for testing), use InternalState().
+//
+// Once the FSM exits passive tracking (terminator SYN observed →
+// IDLE, or RESETTED), State() returns the actual state again.
 func (m *Machine) State() State {
+	if m.passive && m.state != StateIdle {
+		return StatePassiveTracking
+	}
 	return m.state
+}
+
+// InternalState returns the internal sub-phase regardless of passive
+// mode. Useful for tests that need to assert the exact sub-phase
+// during foreign-telegram tracking.
+func (m *Machine) InternalState() State {
+	return m.state
+}
+
+// IsPassive reports whether the Machine is currently tracking a
+// foreign-initiator telegram (entered via EnterPassiveTracking).
+// Returns false in IDLE, in active mode, or after ResetToIdle.
+func (m *Machine) IsPassive() bool {
+	return m.passive
 }
 
 // ResetToIdle returns the Machine to StateIdle and clears all
@@ -325,6 +378,7 @@ func (m *Machine) ResetToIdle() {
 	m.masterRetxCount = 0
 	m.slaveNN = 0
 	m.slaveRetxCount = 0
+	m.passive = false
 }
 
 // Feed consumes one decoded byte and returns the Decision for that
@@ -389,6 +443,39 @@ func (m *Machine) Feed(b byte, wasEscaped bool) Decision {
 // byte-driven), so it lives outside Feed.
 func (m *Machine) EnterArbitrating() {
 	m.state = StateArbitrating
+	m.passive = false
+}
+
+// EnterPassiveTracking transitions the Machine from IDLE directly to
+// the MASTER_HEADER sub-phase under the PASSIVE_TRACKING composite
+// state. Per v8 §3.1: callers invoke this when they observe the first
+// non-SYN byte after IDLE without a preceding STARTED-for-us event
+// (i.e., a foreign initiator won arbitration on the wire). The
+// entering byte counts as MASTER_HEADER byte 0 (foreign initiator's
+// QQ); the NEXT Feed() call will process byte 1 (ZZ) per the
+// MASTER_HEADER handler.
+//
+// In passive mode, all per-phase Feed handlers behave identically to
+// active mode: same AA-injection drop rules, same NACK retx caps,
+// same WAIT_TERMINATOR_SYN exit. The Machine reports State() ==
+// StatePassiveTracking externally; internal sub-phase tracking is
+// available via InternalState().
+//
+// Exit: when the FSM reaches StateIdle (via WAIT_TERMINATOR_SYN
+// observed, or via abort), the passive flag is cleared and the
+// Machine is ready to enter either active or passive tracking again.
+//
+// EnterPassiveTracking is NOT safe for concurrent use; callers
+// serialize per v8 invariant I11.
+func (m *Machine) EnterPassiveTracking() {
+	m.state = StateMasterHeader
+	m.masterBytesConsumed = 1
+	m.masterNN = 0
+	m.masterDest = 0
+	m.masterRetxCount = 0
+	m.slaveNN = 0
+	m.slaveRetxCount = 0
+	m.passive = true
 }
 
 // feedIdle handles the IDLE state. Per v8 §3 IDLE pass-through, every
