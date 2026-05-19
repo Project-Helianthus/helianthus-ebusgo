@@ -152,77 +152,41 @@ func TestENHCounters_BudgetExhausted(t *testing.T) {
 	}
 }
 
-// TestENHCounters_WallClockTimeout pins that
-// AdminEventEscapePendingTimeout (0xA9 followed by a byte
-// >EscapePendingTimeout later) increments
-// EscapePendingTimeoutTotal AND emits the current byte (data-
-// preserving recovery — re-processed in NORMAL state). The
-// DecodeFaultTotal counter MUST stay at zero (timeout is not a
-// drop-everything fault).
+// NOTE — wall-clock timeout NOT covered by an integration test.
 //
-// Test sync model: net.Pipe is synchronous (Write blocks until Read
-// consumes). The pacedWriteGoroutine uses this property to interleave
-// real wall-clock sleeps BETWEEN byte writes — when the goroutine's
-// first Write returns, we know the transport has already fed the
-// 0xA9 to the decoder (entering pending state); the sleep then
-// counts toward the 32 ms cap; the second Write feeds the 0x55,
-// which sees elapsed > EscapePendingTimeout and fires the cap.
-func TestENHCounters_WallClockTimeout(t *testing.T) {
-	t.Parallel()
-
-	// Read timeout MUST exceed the 32 ms cap + scheduling jitter so
-	// the transport's net.Conn.Read deadline doesn't fire while we
-	// are deliberately stalling the wire.
-	const readTimeout = 2 * time.Second
-
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
-
-	enh := transport.NewENHTransport(client, readTimeout, readTimeout)
-
-	// Encode each byte upfront.
-	leadFrame := encodeENHWireByte(0xA9)
-	tailFrame := encodeENHWireByte(0x55)
-
-	// Paced writer: write the lead, wait for the transport to read
-	// it (net.Pipe Write returns when the read completes), sleep
-	// past the cap, then write the trailing byte.
-	go func() {
-		_, _ = server.Write(leadFrame)
-		// Lead is now in the decoder's pending state. Sleep past
-		// EscapePendingTimeout (32 ms) + a small jitter margin.
-		time.Sleep(transport.EscapePendingTimeout + 10*time.Millisecond)
-		_, _ = server.Write(tailFrame)
-	}()
-
-	events := drainBytes(t, enh, 1)
-	if events[0].Byte != 0x55 || events[0].WasEscaped {
-		t.Fatalf("post-timeout event = {Byte=0x%02X WasEscaped=%v}; want {0x55 false} (data-preserving recovery)",
-			events[0].Byte, events[0].WasEscaped)
-	}
-
-	if got := enh.EscapePendingTimeoutTotal(); got != 1 {
-		t.Errorf("EscapePendingTimeoutTotal() = %d; want 1", got)
-	}
-	// Timeout is data-preserving, NOT a drop-everything fault.
-	if got := enh.DecodeFaultTotal(); got != 0 {
-		t.Errorf("DecodeFaultTotal() = %d; want 0 (timeout is data-preserving, not a fault)", got)
-	}
-	if got := enh.EscapeRecoveryTotal(); got != 0 {
-		t.Errorf("EscapeRecoveryTotal() = %d; want 0", got)
-	}
-	if got := enh.EscapeBudgetExhaustedTotal(); got != 0 {
-		t.Errorf("EscapeBudgetExhaustedTotal() = %d; want 0", got)
-	}
-}
-
-// encodeENHWireByte returns the 2-byte ENHResReceived encoding of
-// `wire`. Local helper for the paced-write test pattern.
-func encodeENHWireByte(wire byte) []byte {
-	seq := transport.EncodeENH(transport.ENHResReceived, wire)
-	return []byte{seq[0], seq[1]}
-}
+// Codex round-2 review on PR #165 correctly observed that any
+// integration test that relies on a wall-clock sleep between two
+// net.Pipe writes has an unavoidable race: net.Pipe.Write returns
+// when the matching Read consumes the bytes from the underlying
+// conn, but it does NOT prove the transport's read loop has yet
+// fed those bytes through the escape decoder (the decoder feed
+// happens AFTER the conn.Read returns, in the same goroutine but
+// after a Parse step). If the scheduler delays the reader, the
+// test's wall-clock sleep can elapse before the decoder records
+// the lead's `leadObservedAt`, and the timeout will not fire.
+//
+// We have three orthogonal layers of coverage that, together, pin
+// the wall-clock timeout contract without this race:
+//
+//   - `ebus_escape_v8_test.go::TestFeed_WallClockCap_*`: pins the
+//     decoder-level timeout semantics deterministically with
+//     synthetic times. Three tests cover beyond-cap, exact-boundary,
+//     and timeout-byte-is-a-new-0xA9.
+//   - `enh_transport_v8_counters_test.go` (this file): pins the
+//     ENHTransport plumbing for the OTHER three admin event kinds
+//     (Recovery, BudgetExhausted, AaAbsorbed); the timeout case's
+//     wiring is a one-line `t.escapePendingTimeoutTotal.Add(1)`
+//     visually parallel to the tested Recovery and BudgetExhausted
+//     branches.
+//   - `v8_constant_drift_test.go`: pins
+//     transport.EscapePendingTimeout == protocol.FrameAtomicV8EscapePendingTimeout
+//     so the constant cannot silently regress.
+//
+// If a future refactor moves the timeout wiring to a non-trivial
+// shape, this note should be revisited — either a clock-injection
+// hook on ENHTransport or a test-only "wait until decoder pending"
+// synchronization barrier would unlock a deterministic integration
+// test.
 
 // TestENHCounters_AccumulatesAcrossEvents pins that the counters
 // accumulate monotonically across multiple events of the same kind
