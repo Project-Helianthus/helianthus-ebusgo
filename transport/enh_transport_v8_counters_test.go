@@ -152,7 +152,8 @@ func TestENHCounters_BudgetExhausted(t *testing.T) {
 	}
 }
 
-// NOTE — wall-clock timeout NOT covered by an integration test.
+// NOTE — wall-clock timeout NOT covered by an end-to-end ENH
+// integration test in this file.
 //
 // Codex round-2 review on PR #165 correctly observed that any
 // integration test that relies on a wall-clock sleep between two
@@ -160,33 +161,46 @@ func TestENHCounters_BudgetExhausted(t *testing.T) {
 // when the matching Read consumes the bytes from the underlying
 // conn, but it does NOT prove the transport's read loop has yet
 // fed those bytes through the escape decoder (the decoder feed
-// happens AFTER the conn.Read returns, in the same goroutine but
+// happens AFTER conn.Read returns, in the same goroutine but
 // after a Parse step). If the scheduler delays the reader, the
 // test's wall-clock sleep can elapse before the decoder records
 // the lead's `leadObservedAt`, and the timeout will not fire.
 //
-// We have three orthogonal layers of coverage that, together, pin
-// the wall-clock timeout contract without this race:
+// Coverage of the wall-clock timeout contract is split across four
+// deterministic layers — collectively they pin every layer of the
+// pipeline without the scheduler race:
 //
-//   - `ebus_escape_v8_test.go::TestFeed_WallClockCap_*`: pins the
-//     decoder-level timeout semantics deterministically with
-//     synthetic times. Three tests cover beyond-cap, exact-boundary,
-//     and timeout-byte-is-a-new-0xA9.
-//   - `enh_transport_v8_counters_test.go` (this file): pins the
-//     ENHTransport plumbing for the OTHER three admin event kinds
-//     (Recovery, BudgetExhausted, AaAbsorbed); the timeout case's
-//     wiring is a one-line `t.escapePendingTimeoutTotal.Add(1)`
-//     visually parallel to the tested Recovery and BudgetExhausted
-//     branches.
-//   - `v8_constant_drift_test.go`: pins
-//     transport.EscapePendingTimeout == protocol.FrameAtomicV8EscapePendingTimeout
-//     so the constant cannot silently regress.
+//   1. **Decoder semantics** —
+//      `ebus_escape_v8_test.go::TestFeed_WallClockCap_*` uses
+//      synthetic times to assert the decoder emits
+//      AdminEventEscapePendingTimeout under the right elapsed
+//      condition (3 tests: beyond-cap, exact-boundary,
+//      timeout-byte-is-a-new-0xA9).
+//   2. **Constant alignment** — `v8_constant_drift_test.go` asserts
+//      `transport.EscapePendingTimeout ==
+//      protocol.FrameAtomicV8EscapePendingTimeout` so the 32 ms
+//      value cannot regress.
+//   3. **ENHTransport admin-event-to-counter routing** —
+//      `apply_escape_admin_event_test.go` directly unit-tests the
+//      `applyEscapeAdminEvent` free function (extracted from
+//      `feedEscapeDecoderLocked` per Codex round-3) with each
+//      AdminEvent kind as input. The PendingTimeout branch is
+//      executable-tested for: counter increment, NO decodeFault
+//      increment (data-preserving invariant), dropEmission=false.
+//   4. **ENHTransport plumbing for other admin event kinds** —
+//      this file pins Recovery, BudgetExhausted, and AaAbsorbed
+//      via the end-to-end ENH stream path (5 deterministic tests).
+//      The PendingTimeout integration path is the ONLY admin event
+//      kind without an end-to-end test; the deterministic unit
+//      test in #3 above covers the routing contract that the
+//      end-to-end test would otherwise exercise.
 //
-// If a future refactor moves the timeout wiring to a non-trivial
-// shape, this note should be revisited — either a clock-injection
-// hook on ENHTransport or a test-only "wait until decoder pending"
-// synchronization barrier would unlock a deterministic integration
-// test.
+// If a future refactor changes the routing shape (e.g. moves
+// counter increments back into a non-extractable inline switch),
+// the unit test in #3 would need to be re-derived; either a
+// clock-injection hook on ENHTransport or a test-only "wait until
+// decoder pending" synchronization barrier would unlock a true
+// end-to-end timeout integration test.
 
 // TestENHCounters_AccumulatesAcrossEvents pins that the counters
 // accumulate monotonically across multiple events of the same kind

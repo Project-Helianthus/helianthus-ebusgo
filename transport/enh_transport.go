@@ -1432,29 +1432,73 @@ func (t *ENHTransport) feedEscapeDecoderLocked(raw byte) (decoded byte, ok bool,
 		t.escapeAaAbsorbedTotal.Add(uint64(delta))
 	}
 
-	switch admin.Kind {
-	case AdminEventEscapePendingTimeout:
-		// 32 ms cap hit. Orphaned 0xA9 + absorbed AAs dropped; the
-		// current byte was re-processed in NORMAL state and may have
-		// produced a decoded byte (`decoded`, `ok`, `wasEscaped` are
-		// the result of that re-processing). Surface the timeout but
-		// preserve the data-preserving recovery emission.
-		t.escapePendingTimeoutTotal.Add(1)
-	case AdminEventEscapeRecovery:
-		// Invalid escape pair: increment both fault counters and
-		// drop. The decoder cleared its in-flight state before
-		// returning.
-		t.escapeRecoveryTotal.Add(1)
-		t.decodeFaultTotal.Add(1)
-		return 0, false, false
-	case AdminEventEscapeBudgetExhausted:
-		// AA-injection budget exhausted: increment both fault
-		// counters and drop.
-		t.escapeBudgetExhaustedTotal.Add(1)
-		t.decodeFaultTotal.Add(1)
+	if applyEscapeAdminEvent(
+		admin,
+		&t.escapePendingTimeoutTotal,
+		&t.escapeRecoveryTotal,
+		&t.escapeBudgetExhaustedTotal,
+		&t.decodeFaultTotal,
+	) {
+		// Drop-everything fault path (Recovery or BudgetExhausted) —
+		// emission suppressed regardless of what the decoder returned
+		// for this byte. The decoder cleared its in-flight state
+		// before returning, so subsequent bytes resume cleanly.
 		return 0, false, false
 	}
+	// AdminEventNone or AdminEventEscapePendingTimeout:
+	// data-preserving paths. For Timeout, the current byte was
+	// re-processed in NORMAL state by the decoder and may have
+	// produced a decoded byte (`decoded`, `ok`, `wasEscaped` reflect
+	// that re-processing); the counter was already bumped inside
+	// applyEscapeAdminEvent.
 	return decoded, ok, wasEscaped
+}
+
+// applyEscapeAdminEvent routes a v8 escape-decoder admin event to
+// the four transport-level counters and reports whether the caller
+// must drop the current byte's emission. Extracted from
+// feedEscapeDecoderLocked so the routing logic is directly unit-
+// testable without standing up a full ENHTransport (per Codex
+// round-3 review on PR #165 — "visually parallel wiring is not
+// executable coverage").
+//
+// Returns dropEmission=true when admin.Kind indicates a drop-
+// everything fault (AdminEventEscapeRecovery or
+// AdminEventEscapeBudgetExhausted). Returns false for AdminEventNone
+// (no event) and AdminEventEscapePendingTimeout (data-preserving —
+// the current byte was re-processed in NORMAL state by the decoder
+// and the caller should emit whatever the decoder returned).
+//
+// The function is allocation-free and operates only on the four
+// atomic counter pointers passed in; it does not depend on any
+// ENHTransport state, making it pure-function testable.
+func applyEscapeAdminEvent(
+	admin AdminEvent,
+	pendingTimeoutCtr, recoveryCtr, budgetExhaustedCtr, decodeFaultCtr *atomic.Uint64,
+) (dropEmission bool) {
+	switch admin.Kind {
+	case AdminEventEscapePendingTimeout:
+		// 32 ms cap hit. The decoder already re-processed the
+		// current byte in NORMAL state; the caller emits whatever
+		// the decoder returned. Surface the timeout via its own
+		// counter — NOT a fault (decodeFaultCtr stays put).
+		pendingTimeoutCtr.Add(1)
+		return false
+	case AdminEventEscapeRecovery:
+		// Invalid second byte. Drop the 0xA9, any absorbed AAs, AND
+		// the offending byte. Fault.
+		recoveryCtr.Add(1)
+		decodeFaultCtr.Add(1)
+		return true
+	case AdminEventEscapeBudgetExhausted:
+		// AA-injection budget exhausted. Drop the 0xA9, the 8
+		// absorbed AAs, AND the over-budget AA. Fault.
+		budgetExhaustedCtr.Add(1)
+		decodeFaultCtr.Add(1)
+		return true
+	}
+	// AdminEventNone — no admin event, nothing to do.
+	return false
 }
 
 // appendDecodedByteLocked emits a fully-decoded logical byte to
