@@ -652,25 +652,25 @@ func TestSlaveRetxDropsRawSyn(t *testing.T) {
 }
 
 // TestRetxCountersAreIndependent verifies masterRetxCount and
-// slaveRetxCount are independent per v8 I6. A master phase that
-// completed without NACK leaves the master budget at 0; a subsequent
-// slave NACK must still get SLAVE_RETX (not be blocked by some
+// slaveRetxCount are independent per v8 I6. An initiator phase that
+// completed without NACK leaves the initiator budget at 0; a subsequent
+// target NACK must still get SLAVE_RETX (not be blocked by some
 // fictitious shared cap). And vice-versa.
 func TestRetxCountersAreIndependent(t *testing.T) {
 	t.Parallel()
-	// Forward direction: master phase succeeds, slave NACK works.
-	m := setupAtWaitSlaveAck(t) // master ACKed cleanly, no master NACK
+	// Forward direction: initiator phase succeeds, target NACK works.
+	m := setupAtWaitSlaveAck(t) // initiator ACKed cleanly, no initiator NACK
 	got := m.Feed(NACKByte, false)
 	if got != DecisionForward {
-		t.Fatalf("forward slave NACK decision = %v, want DecisionForward", got)
+		t.Fatalf("forward target NACK decision = %v, want DecisionForward", got)
 	}
 	if m.State() != StateSlaveRetx {
-		t.Fatalf("forward slave NACK state = %v, want StateSlaveRetx (master budget must not block)", m.State())
+		t.Fatalf("forward target NACK state = %v, want StateSlaveRetx (initiator budget must not block)", m.State())
 	}
 
-	// Inverse direction: master NACK + retry succeeds, slave still has
-	// its full budget. To exercise: do master NACK, complete the retx,
-	// then do a slave NACK and verify SLAVE_RETX (not abort).
+	// Inverse direction: initiator NACK + retry succeeds, target still has
+	// its full budget. To exercise: do initiator NACK, complete the retx,
+	// then do a target NACK and verify SLAVE_RETX (not abort).
 	m = setupAtWaitMasterAck(t)
 	m.Feed(NACKByte, false) // → MASTER_RETX
 	// Retx header (QQ ZZ PB SB NN=0)
@@ -682,15 +682,15 @@ func TestRetxCountersAreIndependent(t *testing.T) {
 	m.Feed(0x00, false)    // NN'=0 → SLAVE_CRC
 	m.Feed(0x42, false)    // CRC → WAIT_SLAVE_ACK
 	if m.State() != StateWaitSlaveAck {
-		t.Fatalf("setup post-master-retx state = %v, want StateWaitSlaveAck", m.State())
+		t.Fatalf("setup post-initiator-retx state = %v, want StateWaitSlaveAck", m.State())
 	}
-	// Now slave NACK — must enter SLAVE_RETX, not ABORT.
+	// Now target NACK — must enter SLAVE_RETX, not ABORT.
 	got = m.Feed(NACKByte, false)
 	if got != DecisionForward {
-		t.Fatalf("inverse slave NACK decision = %v, want DecisionForward", got)
+		t.Fatalf("inverse target NACK decision = %v, want DecisionForward", got)
 	}
 	if m.State() != StateSlaveRetx {
-		t.Fatalf("inverse slave NACK state = %v, want StateSlaveRetx (master retx must not exhaust slave budget)", m.State())
+		t.Fatalf("inverse target NACK state = %v, want StateSlaveRetx (initiator retx must not exhaust target budget)", m.State())
 	}
 }
 
@@ -823,4 +823,320 @@ func setupAtWaitMasterAck(t *testing.T) *Machine {
 		t.Fatalf("setup pre-condition: state = %v, want StateWaitMasterAck", m.State())
 	}
 	return m
+}
+
+// ===== PASSIVE_TRACKING tests =====
+
+// TestEnterPassiveTrackingPutsCompositeStateOnExternalAPI verifies the
+// user-facing State() returns StatePassiveTracking once
+// EnterPassiveTracking has been called, while InternalState() exposes
+// the sub-phase (MASTER_HEADER initially).
+func TestEnterPassiveTrackingPutsCompositeStateOnExternalAPI(t *testing.T) {
+	t.Parallel()
+	m := New()
+	if m.IsPassive() {
+		t.Fatalf("New().IsPassive() = true, want false")
+	}
+	m.EnterPassiveTracking()
+	if m.State() != StatePassiveTracking {
+		t.Fatalf("State() = %v, want StatePassiveTracking", m.State())
+	}
+	if m.InternalState() != StateMasterHeader {
+		t.Fatalf("InternalState() = %v, want StateMasterHeader", m.InternalState())
+	}
+	if !m.IsPassive() {
+		t.Fatalf("IsPassive() = false, want true")
+	}
+}
+
+// TestPassiveTrackingConsumes4MoreHeaderBytes verifies the entering
+// byte counted as QQ (byte 0 of the 5-byte header), so the next 4
+// bytes complete MASTER_HEADER. The State() stays StatePassiveTracking
+// throughout, while InternalState() advances.
+func TestPassiveTrackingConsumes4MoreHeaderBytes(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking() // entering byte was 0x10 (QQ); masterBytesConsumed=1
+	// Now feed ZZ PB SB NN=2 (4 bytes to finish header).
+	for _, b := range []byte{0x08, 0xB5, 0x09, 0x02} {
+		got := m.Feed(b, false)
+		if got != DecisionForward {
+			t.Fatalf("byte 0x%02X: decision = %v, want DecisionForward", b, got)
+		}
+		if m.State() != StatePassiveTracking {
+			t.Fatalf("byte 0x%02X: external state = %v, want StatePassiveTracking", b, m.State())
+		}
+	}
+	if m.InternalState() != StateMasterData {
+		t.Fatalf("InternalState() after header complete = %v, want StateMasterData", m.InternalState())
+	}
+}
+
+// TestPassiveTrackingDropsRawSyn verifies the AA-injection filter
+// applies identically in passive mode. Raw 0xAA mid-header → drop,
+// stay in PASSIVE_TRACKING.
+func TestPassiveTrackingDropsRawSyn(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking()
+	got := m.Feed(0xAA, false)
+	if got != DecisionDropAaInjection {
+		t.Fatalf("decision = %v, want DecisionDropAaInjection", got)
+	}
+	if m.State() != StatePassiveTracking {
+		t.Fatalf("state = %v, want StatePassiveTracking (no advance on drop)", m.State())
+	}
+}
+
+// TestPassiveTrackingAcceptsEscapedAAAsPayload verifies escape-decoded
+// 0xAA bytes flow through as legitimate payload (was_escaped=true), no
+// drop, FSM advances.
+func TestPassiveTrackingAcceptsEscapedAAAsPayload(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking() // QQ already consumed
+	// Header: ZZ PB SB NN=1
+	for _, b := range []byte{0x08, 0xB5, 0x09, 0x01} {
+		m.Feed(b, false)
+	}
+	// Single data byte is logical 0xAA (escape-decoded).
+	got := m.Feed(0xAA, true)
+	if got != DecisionForward {
+		t.Fatalf("escape-decoded AA decision = %v, want DecisionForward", got)
+	}
+	if m.InternalState() != StateMasterCRC {
+		t.Fatalf("internal state = %v, want StateMasterCRC (NN=1 satisfied)", m.InternalState())
+	}
+	if m.State() != StatePassiveTracking {
+		t.Fatalf("external state = %v, want StatePassiveTracking", m.State())
+	}
+}
+
+// TestPassiveTrackingFullFlowExitsToIdle walks the FULL foreign-
+// telegram lifecycle: header → data → CRC → initiator ACK → target length
+// → target data → target CRC → target ACK → terminator SYN → IDLE.
+// State() returns StatePassiveTracking throughout, then StateIdle at
+// the end (passive flag cleared via ResetToIdle).
+func TestPassiveTrackingFullFlowExitsToIdle(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking() // QQ=0x10 (passed externally)
+	runFeedSequence(t, m, []feedStep{
+		{b: 0x08, want: DecisionForward, wantState: StatePassiveTracking},    // ZZ (not broadcast)
+		{b: 0xB5, want: DecisionForward, wantState: StatePassiveTracking},    // PB
+		{b: 0x09, want: DecisionForward, wantState: StatePassiveTracking},    // SB
+		{b: 0x01, want: DecisionForward, wantState: StatePassiveTracking},    // NN=1 → SLAVE_LENGTH after data
+		{b: 0xC0, want: DecisionForward, wantState: StatePassiveTracking},    // single data byte
+		{b: 0x42, want: DecisionForward, wantState: StatePassiveTracking},    // CRC → WAIT_MASTER_ACK
+		{b: ACKByte, want: DecisionForward, wantState: StatePassiveTracking}, // initiator ACK → SLAVE_LENGTH
+		{b: 0x00, want: DecisionForward, wantState: StatePassiveTracking},    // NN'=0 → SLAVE_CRC
+		{b: 0x42, want: DecisionForward, wantState: StatePassiveTracking},    // target CRC → WAIT_SLAVE_ACK
+		{b: ACKByte, want: DecisionForward, wantState: StatePassiveTracking}, // initiator ACK → WAIT_TERMINATOR_SYN
+		{b: 0xAA, want: DecisionForward, wantState: StateIdle},               // terminator SYN → IDLE
+	})
+	if m.IsPassive() {
+		t.Fatalf("IsPassive() = true after terminator, want false (cleared by ResetToIdle)")
+	}
+}
+
+// TestPassiveTrackingNackTriggersRetxJustLikeActive verifies that
+// NACK handling in WAIT_MASTER_ACK works identically in passive mode:
+// first NACK → MASTER_RETX, next byte enters fresh MASTER_HEADER.
+func TestPassiveTrackingNackTriggersRetxJustLikeActive(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking() // QQ
+	// Header ZZ PB SB NN=0 + CRC
+	for _, b := range []byte{0x08, 0xB5, 0x09, 0x00, 0x42} {
+		m.Feed(b, false)
+	}
+	if m.InternalState() != StateWaitMasterAck {
+		t.Fatalf("setup InternalState = %v, want StateWaitMasterAck", m.InternalState())
+	}
+	got := m.Feed(NACKByte, false)
+	if got != DecisionForward {
+		t.Fatalf("NACK decision = %v, want DecisionForward", got)
+	}
+	if m.InternalState() != StateMasterRetx {
+		t.Fatalf("post-NACK internal state = %v, want StateMasterRetx", m.InternalState())
+	}
+	if m.State() != StatePassiveTracking {
+		t.Fatalf("post-NACK external state = %v, want StatePassiveTracking", m.State())
+	}
+	// Next byte is resent QQ.
+	got = m.Feed(0x10, false)
+	if got != DecisionForward {
+		t.Fatalf("retx QQ decision = %v, want DecisionForward", got)
+	}
+	if m.InternalState() != StateMasterHeader {
+		t.Fatalf("retx QQ internal state = %v, want StateMasterHeader", m.InternalState())
+	}
+}
+
+// TestPassiveTrackingBroadcastEntersWaitTerminator verifies the
+// broadcast (ZZ=0xFE) short-circuit works in passive mode: MASTER_CRC
+// → WAIT_TERMINATOR_SYN (skip ACK).
+func TestPassiveTrackingBroadcastEntersWaitTerminator(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking() // QQ
+	// Header: ZZ=0xFE (broadcast) PB SB NN=0 + CRC
+	for _, b := range []byte{0xFE, 0xB5, 0x09, 0x00, 0x42} {
+		m.Feed(b, false)
+	}
+	if m.InternalState() != StateWaitTerminatorSyn {
+		t.Fatalf("broadcast passive state = %v, want StateWaitTerminatorSyn", m.InternalState())
+	}
+	if m.State() != StatePassiveTracking {
+		t.Fatalf("external state = %v, want StatePassiveTracking", m.State())
+	}
+	// Terminator SYN → IDLE
+	got := m.Feed(0xAA, false)
+	if got != DecisionForward {
+		t.Fatalf("terminator decision = %v, want DecisionForward", got)
+	}
+	if m.State() != StateIdle {
+		t.Fatalf("post-terminator state = %v, want StateIdle", m.State())
+	}
+}
+
+// TestPassiveTrackingResetClearsPassiveFlag verifies ResetToIdle
+// (called e.g. on RESETTED transport event) clears the passive flag
+// AND the internal state.
+func TestPassiveTrackingResetClearsPassiveFlag(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking()
+	m.Feed(0x08, false) // advance to byte 2 of MASTER_HEADER
+	if !m.IsPassive() {
+		t.Fatalf("mid-passive IsPassive = false")
+	}
+	m.ResetToIdle()
+	if m.IsPassive() {
+		t.Fatalf("post-reset IsPassive = true, want false")
+	}
+	if m.State() != StateIdle {
+		t.Fatalf("post-reset State = %v, want StateIdle", m.State())
+	}
+	if m.InternalState() != StateIdle {
+		t.Fatalf("post-reset InternalState = %v, want StateIdle", m.InternalState())
+	}
+}
+
+// TestPassiveTrackingNNAbove16Aborts verifies spec-violation handling
+// works identically in passive mode: NN > 16 → ABORTED.
+func TestPassiveTrackingNNAbove16Aborts(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking() // QQ
+	// Header: ZZ PB SB NN=17 (spec violation)
+	for _, b := range []byte{0x08, 0xB5, 0x09} {
+		m.Feed(b, false)
+	}
+	got := m.Feed(0x11, false) // NN=17
+	if got != DecisionProtocolFault {
+		t.Fatalf("decision = %v, want DecisionProtocolFault", got)
+	}
+	if m.InternalState() != StateAborted {
+		t.Fatalf("internal state = %v, want StateAborted", m.InternalState())
+	}
+}
+
+// TestPassiveAbortExposesStateAbortedNotComposite is the regression
+// test for Codex PR #163 BLOCKER: terminal states (StateAborted) must
+// NOT be masked by the PASSIVE_TRACKING composite. Otherwise callers
+// using `m.State().IsTerminal()` to detect telegram-finished-with-fault
+// would miss passive-mode aborts (e.g., NACK exhaustion).
+//
+// Scenario: passive WAIT_MASTER_ACK, NACK with retx_count already at
+// max → ABORTED. State() must return StateAborted directly, NOT
+// StatePassiveTracking. IsTerminal() must report true.
+func TestPassiveAbortExposesStateAbortedNotComposite(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking()
+	// Header: ZZ PB SB NN=0
+	for _, b := range []byte{0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	m.Feed(0x42, false) // CRC → WAIT_MASTER_ACK
+	// First NACK → MASTER_RETX
+	m.Feed(NACKByte, false)
+	// Resent QQ ZZ PB SB NN=0
+	for _, b := range []byte{0x10, 0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	m.Feed(0x42, false) // CRC → WAIT_MASTER_ACK (post retx)
+	if m.InternalState() != StateWaitMasterAck {
+		t.Fatalf("setup InternalState = %v, want StateWaitMasterAck", m.InternalState())
+	}
+	// Second NACK → ABORTED. With the BUGGY masking, State() would
+	// have returned StatePassiveTracking here, missing the abort.
+	got := m.Feed(NACKByte, false)
+	if got != DecisionForward {
+		t.Fatalf("second NACK decision = %v, want DecisionForward", got)
+	}
+	if m.InternalState() != StateAborted {
+		t.Fatalf("InternalState after NACK exhaustion = %v, want StateAborted", m.InternalState())
+	}
+	// THE CRITICAL ASSERTION: State() must surface the terminal.
+	if m.State() != StateAborted {
+		t.Fatalf("State() after passive NACK exhaustion = %v, want StateAborted (terminal must not be masked by composite)", m.State())
+	}
+	if !m.State().IsTerminal() {
+		t.Fatalf("State().IsTerminal() = false after abort, want true (caller-side termination contract)")
+	}
+}
+
+// TestPassiveProtocolFaultExposesStateAbortedNotComposite covers the
+// other terminal entry path: malformed byte in WAIT_MASTER_ACK during
+// passive tracking → ABORTED. State() must also expose the terminal.
+func TestPassiveProtocolFaultExposesStateAbortedNotComposite(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking()
+	for _, b := range []byte{0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	m.Feed(0x42, false) // CRC → WAIT_MASTER_ACK
+	// Malformed byte (not ACK/NACK/AA) → PROTOCOL_FAULT + ABORTED.
+	got := m.Feed(0x42, false)
+	if got != DecisionProtocolFault {
+		t.Fatalf("decision = %v, want DecisionProtocolFault", got)
+	}
+	if m.InternalState() != StateAborted {
+		t.Fatalf("InternalState = %v, want StateAborted", m.InternalState())
+	}
+	if m.State() != StateAborted {
+		t.Fatalf("State() = %v, want StateAborted (terminal not masked)", m.State())
+	}
+	if !m.State().IsTerminal() {
+		t.Fatalf("IsTerminal() = false, want true")
+	}
+}
+
+// TestStatePassiveTrackingStringLabel verifies the String() method.
+func TestStatePassiveTrackingStringLabel(t *testing.T) {
+	t.Parallel()
+	if StatePassiveTracking.String() != "PASSIVE_TRACKING" {
+		t.Fatalf("StatePassiveTracking.String() = %q, want %q",
+			StatePassiveTracking.String(), "PASSIVE_TRACKING")
+	}
+}
+
+// TestEnterArbitratingClearsPassiveFlag verifies that
+// EnterArbitrating after a passive abort (e.g., ResetToIdle then a
+// new active session) correctly clears the passive flag.
+func TestEnterArbitratingClearsPassiveFlag(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking()
+	m.ResetToIdle()
+	m.EnterArbitrating()
+	if m.IsPassive() {
+		t.Fatalf("IsPassive after EnterArbitrating = true, want false")
+	}
+	if m.State() != StateArbitrating {
+		t.Fatalf("State = %v, want StateArbitrating", m.State())
+	}
 }
