@@ -19,8 +19,10 @@
 //
 //   - **Pure**. No I/O, no goroutines, no clocks. Transitions are
 //     synchronous functions of (current state, input byte).
-//   - **Allocation-free** on the hot path. No slices grown per byte,
-//     no maps, no fmt.Sprintf.
+//   - **Allocation-free in the Feed hot path**. No slices grown per
+//     byte, no maps, no fmt.Sprintf inside Feed. The String() methods
+//     do use fmt.Sprintf as a fallback for unknown enum values; those
+//     are not on the hot path.
 //   - **Single-byte serial**. Callers feed one decoded byte at a time
 //     per v8 invariant I9 (classify under current phase, then
 //     transition).
@@ -35,10 +37,14 @@ package telegram_fsm
 
 import "fmt"
 
-// State enumerates the phases of an eBUS telegram per v6 §3 plus the
-// v8 PASSIVE_TRACKING composite state. Each State has a fixed
-// per-byte classifier (see Classify) and a deterministic next-state
-// transition (see TransitionAfterConsumed).
+// State enumerates the phases of an eBUS telegram per v6 §3. Each
+// State has a per-phase rule inside Machine.Feed; the transition to
+// the next state is committed inside Feed after the per-byte
+// classification per v8 invariant I9 (classify under current phase,
+// then transition).
+//
+// v8's PASSIVE_TRACKING composite state and the SLAVE_* phases land
+// in subsequent commits.
 type State uint8
 
 const (
@@ -66,11 +72,11 @@ const (
 
 	// StateMasterCRC consumes the single CRC byte that follows
 	// MASTER_DATA. Per v8 §1.6 the proxy can validate the CRC against
-	// the master-frame bytes it observed; mismatch is admin-logged.
+	// the initiator-frame bytes it observed; mismatch is admin-logged.
 	StateMasterCRC
 
 	// StateWaitMasterAck waits for the target's ACK (0x00) or NACK
-	// (0xFF) after the master CRC. ACK leads to SLAVE_LENGTH for
+	// (0xFF) after the initiator CRC. ACK leads to SLAVE_LENGTH for
 	// initiator-target, WAIT_TERMINATOR_SYN for initiator-initiator
 	// or broadcast (ZZ=0xFE). NACK with retx_count<1 leads to
 	// MASTER_RETX; NACK with retx_count>=1 leads to ABORTED. Per v8
@@ -118,15 +124,18 @@ func (s State) IsTerminal() bool {
 }
 
 // Decision describes the action the FSM dictates for a single input
-// byte. The classifier (Classify) returns this; callers act on it
-// before calling TransitionAfterConsumed.
+// byte. Machine.Feed returns this; callers act on it (forward, drop,
+// or admin-event-and-forward) before feeding the next byte.
 //
-// Decisions are tagged with their interpretive role so the caller can
-// route the byte to:
+// Decisions are tagged with their interpretive role so the caller
+// can route the byte to:
 //
 //   - The session's TCP egress queue (DecisionForward).
-//   - The bit bucket (DecisionDropAaInjection or DecisionDropMalformed).
-//   - The protocol-fault admin channel (DecisionProtocolFault).
+//   - The bit bucket (DecisionDropAaInjection).
+//   - The byte stream AND the protocol-fault admin channel
+//     (DecisionProtocolFault — per v8 invariant I10, the byte is
+//     forwarded to preserve wire fidelity AND an admin event is
+//     surfaced for operator visibility).
 type Decision uint8
 
 const (
@@ -188,25 +197,25 @@ type Machine struct {
 	// otherwise → WAIT_MASTER_ACK.
 	masterDest byte
 
-	// masterRetxCount counts master-frame retransmissions per v8
+	// masterRetxCount counts initiator-frame retransmissions per v8
 	// invariant I6. Bounded at MaxRetxPerPhase = 1 per eBUS V1.3.1.
 	masterRetxCount byte
 }
 
 // MaxRetxPerPhase is the eBUS V1.3.1 single-retransmit cap per phase
-// (v8 I6). The master may retransmit its frame once on NACK from
+// (v8 I6). The initiator may retransmit its frame once on NACK from
 // target; the target may retransmit its response once on NACK from
 // the initiator. After one retransmit, the next NACK aborts the
 // telegram.
 const MaxRetxPerPhase byte = 1
 
 // BroadcastDestination is the eBUS broadcast ZZ value (0xFE). Per
-// v6 §3 a master frame with ZZ=0xFE skips the WAIT_MASTER_ACK / slave
+// v6 §3 an initiator frame with ZZ=0xFE skips the WAIT_MASTER_ACK / target
 // phases and goes directly to WAIT_TERMINATOR_SYN.
 const BroadcastDestination byte = 0xFE
 
 // ACKByte (0x00) is the target's positive acknowledgement after
-// receiving a valid master CRC. Per v6 §3 it leads to either
+// receiving a valid initiator CRC. Per v6 §3 it leads to either
 // SLAVE_LENGTH (for initiator-target frames) or WAIT_TERMINATOR_SYN
 // (for initiator-initiator frames).
 const ACKByte byte = 0x00
@@ -247,9 +256,11 @@ func (m *Machine) ResetToIdle() {
 
 // Feed consumes one decoded byte and returns the Decision for that
 // byte. Per v8 invariant I9, the Decision is classified under the
-// CURRENT state before any transition is committed. If the byte
-// completes the phase (e.g., the 5th MASTER_HEADER byte), the
-// Machine transitions to the next phase AFTER Feed returns.
+// CURRENT state, then (if the byte completes the phase, e.g., the
+// 5th MASTER_HEADER byte) the Machine transitions to the next phase
+// before Feed returns. Callers see the Decision computed against
+// the phase that owned the byte; subsequent State() calls reflect
+// the post-transition state.
 //
 // The boolean wasEscaped distinguishes a wire-emitted 0xAA byte
 // (wasEscaped=false, the AUTO-SYN) from an escape-decoded logical
@@ -424,7 +435,7 @@ func (m *Machine) feedWaitMasterAck(b byte, wasEscaped bool) Decision {
 	case ACKByte:
 		// ACK accepted. Next state in v6 §3 is SLAVE_LENGTH for
 		// initiator-target or WAIT_TERMINATOR_SYN for
-		// initiator-initiator. Slave phases land in a follow-up
+		// initiator-initiator. Target phases land in a follow-up
 		// commit; for now ABORT to IDLE so behavior is well-defined.
 		m.ResetToIdle()
 		return DecisionForward

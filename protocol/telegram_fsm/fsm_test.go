@@ -135,6 +135,64 @@ func TestMasterHeaderRejectsNNAbove16(t *testing.T) {
 	})
 }
 
+// TestMasterHeaderAcceptsNNExactly16 verifies the boundary case: NN=16
+// is the maximum valid data length per eBUS V1.3.1, must NOT abort.
+// Pins the `>` comparison in fsm.go against silent regression to `>=`.
+func TestMasterHeaderAcceptsNNExactly16(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterArbitrating()
+	runFeedSequence(t, m, []feedStep{
+		{b: 0x10, want: DecisionForward, wantState: StateMasterHeader},
+		{b: 0x08, want: DecisionForward, wantState: StateMasterHeader},
+		{b: 0xB5, want: DecisionForward, wantState: StateMasterHeader},
+		{b: 0x09, want: DecisionForward, wantState: StateMasterHeader},
+		{b: 0x10, want: DecisionForward, wantState: StateMasterData}, // NN=16 boundary
+	})
+}
+
+// TestMasterHeaderDropsRawSyn verifies v8 §4: raw 0xAA in MASTER_HEADER
+// (any of the 5 header bytes after QQ) is AA-injection. Drop, stay.
+func TestMasterHeaderDropsRawSyn(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterArbitrating()
+	m.Feed(0x10, false) // QQ — now in MASTER_HEADER
+	if m.State() != StateMasterHeader {
+		t.Fatalf("setup state = %v, want StateMasterHeader", m.State())
+	}
+	got := m.Feed(0xAA, false)
+	if got != DecisionDropAaInjection {
+		t.Fatalf("decision = %v, want DecisionDropAaInjection", got)
+	}
+	if m.State() != StateMasterHeader {
+		t.Fatalf("state = %v, want StateMasterHeader (no advance)", m.State())
+	}
+}
+
+// TestMasterCRCDropsRawSyn verifies v8 §4: raw 0xAA in MASTER_CRC is
+// AA-injection (the CRC byte should never be 0xAA raw — payload-0xAA
+// encodes as escape-pair, and the actual wire AUTO-SYN only marks
+// terminator AFTER WAIT_TERMINATOR_SYN). Drop, stay in MASTER_CRC.
+func TestMasterCRCDropsRawSyn(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterArbitrating()
+	for _, b := range []byte{0x10, 0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	if m.State() != StateMasterCRC {
+		t.Fatalf("setup state = %v, want StateMasterCRC", m.State())
+	}
+	got := m.Feed(0xAA, false)
+	if got != DecisionDropAaInjection {
+		t.Fatalf("decision = %v, want DecisionDropAaInjection", got)
+	}
+	if m.State() != StateMasterCRC {
+		t.Fatalf("state = %v, want StateMasterCRC (no advance)", m.State())
+	}
+}
+
 // TestMasterDataDropsRawSyn verifies v8 §4: raw 0xAA in MASTER_DATA
 // is AA-injection. Drop, stay in MASTER_DATA.
 func TestMasterDataDropsRawSyn(t *testing.T) {
@@ -238,7 +296,7 @@ func TestWaitMasterAckDropsRawSyn(t *testing.T) {
 }
 
 // TestWaitMasterAckAcceptsAck verifies ACK advances toward the next
-// phase. In this initial iteration, ACK returns to IDLE (slave phases
+// phase. In this initial iteration, ACK returns to IDLE (target phases
 // not yet wired).
 func TestWaitMasterAckAcceptsAck(t *testing.T) {
 	t.Parallel()
@@ -248,7 +306,7 @@ func TestWaitMasterAckAcceptsAck(t *testing.T) {
 		t.Fatalf("decision = %v, want DecisionForward", got)
 	}
 	if m.State() != StateIdle {
-		t.Fatalf("post-ACK state = %v, want StateIdle (slave phases not yet wired)", m.State())
+		t.Fatalf("post-ACK state = %v, want StateIdle (target phases not yet wired)", m.State())
 	}
 }
 
