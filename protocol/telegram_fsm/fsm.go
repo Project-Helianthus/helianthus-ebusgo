@@ -29,10 +29,16 @@
 //   - **NOT thread-safe**. Per v8 invariant I11, callers serialize
 //     access on a per-session goroutine.
 //
-// This first iteration (Step B2) covers the active write-out path:
-// IDLE, ARBITRATING, MASTER_HEADER, MASTER_DATA, MASTER_CRC,
-// WAIT_MASTER_ACK. Subsequent iterations will add SLAVE_* phases,
-// MASTER_RETX / SLAVE_RETX, PASSIVE_TRACKING, and WAIT_TERMINATOR_SYN.
+// Step B2 covers the full active-session path:
+//   - IDLE, ARBITRATING (event-driven entry)
+//   - MASTER_HEADER, MASTER_DATA, MASTER_CRC, WAIT_MASTER_ACK, MASTER_RETX
+//   - SLAVE_LENGTH, SLAVE_DATA, SLAVE_CRC, WAIT_SLAVE_ACK, SLAVE_RETX
+//   - WAIT_TERMINATOR_SYN (success terminator)
+//   - ABORTED (terminal fault)
+//
+// The PASSIVE_TRACKING composite state for foreign-initiator telegrams
+// lands in a subsequent commit (Step B2 part 3). Step B3 wires this
+// FSM into the proxy's adapter-facing read path.
 package telegram_fsm
 
 import "fmt"
@@ -43,8 +49,8 @@ import "fmt"
 // classification per v8 invariant I9 (classify under current phase,
 // then transition).
 //
-// v8's PASSIVE_TRACKING composite state and the SLAVE_* phases land
-// in subsequent commits.
+// v8's PASSIVE_TRACKING composite state for foreign-initiator
+// telegrams lands in a subsequent commit (Step B2 part 3).
 type State uint8
 
 const (
@@ -83,6 +89,48 @@ const (
 	// invariant I6 (retx cap = 1 per phase).
 	StateWaitMasterAck
 
+	// StateMasterRetx is the explicit retransmit state. Reached on
+	// the first NACK in WAIT_MASTER_ACK. The initiator re-sends the
+	// full frame (QQ ZZ PB SB NN DATA CRC). Per eBUS V1.3.1 / v8 I6
+	// at most one retransmit per phase; a second NACK abort.
+	StateMasterRetx
+
+	// StateSlaveLength consumes the target's response length byte
+	// (NN'). Per v6 §3 follows ACK from target in WAIT_MASTER_ACK.
+	// NN' > 16 violates eBUS V1.3.1; immediate abort.
+	StateSlaveLength
+
+	// StateSlaveData consumes NN' data bytes from the target.
+	StateSlaveData
+
+	// StateSlaveCRC consumes the target's response CRC byte. The
+	// initiator validates it; v8 §1.6 admin-logs CRC mismatch.
+	StateSlaveCRC
+
+	// StateWaitSlaveAck waits for the initiator's ACK/NACK of the
+	// target's response. ACK leads to WAIT_TERMINATOR_SYN; NACK with
+	// retx_count<1 leads to SLAVE_RETX; NACK with retx_count>=1 leads
+	// to ABORTED.
+	StateWaitSlaveAck
+
+	// StateSlaveRetx is the explicit retransmit state for the target
+	// half. Reached on the first NACK in WAIT_SLAVE_ACK. The target
+	// re-sends its response (NN' DATA CRC). Per v8 I6 at most one
+	// retransmit; a second NACK aborts.
+	StateSlaveRetx
+
+	// StateWaitTerminatorSyn waits for the final wire AUTO-SYN that
+	// marks telegram completion. Per v6 §3 reached on:
+	//   - MASTER_CRC with ZZ=0xFE (broadcast — no ACK/response).
+	//   - WAIT_MASTER_ACK with ACK + initiator-initiator frame
+	//     (PB=0xFE typically — no response phase).
+	//   - WAIT_SLAVE_ACK with ACK (response acknowledged).
+	// The terminator SYN itself IS a raw 0xAA byte; per v8 §4 it is
+	// forwarded (not dropped as AA-injection — the WAIT_TERMINATOR_SYN
+	// state is the one phase where raw 0xAA is legitimate). Per v8
+	// §3 the per-state timeout is 100 ms.
+	StateWaitTerminatorSyn
+
 	// StateAborted is a terminal state reached on protocol fault or
 	// NACK exhaustion. Per v8 §8 the FSM emits an admin event and
 	// returns to IDLE without injecting synthetic byte-stream events.
@@ -104,6 +152,20 @@ func (s State) String() string {
 		return "MASTER_CRC"
 	case StateWaitMasterAck:
 		return "WAIT_MASTER_ACK"
+	case StateMasterRetx:
+		return "MASTER_RETX"
+	case StateSlaveLength:
+		return "SLAVE_LENGTH"
+	case StateSlaveData:
+		return "SLAVE_DATA"
+	case StateSlaveCRC:
+		return "SLAVE_CRC"
+	case StateWaitSlaveAck:
+		return "WAIT_SLAVE_ACK"
+	case StateSlaveRetx:
+		return "SLAVE_RETX"
+	case StateWaitTerminatorSyn:
+		return "WAIT_TERMINATOR_SYN"
 	case StateAborted:
 		return "ABORTED"
 	default:
@@ -112,13 +174,10 @@ func (s State) String() string {
 }
 
 // IsTerminal reports whether the state is a terminal one (telegram
-// has either successfully completed or aborted). Terminal states
-// must transition back to IDLE before the next telegram begins.
-//
-// In this initial implementation only ABORTED is terminal; DONE
-// (success terminator) is represented by a transition back to IDLE
-// after WAIT_TERMINATOR_SYN sees its SYN (added in a later Step B2
-// iteration once WAIT_TERMINATOR_SYN is wired).
+// has either successfully completed or aborted). Successful
+// completion is represented by the FSM returning to StateIdle from
+// WAIT_TERMINATOR_SYN; ABORTED is the only state that explicitly
+// represents a terminated-with-fault telegram.
 func (s State) IsTerminal() bool {
 	return s == StateAborted
 }
@@ -187,19 +246,31 @@ type Machine struct {
 	masterNN byte
 
 	// masterBytesConsumed counts bytes consumed in the current phase.
-	// Reset on every phase transition. Used by MASTER_HEADER
-	// (counting to 5), MASTER_DATA (counting to masterNN), and
-	// MASTER_CRC (counting to 1).
+	// Reset on every phase transition. Used by MASTER_HEADER (counting
+	// to 5), MASTER_DATA (counting to masterNN), SLAVE_DATA (counting
+	// to slaveNN), and the single-byte phases (counting to 1). Name
+	// retained for diff stability across part 1 → part 2 of Step B2.
 	masterBytesConsumed byte
 
 	// masterDest is the ZZ byte from MASTER_HEADER. Determines
 	// post-MASTER_CRC routing: broadcast (0xFE) → terminator;
-	// otherwise → WAIT_MASTER_ACK.
+	// otherwise → WAIT_MASTER_ACK. Step B3 will add full
+	// address-class disambiguation via protocol.AddressClassOf to
+	// distinguish initiator-initiator (no response) from
+	// initiator-target (with response).
 	masterDest byte
 
 	// masterRetxCount counts initiator-frame retransmissions per v8
 	// invariant I6. Bounded at MaxRetxPerPhase = 1 per eBUS V1.3.1.
 	masterRetxCount byte
+
+	// slaveNN holds the target's response length (NN'), set in
+	// SLAVE_LENGTH and consumed by SLAVE_DATA.
+	slaveNN byte
+
+	// slaveRetxCount counts target-response retransmissions per v8
+	// invariant I6. Independent of masterRetxCount.
+	slaveRetxCount byte
 }
 
 // MaxRetxPerPhase is the eBUS V1.3.1 single-retransmit cap per phase
@@ -252,6 +323,8 @@ func (m *Machine) ResetToIdle() {
 	m.masterBytesConsumed = 0
 	m.masterDest = 0
 	m.masterRetxCount = 0
+	m.slaveNN = 0
+	m.slaveRetxCount = 0
 }
 
 // Feed consumes one decoded byte and returns the Decision for that
@@ -283,6 +356,20 @@ func (m *Machine) Feed(b byte, wasEscaped bool) Decision {
 		return m.feedMasterCRC(b, wasEscaped)
 	case StateWaitMasterAck:
 		return m.feedWaitMasterAck(b, wasEscaped)
+	case StateMasterRetx:
+		return m.feedMasterRetx(b, wasEscaped)
+	case StateSlaveLength:
+		return m.feedSlaveLength(b, wasEscaped)
+	case StateSlaveData:
+		return m.feedSlaveData(b, wasEscaped)
+	case StateSlaveCRC:
+		return m.feedSlaveCRC(b, wasEscaped)
+	case StateWaitSlaveAck:
+		return m.feedWaitSlaveAck(b, wasEscaped)
+	case StateSlaveRetx:
+		return m.feedSlaveRetx(b, wasEscaped)
+	case StateWaitTerminatorSyn:
+		return m.feedWaitTerminatorSyn(b, wasEscaped)
 	case StateAborted:
 		// Per v8 §8: after ABORTED, callers should ResetToIdle
 		// before feeding more bytes. Feeding while ABORTED is a
@@ -404,20 +491,15 @@ func (m *Machine) feedMasterData(b byte, wasEscaped bool) Decision {
 
 // feedMasterCRC handles the MASTER_CRC state. Consumes the single
 // CRC byte. Per v6 §3: if ZZ == 0xFE (broadcast) the FSM goes to
-// WAIT_TERMINATOR_SYN; otherwise to WAIT_MASTER_ACK. In this initial
-// Step B2 iteration WAIT_TERMINATOR_SYN is not yet wired, so the
-// broadcast path falls back to IDLE (caller is expected to forward
-// the post-CRC SYN as terminator) — this will be tightened in a
-// subsequent commit when WAIT_TERMINATOR_SYN is added.
+// WAIT_TERMINATOR_SYN; otherwise to WAIT_MASTER_ACK.
 func (m *Machine) feedMasterCRC(b byte, wasEscaped bool) Decision {
 	if b == SynByte && !wasEscaped {
 		return DecisionDropAaInjection
 	}
 	_ = b // CRC validation deferred to v8 §1.6 implementation.
 	if m.masterDest == BroadcastDestination {
-		// Broadcast: skip ACK phase, return to IDLE pending terminator.
-		// (WAIT_TERMINATOR_SYN added in a later commit.)
-		m.ResetToIdle()
+		// Broadcast: skip ACK phase, await final terminator SYN.
+		m.state = StateWaitTerminatorSyn
 	} else {
 		m.state = StateWaitMasterAck
 	}
@@ -425,31 +507,40 @@ func (m *Machine) feedMasterCRC(b byte, wasEscaped bool) Decision {
 }
 
 // feedWaitMasterAck handles the WAIT_MASTER_ACK state. Expects ACK
-// (0x00), NACK (0xFF), or AA-injection. Any other byte is a protocol
-// fault.
+// (0x00) → SLAVE_LENGTH, NACK (0xFF) → MASTER_RETX (if budget) or
+// ABORTED, AA-injection drop, anything else protocol fault.
 func (m *Machine) feedWaitMasterAck(b byte, wasEscaped bool) Decision {
 	if b == SynByte && !wasEscaped {
 		return DecisionDropAaInjection
 	}
 	switch b {
 	case ACKByte:
-		// ACK accepted. Next state in v6 §3 is SLAVE_LENGTH for
-		// initiator-target or WAIT_TERMINATOR_SYN for
-		// initiator-initiator. Target phases land in a follow-up
-		// commit; for now ABORT to IDLE so behavior is well-defined.
-		m.ResetToIdle()
+		// ACK from target → enter response phase. The current
+		// implementation routes EVERY non-broadcast frame to
+		// SLAVE_LENGTH (initiator-target assumption).
+		//
+		// INITIATOR-INITIATOR FRAMES ARE NOT YET SUPPORTED here:
+		// for i2i, v6 §3 says ACK → WAIT_TERMINATOR_SYN directly
+		// (no response phase). The current code would land in
+		// SLAVE_LENGTH and then receive the wire-real terminator
+		// SYN — which SLAVE_LENGTH drops as AA-injection per v8 §4,
+		// leaving the FSM stuck. Address-class routing via
+		// AddressClassOf is the fix and lands in Step B3.
+		// Until then, i2i frames must not be fed through this FSM;
+		// callers should detect i2i upstream and use an alternate
+		// path or skip FSM-mediated classification for those frames.
+		m.state = StateSlaveLength
+		m.masterBytesConsumed = 0
 		return DecisionForward
 	case NACKByte:
 		if m.masterRetxCount < MaxRetxPerPhase {
 			m.masterRetxCount++
-			// Per v6 §3, MASTER_RETX state resets header tracking
-			// and waits for the resend of QQ. In this initial
-			// iteration, restart MASTER_HEADER directly (MASTER_RETX
-			// state added in a follow-up commit).
-			m.state = StateMasterHeader
-			m.masterBytesConsumed = 0
-			m.masterNN = 0
-			m.masterDest = 0
+			// Per v6 §3, transition to MASTER_RETX. The initiator
+			// re-sends the full frame; the next bytes will form
+			// the resent QQ ZZ PB SB NN sequence. MASTER_RETX
+			// itself just immediately advances to MASTER_HEADER
+			// when the next byte arrives.
+			m.state = StateMasterRetx
 			return DecisionForward
 		}
 		// Retx budget exhausted (v8 invariant I6).
@@ -460,4 +551,154 @@ func (m *Machine) feedWaitMasterAck(b byte, wasEscaped bool) Decision {
 		m.state = StateAborted
 		return DecisionProtocolFault
 	}
+}
+
+// feedMasterRetx handles the MASTER_RETX state. Per v6 §3, the
+// initiator's NACK retransmit re-sends the entire initiator frame. The
+// first byte after the NACK is the resent QQ; transition to
+// MASTER_HEADER and consume the byte as header byte 1.
+//
+// Raw 0xAA in MASTER_RETX is AA-injection (same as ARBITRATING — no
+// real wire bytes should arrive in this micro-window).
+func (m *Machine) feedMasterRetx(b byte, wasEscaped bool) Decision {
+	if b == SynByte && !wasEscaped {
+		return DecisionDropAaInjection
+	}
+	// Reset header tracking for the retransmit.
+	m.state = StateMasterHeader
+	m.masterBytesConsumed = 1
+	m.masterNN = 0
+	m.masterDest = 0
+	_ = b // QQ recorded by header consumption; validation deferred.
+	return DecisionForward
+}
+
+// feedSlaveLength handles the SLAVE_LENGTH state. Consumes the
+// target's NN' response-length byte. Per v8 §1.7: NN' > 16 violates
+// eBUS V1.3.1; immediate abort. Raw 0xAA is AA-injection.
+//
+// Special case NN' == 0: skip SLAVE_DATA, go directly to SLAVE_CRC.
+// The frame is initiator-target with empty response payload (an
+// acknowledgement-only frame). Initiator-initiator frames are
+// NOT supported here yet (see feedWaitMasterAck comment); they
+// would never legitimately reach SLAVE_LENGTH once Step B3 lands
+// address-class routing.
+func (m *Machine) feedSlaveLength(b byte, wasEscaped bool) Decision {
+	if b == SynByte && !wasEscaped {
+		return DecisionDropAaInjection
+	}
+	if b > 16 {
+		// Per v8 §1.7 / I6: NN' > 16 is spec-illegal.
+		m.state = StateAborted
+		return DecisionProtocolFault
+	}
+	m.slaveNN = b
+	if b == 0 {
+		// Empty response — go straight to CRC.
+		m.state = StateSlaveCRC
+		m.masterBytesConsumed = 0
+	} else {
+		m.state = StateSlaveData
+		m.masterBytesConsumed = 0
+	}
+	return DecisionForward
+}
+
+// feedSlaveData handles the SLAVE_DATA state. Consumes slaveNN data
+// bytes then transitions to SLAVE_CRC. Raw 0xAA is AA-injection;
+// escape-decoded 0xAA is a legitimate payload byte.
+func (m *Machine) feedSlaveData(b byte, wasEscaped bool) Decision {
+	if b == SynByte && !wasEscaped {
+		return DecisionDropAaInjection
+	}
+	m.masterBytesConsumed++
+	if m.masterBytesConsumed >= m.slaveNN {
+		m.state = StateSlaveCRC
+		m.masterBytesConsumed = 0
+	}
+	return DecisionForward
+}
+
+// feedSlaveCRC handles the SLAVE_CRC state. Consumes the target's
+// CRC byte. Per v6 §3 always transitions to WAIT_SLAVE_ACK
+// (initiator must ACK/NACK the response). CRC validation is
+// deferred to v8 §1.6 admin-channel implementation.
+func (m *Machine) feedSlaveCRC(b byte, wasEscaped bool) Decision {
+	if b == SynByte && !wasEscaped {
+		return DecisionDropAaInjection
+	}
+	_ = b // CRC validation deferred to v8 §1.6.
+	m.state = StateWaitSlaveAck
+	return DecisionForward
+}
+
+// feedWaitSlaveAck handles the WAIT_SLAVE_ACK state. Expects ACK
+// (initiator accepts response) → WAIT_TERMINATOR_SYN; NACK
+// (initiator rejects) → SLAVE_RETX (if budget) or ABORTED.
+func (m *Machine) feedWaitSlaveAck(b byte, wasEscaped bool) Decision {
+	if b == SynByte && !wasEscaped {
+		return DecisionDropAaInjection
+	}
+	switch b {
+	case ACKByte:
+		m.state = StateWaitTerminatorSyn
+		return DecisionForward
+	case NACKByte:
+		if m.slaveRetxCount < MaxRetxPerPhase {
+			m.slaveRetxCount++
+			m.state = StateSlaveRetx
+			return DecisionForward
+		}
+		// Retx budget exhausted (v8 invariant I6).
+		m.state = StateAborted
+		return DecisionForward
+	default:
+		// Malformed during target-ACK wait.
+		m.state = StateAborted
+		return DecisionProtocolFault
+	}
+}
+
+// feedSlaveRetx handles the SLAVE_RETX state. Per v6 §3, on initiator
+// NACK the target re-sends its response (NN' DATA CRC). The first
+// byte after the NACK is the resent NN'; transition to SLAVE_LENGTH
+// and feed the byte through that handler.
+func (m *Machine) feedSlaveRetx(b byte, wasEscaped bool) Decision {
+	if b == SynByte && !wasEscaped {
+		return DecisionDropAaInjection
+	}
+	// Reset target-response tracking for the retransmit and consume this byte
+	// as the resent NN'. We mirror feedSlaveLength's logic inline so
+	// that the single Feed call's Decision is computed under
+	// SLAVE_RETX's branch (per v8 I9 classify-then-transition).
+	if b > 16 {
+		m.state = StateAborted
+		return DecisionProtocolFault
+	}
+	m.slaveNN = b
+	if b == 0 {
+		m.state = StateSlaveCRC
+	} else {
+		m.state = StateSlaveData
+	}
+	m.masterBytesConsumed = 0
+	return DecisionForward
+}
+
+// feedWaitTerminatorSyn handles the WAIT_TERMINATOR_SYN state. Per
+// v6 §3 the terminator IS a raw 0xAA byte (wasEscaped=false). Unlike
+// every other active phase, raw 0xAA here is FORWARDED (not dropped
+// as AA-injection) — it is the legitimate end-of-telegram marker.
+//
+// Anything else is a protocol fault. After the terminator, FSM
+// returns to IDLE (v8 §3 success exit).
+func (m *Machine) feedWaitTerminatorSyn(b byte, wasEscaped bool) Decision {
+	if b == SynByte && !wasEscaped {
+		// Terminator SYN observed. Return to IDLE.
+		m.ResetToIdle()
+		return DecisionForward
+	}
+	// Any non-SYN byte at this point is unexpected.
+	m.state = StateAborted
+	return DecisionProtocolFault
 }
