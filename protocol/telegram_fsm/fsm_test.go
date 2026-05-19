@@ -613,6 +613,87 @@ func TestSlavePhaseDropsRawSyn(t *testing.T) {
 	}
 }
 
+// TestMasterRetxDropsRawSyn verifies v8 §4: raw 0xAA in MASTER_RETX
+// is AA-injection (no real wire bytes should arrive between the NACK
+// and the resent QQ). Drop, stay.
+func TestMasterRetxDropsRawSyn(t *testing.T) {
+	t.Parallel()
+	m := setupAtWaitMasterAck(t)
+	m.Feed(NACKByte, false) // → MASTER_RETX
+	if m.State() != StateMasterRetx {
+		t.Fatalf("setup state = %v, want StateMasterRetx", m.State())
+	}
+	got := m.Feed(0xAA, false)
+	if got != DecisionDropAaInjection {
+		t.Fatalf("decision = %v, want DecisionDropAaInjection", got)
+	}
+	if m.State() != StateMasterRetx {
+		t.Fatalf("state = %v, want StateMasterRetx (no advance)", m.State())
+	}
+}
+
+// TestSlaveRetxDropsRawSyn verifies v8 §4: raw 0xAA in SLAVE_RETX
+// is AA-injection (no real wire bytes should arrive between the NACK
+// and the resent NN'). Drop, stay.
+func TestSlaveRetxDropsRawSyn(t *testing.T) {
+	t.Parallel()
+	m := setupAtWaitSlaveAck(t)
+	m.Feed(NACKByte, false) // → SLAVE_RETX
+	if m.State() != StateSlaveRetx {
+		t.Fatalf("setup state = %v, want StateSlaveRetx", m.State())
+	}
+	got := m.Feed(0xAA, false)
+	if got != DecisionDropAaInjection {
+		t.Fatalf("decision = %v, want DecisionDropAaInjection", got)
+	}
+	if m.State() != StateSlaveRetx {
+		t.Fatalf("state = %v, want StateSlaveRetx (no advance)", m.State())
+	}
+}
+
+// TestRetxCountersAreIndependent verifies masterRetxCount and
+// slaveRetxCount are independent per v8 I6. A master phase that
+// completed without NACK leaves the master budget at 0; a subsequent
+// slave NACK must still get SLAVE_RETX (not be blocked by some
+// fictitious shared cap). And vice-versa.
+func TestRetxCountersAreIndependent(t *testing.T) {
+	t.Parallel()
+	// Forward direction: master phase succeeds, slave NACK works.
+	m := setupAtWaitSlaveAck(t) // master ACKed cleanly, no master NACK
+	got := m.Feed(NACKByte, false)
+	if got != DecisionForward {
+		t.Fatalf("forward slave NACK decision = %v, want DecisionForward", got)
+	}
+	if m.State() != StateSlaveRetx {
+		t.Fatalf("forward slave NACK state = %v, want StateSlaveRetx (master budget must not block)", m.State())
+	}
+
+	// Inverse direction: master NACK + retry succeeds, slave still has
+	// its full budget. To exercise: do master NACK, complete the retx,
+	// then do a slave NACK and verify SLAVE_RETX (not abort).
+	m = setupAtWaitMasterAck(t)
+	m.Feed(NACKByte, false) // → MASTER_RETX
+	// Retx header (QQ ZZ PB SB NN=0)
+	for _, b := range []byte{0x10, 0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	m.Feed(0x42, false)    // CRC → WAIT_MASTER_ACK
+	m.Feed(ACKByte, false) // → SLAVE_LENGTH
+	m.Feed(0x00, false)    // NN'=0 → SLAVE_CRC
+	m.Feed(0x42, false)    // CRC → WAIT_SLAVE_ACK
+	if m.State() != StateWaitSlaveAck {
+		t.Fatalf("setup post-master-retx state = %v, want StateWaitSlaveAck", m.State())
+	}
+	// Now slave NACK — must enter SLAVE_RETX, not ABORT.
+	got = m.Feed(NACKByte, false)
+	if got != DecisionForward {
+		t.Fatalf("inverse slave NACK decision = %v, want DecisionForward", got)
+	}
+	if m.State() != StateSlaveRetx {
+		t.Fatalf("inverse slave NACK state = %v, want StateSlaveRetx (master retx must not exhaust slave budget)", m.State())
+	}
+}
+
 // TestWaitSlaveAckAcceptsAck verifies ACK → WAIT_TERMINATOR_SYN.
 func TestWaitSlaveAckAcceptsAck(t *testing.T) {
 	t.Parallel()

@@ -515,13 +515,20 @@ func (m *Machine) feedWaitMasterAck(b byte, wasEscaped bool) Decision {
 	}
 	switch b {
 	case ACKByte:
-		// ACK from target → enter response phase. The initial
-		// implementation assumes any non-broadcast frame has a
-		// target response (initiator-target). Step B3 will wire
-		// AddressClassOf to distinguish initiator-initiator (no
-		// response → WAIT_TERMINATOR_SYN). For now, route to
-		// SLAVE_LENGTH; an initiator-initiator caller will reach
-		// the terminator after a SLAVE_LENGTH=0 short-circuit.
+		// ACK from target → enter response phase. The current
+		// implementation routes EVERY non-broadcast frame to
+		// SLAVE_LENGTH (initiator-target assumption).
+		//
+		// INITIATOR-INITIATOR FRAMES ARE NOT YET SUPPORTED here:
+		// for i2i, v6 §3 says ACK → WAIT_TERMINATOR_SYN directly
+		// (no response phase). The current code would land in
+		// SLAVE_LENGTH and then receive the wire-real terminator
+		// SYN — which SLAVE_LENGTH drops as AA-injection per v8 §4,
+		// leaving the FSM stuck. Address-class routing via
+		// AddressClassOf is the fix and lands in Step B3.
+		// Until then, i2i frames must not be fed through this FSM;
+		// callers should detect i2i upstream and use an alternate
+		// path or skip FSM-mediated classification for those frames.
 		m.state = StateSlaveLength
 		m.masterBytesConsumed = 0
 		return DecisionForward
@@ -572,8 +579,10 @@ func (m *Machine) feedMasterRetx(b byte, wasEscaped bool) Decision {
 //
 // Special case NN' == 0: skip SLAVE_DATA, go directly to SLAVE_CRC.
 // The frame is initiator-target with empty response payload (an
-// acknowledgement-only or initiator-initiator equivalent depending
-// on the caller's address-class interpretation).
+// acknowledgement-only frame). Initiator-initiator frames are
+// NOT supported here yet (see feedWaitMasterAck comment); they
+// would never legitimately reach SLAVE_LENGTH once Step B3 lands
+// address-class routing.
 func (m *Machine) feedSlaveLength(b byte, wasEscaped bool) Decision {
 	if b == SynByte && !wasEscaped {
 		return DecisionDropAaInjection
