@@ -288,6 +288,40 @@ func (d *EbusEscapeDecoder) feedPending(raw byte, now time.Time) (byte, bool, bo
 // still applies). Use Feed directly when you need the wall-clock cap
 // and admin-channel observability.
 //
+// DEPRECATED RECOMMENDATION: new callers should use Feed(b, now)
+// instead of Push. Feed is the v8 entry point — it accepts an
+// explicit monotonic-clock observation time (per v8 invariant I0),
+// enforces the 32 ms wall-clock cap on the pending state, and
+// surfaces AdminEvent diagnostics that the transport layer routes
+// to dedicated counters (EscapePendingTimeoutTotal,
+// EscapeRecoveryTotal, EscapeBudgetExhaustedTotal,
+// EscapeAaAbsorbedTotal). Push exists ONLY to preserve binary
+// compatibility for legacy callers (the existing F-23 contract +
+// the existing transport-level integration tests) and DOES NOT
+// emit the wall-clock cap signal even when a real stale-pair
+// scenario occurs.
+//
+// V8 BEHAVIOR CHANGES vs the pre-v8 Push:
+//
+//   - 0xA9 followed by 0xAA — pre-v8: returned err (invalid pair).
+//     Post-v8: 0xAA is silently absorbed as the first AA-injection
+//     byte; the decoder remains in pending state, ok=false, err=nil.
+//     Up to MaxAaAbsorptionsPerEscapePair absorptions are tolerated
+//     before a real completion (0x00/0x01) or budget-exhaustion.
+//   - 0xA9 followed by ≥9 consecutive 0xAA — pre-v8 had no concept
+//     of this; the first 0xAA after the lead errored.
+//     Post-v8: the 9th 0xAA exhausts the budget; Push returns err
+//     (budget-exhausted) and the decoder drops everything.
+//   - 0xA9 followed by any other invalid byte (e.g. 0xFF) — pre-v8
+//     and post-v8 both return err and drop the pair.
+//
+// External callers that depended on "0xA9 0xAA → err" as a
+// dropped-byte signal must migrate to Feed and inspect the admin
+// channel directly. There are no production callers of Push left
+// in helianthus-ebusgo after this PR (ENHTransport now uses Feed);
+// the method survives for legacy tests + any future external
+// linkage that might pin Push's signature.
+//
 // Return values:
 //
 //	decoded     — the logical byte to emit (valid only when ok=true)
