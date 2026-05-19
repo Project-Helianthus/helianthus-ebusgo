@@ -1042,6 +1042,79 @@ func TestPassiveTrackingNNAbove16Aborts(t *testing.T) {
 	}
 }
 
+// TestPassiveAbortExposesStateAbortedNotComposite is the regression
+// test for Codex PR #163 BLOCKER: terminal states (StateAborted) must
+// NOT be masked by the PASSIVE_TRACKING composite. Otherwise callers
+// using `m.State().IsTerminal()` to detect telegram-finished-with-fault
+// would miss passive-mode aborts (e.g., NACK exhaustion).
+//
+// Scenario: passive WAIT_MASTER_ACK, NACK with retx_count already at
+// max → ABORTED. State() must return StateAborted directly, NOT
+// StatePassiveTracking. IsTerminal() must report true.
+func TestPassiveAbortExposesStateAbortedNotComposite(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking()
+	// Header: ZZ PB SB NN=0
+	for _, b := range []byte{0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	m.Feed(0x42, false) // CRC → WAIT_MASTER_ACK
+	// First NACK → MASTER_RETX
+	m.Feed(NACKByte, false)
+	// Resent QQ ZZ PB SB NN=0
+	for _, b := range []byte{0x10, 0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	m.Feed(0x42, false) // CRC → WAIT_MASTER_ACK (post retx)
+	if m.InternalState() != StateWaitMasterAck {
+		t.Fatalf("setup InternalState = %v, want StateWaitMasterAck", m.InternalState())
+	}
+	// Second NACK → ABORTED. With the BUGGY masking, State() would
+	// have returned StatePassiveTracking here, missing the abort.
+	got := m.Feed(NACKByte, false)
+	if got != DecisionForward {
+		t.Fatalf("second NACK decision = %v, want DecisionForward", got)
+	}
+	if m.InternalState() != StateAborted {
+		t.Fatalf("InternalState after NACK exhaustion = %v, want StateAborted", m.InternalState())
+	}
+	// THE CRITICAL ASSERTION: State() must surface the terminal.
+	if m.State() != StateAborted {
+		t.Fatalf("State() after passive NACK exhaustion = %v, want StateAborted (terminal must not be masked by composite)", m.State())
+	}
+	if !m.State().IsTerminal() {
+		t.Fatalf("State().IsTerminal() = false after abort, want true (caller-side termination contract)")
+	}
+}
+
+// TestPassiveProtocolFaultExposesStateAbortedNotComposite covers the
+// other terminal entry path: malformed byte in WAIT_MASTER_ACK during
+// passive tracking → ABORTED. State() must also expose the terminal.
+func TestPassiveProtocolFaultExposesStateAbortedNotComposite(t *testing.T) {
+	t.Parallel()
+	m := New()
+	m.EnterPassiveTracking()
+	for _, b := range []byte{0x08, 0xB5, 0x09, 0x00} {
+		m.Feed(b, false)
+	}
+	m.Feed(0x42, false) // CRC → WAIT_MASTER_ACK
+	// Malformed byte (not ACK/NACK/AA) → PROTOCOL_FAULT + ABORTED.
+	got := m.Feed(0x42, false)
+	if got != DecisionProtocolFault {
+		t.Fatalf("decision = %v, want DecisionProtocolFault", got)
+	}
+	if m.InternalState() != StateAborted {
+		t.Fatalf("InternalState = %v, want StateAborted", m.InternalState())
+	}
+	if m.State() != StateAborted {
+		t.Fatalf("State() = %v, want StateAborted (terminal not masked)", m.State())
+	}
+	if !m.State().IsTerminal() {
+		t.Fatalf("IsTerminal() = false, want true")
+	}
+}
+
 // TestStatePassiveTrackingStringLabel verifies the String() method.
 func TestStatePassiveTrackingStringLabel(t *testing.T) {
 	t.Parallel()

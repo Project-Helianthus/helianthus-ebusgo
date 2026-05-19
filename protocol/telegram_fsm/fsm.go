@@ -29,16 +29,16 @@
 //   - **NOT thread-safe**. Per v8 invariant I11, callers serialize
 //     access on a per-session goroutine.
 //
-// Step B2 covers the full active-session path:
-//   - IDLE, ARBITRATING (event-driven entry)
+// Step B2 covers the full active-session path AND the PASSIVE_TRACKING
+// composite state for foreign-initiator telegrams:
+//   - IDLE, ARBITRATING (event-driven entry via EnterArbitrating)
 //   - MASTER_HEADER, MASTER_DATA, MASTER_CRC, WAIT_MASTER_ACK, MASTER_RETX
 //   - SLAVE_LENGTH, SLAVE_DATA, SLAVE_CRC, WAIT_SLAVE_ACK, SLAVE_RETX
 //   - WAIT_TERMINATOR_SYN (success terminator)
 //   - ABORTED (terminal fault)
+//   - PASSIVE_TRACKING (composite, entered via EnterPassiveTracking)
 //
-// The PASSIVE_TRACKING composite state for foreign-initiator telegrams
-// lands in a subsequent commit (Step B2 part 3). Step B3 wires this
-// FSM into the proxy's adapter-facing read path.
+// Step B3 wires this FSM into the proxy's adapter-facing read path.
 package telegram_fsm
 
 import "fmt"
@@ -49,8 +49,8 @@ import "fmt"
 // classification per v8 invariant I9 (classify under current phase,
 // then transition).
 //
-// v8's PASSIVE_TRACKING composite state for foreign-initiator
-// telegrams lands in a subsequent commit (Step B2 part 3).
+// StatePassiveTracking is the v8 §3.1 composite state used for
+// foreign-initiator telegrams; see the type docs below.
 type State uint8
 
 const (
@@ -339,15 +339,25 @@ func New() *Machine {
 
 // State returns the Machine's current state. When the Machine is
 // tracking a foreign-initiator telegram (after EnterPassiveTracking),
-// State() returns StatePassiveTracking for any non-IDLE internal
-// sub-phase — this is the user-facing composite state per v8 §3.1.
+// State() returns StatePassiveTracking for any non-IDLE non-terminal
+// internal sub-phase — this is the user-facing composite state per
+// v8 §3.1.
+//
+// IMPORTANT: terminal states (StateAborted) are NEVER masked by the
+// composite — they pass through directly. This preserves the
+// IsTerminal()-based termination contract for callers that detect
+// "telegram finished with fault" via `m.State().IsTerminal()`.
+// Without this carve-out, passive-mode NACK exhaustion would surface
+// as StatePassiveTracking (not terminal) and the caller would miss
+// the abort signal.
+//
 // To inspect the internal sub-phase during passive tracking (e.g.,
 // for testing), use InternalState().
 //
 // Once the FSM exits passive tracking (terminator SYN observed →
 // IDLE, or RESETTED), State() returns the actual state again.
 func (m *Machine) State() State {
-	if m.passive && m.state != StateIdle {
+	if m.passive && m.state != StateIdle && !m.state.IsTerminal() {
 		return StatePassiveTracking
 	}
 	return m.state
