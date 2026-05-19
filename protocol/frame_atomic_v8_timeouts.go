@@ -83,7 +83,7 @@ var FrameAtomicV8 = struct {
 	// per phase. Per v8 §3 and I6, master_retx_count and
 	// slave_retx_count are independently bounded by this value. The
 	// existing 2-attempt inner loop in sendInitiatorTelegram (see
-	// bus.go ~line 714) already enforces this for the master phase.
+	// bus.go ~line 714) already enforces this for the initiator phase.
 	MaxNackRetxPerPhase int
 }{
 	InterByte:                     10 * time.Millisecond,
