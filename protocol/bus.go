@@ -1202,6 +1202,28 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// legitimate arbitration collisions where we wrote a non-SYN and
 	// the bus is idle (a real defect, not buffering interference).
 	if flagged != nil && !expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && !echoWasEscaped {
+		// ============================================================
+		// v8 LEGACY-FALLBACK BLOCK (Step D label, retained per
+		// frame-atomic-v8 I8) — round-9 AUTO-SYN absorb at the
+		// payload-0xAA echo site.
+		//
+		// SCOPE: this block is the canonical wire-AUTO-SYN filter for
+		// DIRECT-ADAPTER MODE (gateway → adapter, no proxy mediating
+		// the byte stream). In PROXY-MEDIATED v8-ENFORCE MODE the
+		// adaptermux classifier in the gateway filters AUTO-SYNs
+		// upstream and this code path stays cold (counter rate == 0).
+		// Both deployment modes share the same source file; the
+		// reconciliation lives in the Prometheus alert
+		// HelianthusRound9FiredUnderProxy, which AND-s the
+		// round9AbsorbEntered counter with the proxy's classifier_mode
+		// label.
+		//
+		// RETENTION CONTRACT: this code is NOT deprecated and NOT
+		// scheduled for removal. v8 §1.8 / I8 explicitly preserves
+		// the round-9 absorb mechanism for the direct-adapter
+		// deployment topology.
+		// ============================================================
+		//
 		// Phase 1 Step B4 (frame-atomic-v8 §1.8): the round-9 absorb
 		// predicate just fired. The neutrally-named round9AbsorbEntered
 		// counter increments here, gated on the runtime phase predicate
@@ -1212,8 +1234,6 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 		// state (this code has zero proxy-awareness — the
 		// proxy-mediated interpretation lives in the Prometheus alert
 		// HelianthusRound9FiredUnderProxy, not in the counter name).
-		// Round-9 absorb itself is RETAINED per v8 I8 as the legacy
-		// fallback for direct-adapter mode.
 		if b.inSendRawWithEchoActiveEchoWait() {
 			b.round9AbsorbEntered.Add(1)
 		}
@@ -1490,6 +1510,17 @@ func (b *Bus) ObserverFaultSnapshot() ObserverFaultSnapshot {
 // whose result was an unexpected wire SYN (WasEscaped=false) and was
 // dropped per the ENS-transmit-token invariant. Surface as a Prometheus
 // gauge/counter for observability.
+//
+// v8 LEGACY-FALLBACK label (Step D, retained per frame-atomic-v8 I8):
+// the round-9 absorb mechanism is intentionally retained as the legacy
+// fallback for direct-adapter mode (no adaptermux proxy mediating wire
+// AUTO-SYNs). Under v8 enforce mode (classifier filtering on the gateway
+// side) the proxy filters AUTO-SYNs before they reach this code path —
+// expected steady-state increment rate is zero. Non-zero growth in
+// enforce mode is a v8 invariant violation surfaced via the
+// HelianthusRound9FiredUnderProxy alert. The code is NOT marked
+// deprecated and is NOT scheduled for removal: it remains the canonical
+// filter for direct-adapter deployments.
 func (b *Bus) PayloadAaAutoSynAbsorbed() uint64 {
 	return b.payloadAaAutoSynAbsorbed.Load()
 }
@@ -1500,6 +1531,11 @@ func (b *Bus) PayloadAaAutoSynAbsorbed() uint64 {
 // transaction succeeded without emitting an echo_mismatch or returning
 // ErrBusCollision. The ratio Recovered / (Absorbed events) approximates
 // the round-9 retry-rate reduction.
+//
+// v8 LEGACY-FALLBACK label (Step D, retained per frame-atomic-v8 I8):
+// see PayloadAaAutoSynAbsorbed docstring. The recovery counter measures
+// effectiveness of the legacy-fallback drain — useful in direct-adapter
+// mode, zero in proxy-mediated v8-enforce mode.
 func (b *Bus) PayloadAaAutoSynRecovered() uint64 {
 	return b.payloadAaAutoSynRecovered.Load()
 }
@@ -1510,6 +1546,14 @@ func (b *Bus) PayloadAaAutoSynRecovered() uint64 {
 // real payload echo. These fall through to the original payload-0xAA
 // echo_mismatch + ErrBusCollision retry path, preserving the pre-round-9
 // behavior for adapter-genuinely-stuck cases.
+//
+// v8 LEGACY-FALLBACK label (Step D, retained per frame-atomic-v8 I8):
+// see PayloadAaAutoSynAbsorbed docstring. The drain-exhausted counter
+// signals "absorb cap reached without recovery" — i.e. the
+// legacy-fallback couldn't rescue the transaction and the pre-round-9
+// echo-mismatch path is taking over. In proxy-mediated v8-enforce mode
+// this stays at zero because the upstream proxy filters wire AUTO-SYNs
+// before they reach this code.
 func (b *Bus) PayloadAaAutoSynDrainExhausted() uint64 {
 	return b.payloadAaAutoSynDrainExhausted.Load()
 }
@@ -1537,10 +1581,19 @@ func (b *Bus) inSendRawWithEchoActiveEchoWait() bool {
 // this counter with the adaptermux classifier-mode label
 // (HelianthusRound9FiredUnderProxy — see helianthus-docs-ebus →
 // deployment/prometheus-alerts.md) is what makes the round-9-under-
-// proxy interpretation. Per frame-atomic-v8 I8 the round-9 absorb
-// code itself is RETAINED as the legacy fallback for direct-adapter
-// mode; expected steady-state under classifier_mode == enforce is
-// counter rate == 0.
+// proxy interpretation.
+//
+// v8 LEGACY-FALLBACK label (Step D, retained per frame-atomic-v8 I8):
+// the round-9 absorb code itself is RETAINED as the legacy fallback
+// for DIRECT-ADAPTER MODE (no adaptermux proxy in the byte path).
+// In that deployment, round-9 is the canonical filter — operators
+// expect non-zero counter growth under bus contention. In
+// PROXY-MEDIATED v8-ENFORCE MODE the upstream proxy filters AUTO-SYNs
+// before they reach this code, so the steady-state counter rate is 0.
+// The two interpretations are reconciled at the Prometheus alert
+// layer, not in this counter. The code is NOT marked deprecated and
+// is NOT scheduled for removal — it stays as the production filter
+// for direct-adapter deployments.
 //
 // Suggested Prometheus name: helianthus_round9_absorb_entered_total.
 // Pair with PayloadAaAutoSynAbsorbed / PayloadAaAutoSynRecovered /
