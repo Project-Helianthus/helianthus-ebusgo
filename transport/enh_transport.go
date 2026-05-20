@@ -193,7 +193,54 @@ type ENHTransport struct {
 	// byte. Exposed via DecodeFaultTotal() for transport-level
 	// observability. Atomic because external readers (gateway metrics
 	// snapshot) read it without holding readMu.
+	//
+	// Phase 1 Step B1 (frame-atomic-visibility v8 §1.3 / §5,
+	// invariant I4) — the counter is now incremented by BOTH legacy
+	// "0xA9 + invalid second byte" faults (AdminEventEscapeRecovery)
+	// AND v8 AA-injection budget exhaustion
+	// (AdminEventEscapeBudgetExhausted). The latter is a new fault
+	// mode introduced by v8's bounded AA absorption; semantically
+	// both indicate "the escape decoder gave up on a pending pair",
+	// so they share this single fault counter. The decomposed
+	// counters below (escapeBudgetExhaustedTotal,
+	// escapeRecoveryTotal) give granular visibility for operators
+	// who want to attribute decodeFaultTotal to a specific cause.
 	decodeFaultTotal atomic.Uint64
+
+	// escapePendingTimeoutTotal counts wire 0xA9 leads that spent
+	// more than EscapePendingTimeout (32 ms) in pending state without
+	// resolution, per v8 §1.3. Non-fatal: the decoder drops the
+	// orphaned 0xA9 plus any absorbed AAs and re-processes the
+	// current byte in NORMAL state to preserve data for next-byte
+	// resync. Distinct from decodeFaultTotal because timeout is a
+	// different failure mode (wire/adapter pathologically slow vs.
+	// malformed escape pair). Exposed via EscapePendingTimeoutTotal()
+	// for transport-level observability.
+	escapePendingTimeoutTotal atomic.Uint64
+
+	// escapeRecoveryTotal counts AdminEventEscapeRecovery emissions —
+	// a wire 0xA9 followed by a byte that is neither a valid
+	// completion (0x00 / 0x01) nor an absorbable 0xAA-within-budget.
+	// The decoder drops the 0xA9, absorbed AAs, AND the offending
+	// byte. Subset of decodeFaultTotal; exposed for granular
+	// operator visibility.
+	escapeRecoveryTotal atomic.Uint64
+
+	// escapeBudgetExhaustedTotal counts AdminEventEscapeBudgetExhausted
+	// emissions — a wire 0xA9 followed by more than
+	// MaxAaAbsorptionsPerEscapePair (8) consecutive 0xAA bytes. The
+	// decoder drops the 0xA9, all 8 absorbed AAs, and the
+	// over-budget AA. Subset of decodeFaultTotal; exposed for
+	// granular operator visibility.
+	escapeBudgetExhaustedTotal atomic.Uint64
+
+	// escapeAaAbsorbedTotal counts the cumulative number of 0xAA
+	// bytes the decoder absorbed mid-escape-pair across all
+	// transactions. Each absorption is a successful in-budget event
+	// (NOT a fault). Tracks the AA-injection load the v8 absorber is
+	// catching. Note: this is per-byte, not per-pair — a single pair
+	// that absorbed 3 AAs increments this counter by 3.
+	escapeAaAbsorbedTotal atomic.Uint64
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -1331,13 +1378,12 @@ func (t *ENHTransport) resetPendingEscapeBeforeEmissionLocked() {
 	}
 }
 
-// feedEscapeDecoderLocked advances the F-23 eBUS escape decoder by one
+// feedEscapeDecoderLocked advances the eBUS escape decoder by one
 // wire byte WITHOUT making an emission decision. Returns the decoded
-// logical byte and its WasEscaped flag when a logical symbol is ready
-// (ok=true), or ok=false while accumulating an escape pair / on
-// invalid-pair fault. Invalid pairs increment decodeFaultTotal and
-// clear the decoder's internal state so subsequent calls resume
-// cleanly. Caller must hold readMu.
+// logical byte and its WasEscaped flag when a logical symbol is
+// ready (ok=true), or ok=false while accumulating an escape pair,
+// absorbing AA-injection mid-pair, or dropping a fault. Caller must
+// hold readMu.
 //
 // This primitive MUST be called on every wire byte the transport
 // observes, including bytes that are dropped by application-layer
@@ -1346,17 +1392,113 @@ func (t *ENHTransport) resetPendingEscapeBeforeEmissionLocked() {
 // 0xA9 lead stranded, and the next non-dropped byte would falsely
 // complete the stale pair (Codex bot P2 on PR-1: discarded-byte
 // discontinuity preserving pending escape).
+//
+// Phase 1 Step B1 (frame-atomic-visibility v8 §1.3 / §5, invariant
+// I4): the underlying decoder is now the v8 AA-aware version with
+// bounded AA-injection absorption (up to
+// MaxAaAbsorptionsPerEscapePair) and a wall-clock cap on the pending
+// state (EscapePendingTimeout). The StreamEvent contract is
+// preserved — callers see exactly the same `(decoded, ok,
+// wasEscaped)` triple. The v8 additions are surfaced via
+// transport-level admin counters:
+//
+//   - escapeAaAbsorbedTotal — every absorbed mid-pair 0xAA
+//     increments this (per-byte).
+//   - escapePendingTimeoutTotal — every 32 ms wall-clock cap hit.
+//     The orphaned 0xA9 is dropped; the current byte is
+//     re-processed in NORMAL state and emitted if it produces a
+//     decoded byte (data-preserving recovery).
+//   - escapeRecoveryTotal — 0xA9 followed by a byte that is neither
+//     0x00/0x01 nor an absorbable 0xAA. The 0xA9, absorbed AAs,
+//     AND the offending byte are all dropped. Increments
+//     decodeFaultTotal too (subset).
+//   - escapeBudgetExhaustedTotal — over-budget AA after 8
+//     absorptions. The 0xA9, 8 absorbed AAs, AND the over-budget
+//     AA are all dropped. Increments decodeFaultTotal too (subset).
 func (t *ENHTransport) feedEscapeDecoderLocked(raw byte) (decoded byte, ok bool, wasEscaped bool) {
-	var err error
-	decoded, ok, wasEscaped, err = t.escDecoder.Push(raw)
-	if err != nil {
-		// Invalid escape pair: increment the fault counter and drop.
-		// The decoder cleared its in-flight state before returning, so
-		// subsequent bytes resume cleanly.
-		t.decodeFaultTotal.Add(1)
+	// Snapshot the in-budget AA count BEFORE Feed so we can
+	// distinguish "AA absorbed this call" from "AA absorbed earlier".
+	absorbedBefore := t.escDecoder.AbsorbedCount()
+
+	var admin AdminEvent
+	decoded, ok, wasEscaped, admin = t.escDecoder.Feed(raw, time.Now())
+
+	// Account for any AA absorbed by this specific Feed call. The
+	// absorber increments AbsorbedCount when a 0xAA arrives mid-pair
+	// within budget, and resets to 0 on any exit from pending. So
+	// the per-call delta is +1 if we absorbed; otherwise 0 or
+	// negative-on-exit (which we map to 0).
+	if delta := t.escDecoder.AbsorbedCount() - absorbedBefore; delta > 0 {
+		t.escapeAaAbsorbedTotal.Add(uint64(delta))
+	}
+
+	if applyEscapeAdminEvent(
+		admin,
+		&t.escapePendingTimeoutTotal,
+		&t.escapeRecoveryTotal,
+		&t.escapeBudgetExhaustedTotal,
+		&t.decodeFaultTotal,
+	) {
+		// Drop-everything fault path (Recovery or BudgetExhausted) —
+		// emission suppressed regardless of what the decoder returned
+		// for this byte. The decoder cleared its in-flight state
+		// before returning, so subsequent bytes resume cleanly.
 		return 0, false, false
 	}
+	// AdminEventNone or AdminEventEscapePendingTimeout:
+	// data-preserving paths. For Timeout, the current byte was
+	// re-processed in NORMAL state by the decoder and may have
+	// produced a decoded byte (`decoded`, `ok`, `wasEscaped` reflect
+	// that re-processing); the counter was already bumped inside
+	// applyEscapeAdminEvent.
 	return decoded, ok, wasEscaped
+}
+
+// applyEscapeAdminEvent routes a v8 escape-decoder admin event to
+// the four transport-level counters and reports whether the caller
+// must drop the current byte's emission. Extracted from
+// feedEscapeDecoderLocked so the routing logic is directly unit-
+// testable without standing up a full ENHTransport (per Codex
+// round-3 review on PR #165 — "visually parallel wiring is not
+// executable coverage").
+//
+// Returns dropEmission=true when admin.Kind indicates a drop-
+// everything fault (AdminEventEscapeRecovery or
+// AdminEventEscapeBudgetExhausted). Returns false for AdminEventNone
+// (no event) and AdminEventEscapePendingTimeout (data-preserving —
+// the current byte was re-processed in NORMAL state by the decoder
+// and the caller should emit whatever the decoder returned).
+//
+// The function is allocation-free and operates only on the four
+// atomic counter pointers passed in; it does not depend on any
+// ENHTransport state, making it pure-function testable.
+func applyEscapeAdminEvent(
+	admin AdminEvent,
+	pendingTimeoutCtr, recoveryCtr, budgetExhaustedCtr, decodeFaultCtr *atomic.Uint64,
+) (dropEmission bool) {
+	switch admin.Kind {
+	case AdminEventEscapePendingTimeout:
+		// 32 ms cap hit. The decoder already re-processed the
+		// current byte in NORMAL state; the caller emits whatever
+		// the decoder returned. Surface the timeout via its own
+		// counter — NOT a fault (decodeFaultCtr stays put).
+		pendingTimeoutCtr.Add(1)
+		return false
+	case AdminEventEscapeRecovery:
+		// Invalid second byte. Drop the 0xA9, any absorbed AAs, AND
+		// the offending byte. Fault.
+		recoveryCtr.Add(1)
+		decodeFaultCtr.Add(1)
+		return true
+	case AdminEventEscapeBudgetExhausted:
+		// AA-injection budget exhausted. Drop the 0xA9, the 8
+		// absorbed AAs, AND the over-budget AA. Fault.
+		budgetExhaustedCtr.Add(1)
+		decodeFaultCtr.Add(1)
+		return true
+	}
+	// AdminEventNone — no admin event, nothing to do.
+	return false
 }
 
 // appendDecodedByteLocked emits a fully-decoded logical byte to
@@ -1394,14 +1536,73 @@ func (t *ENHTransport) appendWireSynLocked() {
 	}
 }
 
-// DecodeFaultTotal returns the cumulative count of invalid eBUS escape
-// pairs observed on the wire (a 0xA9 lead followed by a byte other
-// than 0x00 or 0x01). Non-fatal — the decoder drops the offending
-// pair and resumes on the next byte. Exposed for transport-level
-// observability surfaces (gateway metrics snapshot, admin endpoints).
-// Safe to call without holding readMu.
+// DecodeFaultTotal returns the cumulative count of invalid eBUS
+// escape sequences observed on the wire. Non-fatal — the decoder
+// drops the offending pair (and any absorbed AAs) and resumes on
+// the next byte. Exposed for transport-level observability surfaces
+// (gateway metrics snapshot, admin endpoints). Safe to call without
+// holding readMu.
+//
+// Phase 1 Step B1 (frame-atomic-visibility v8) widened the
+// definition to include BOTH:
+//
+//   - "0xA9 + invalid second byte" (the legacy fault, now
+//     AdminEventEscapeRecovery) — see EscapeRecoveryTotal.
+//   - "0xA9 + 8 AAs + over-budget AA" (a new v8 fault,
+//     AdminEventEscapeBudgetExhausted) — see
+//     EscapeBudgetExhaustedTotal.
+//
+// The 32 ms wall-clock timeout (AdminEventEscapePendingTimeout) is
+// NOT counted here because it is a data-preserving recovery (the
+// current byte is re-processed in NORMAL state and may emit
+// normally). See EscapePendingTimeoutTotal for that counter.
 func (t *ENHTransport) DecodeFaultTotal() uint64 {
 	return t.decodeFaultTotal.Load()
+}
+
+// EscapePendingTimeoutTotal returns the cumulative count of v8 32 ms
+// wall-clock cap hits on the escape decoder's pending state. Per v8
+// §1.3: beyond 32 ms the wire is considered genuinely broken, so the
+// decoder drops the orphaned 0xA9 plus any absorbed AAs and
+// re-processes the current byte in NORMAL state to preserve data
+// for next-byte resync. Non-fatal, data-preserving — distinct from
+// DecodeFaultTotal which counts drop-everything faults. Safe to call
+// without holding readMu.
+func (t *ENHTransport) EscapePendingTimeoutTotal() uint64 {
+	return t.escapePendingTimeoutTotal.Load()
+}
+
+// EscapeRecoveryTotal returns the cumulative count of v8
+// AdminEventEscapeRecovery events: a 0xA9 lead followed by a byte
+// that is neither 0x00/0x01 nor an absorbable 0xAA-within-budget.
+// Subset of DecodeFaultTotal. Exposed for granular operator
+// visibility into the fault mix (legacy invalid-pair vs. v8
+// budget-exhausted). Safe to call without holding readMu.
+func (t *ENHTransport) EscapeRecoveryTotal() uint64 {
+	return t.escapeRecoveryTotal.Load()
+}
+
+// EscapeBudgetExhaustedTotal returns the cumulative count of v8
+// AdminEventEscapeBudgetExhausted events: a 0xA9 lead followed by
+// more than MaxAaAbsorptionsPerEscapePair (8) consecutive 0xAA
+// bytes. Subset of DecodeFaultTotal. Exposed for granular operator
+// visibility — a non-zero rate here suggests adapter buffer
+// pathology (sustained AA-injection mid-escape) and may correlate
+// with round-9 absorb fires. Safe to call without holding readMu.
+func (t *ENHTransport) EscapeBudgetExhaustedTotal() uint64 {
+	return t.escapeBudgetExhaustedTotal.Load()
+}
+
+// EscapeAaAbsorbedTotal returns the cumulative number of 0xAA bytes
+// absorbed mid-escape-pair across all transactions. Each absorption
+// is a successful in-budget event (NOT a fault). Per-byte, not
+// per-pair — a single pair that absorbed 3 AAs increments this
+// counter by 3. Useful for measuring the AA-injection load the v8
+// absorber is catching; pair with EscapeBudgetExhaustedTotal to
+// detect a budget that is too small. Safe to call without holding
+// readMu.
+func (t *ENHTransport) EscapeAaAbsorbedTotal() uint64 {
+	return t.escapeAaAbsorbedTotal.Load()
 }
 
 // PostGrantWindowExpiredCount returns the cumulative count of

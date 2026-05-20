@@ -130,6 +130,36 @@ type Bus struct {
 	payloadAaAutoSynAbsorbed       atomic.Uint64
 	payloadAaAutoSynRecovered      atomic.Uint64
 	payloadAaAutoSynDrainExhausted atomic.Uint64
+
+	// Phase 1 Step B4 (frame-atomic-v8 §1.8 / §1.12, retained per v8 I8):
+	// activeEchoWaits is a bus-wide phase predicate counter — it is >0
+	// whenever ONE OR MORE goroutines on this Bus are inside the active
+	// echo-wait phase of sendRawWithEcho (between a successful raw-byte
+	// Write and the resolution of its echo). It is NOT goroutine-local;
+	// the predicate inSendRawWithEchoActiveEchoWait() answers "is any
+	// goroutine on this Bus currently in echo wait?", not "did THIS
+	// caller arrive via sendRawWithEcho?". For the only current call
+	// site (round-9 absorb entry, also inside sendRawWithEcho), this
+	// distinction is moot — the answer is always true. The predicate
+	// exists to document the phase invariant and to give the Prometheus
+	// alert a runtime hook; future call sites that try to count round-9
+	// fires from outside sendRawWithEcho would need a different
+	// per-call mechanism (e.g. an explicit token argument).
+	//
+	// round9AbsorbEntered counts how many times the round-9 AUTO-SYN
+	// absorb predicate fired while the active-echo-wait predicate held.
+	// The counter is deliberately named neutrally: this code has no
+	// notion of whether a proxy is mediating wire AUTO-SYNs. The
+	// Prometheus alert HelianthusRound9FiredUnderProxy (defined in the
+	// gateway deploy manifest — see helianthus-docs-ebus →
+	// deployment/prometheus-alerts.md, NOT in this repo) is the layer
+	// that AND-s this counter with the adaptermux classifier_mode label
+	// to derive "round-9 fired while proxy SHOULD have filtered". Per
+	// v8 I8 the round-9 absorb code itself is retained as the legacy
+	// fallback for direct-adapter mode; expected steady-state under
+	// classifier_mode == enforce is counter rate == 0.
+	activeEchoWaits     atomic.Int32
+	round9AbsorbEntered atomic.Uint64
 }
 
 // NewBus initializes a Bus with transport, config, and optional queue capacity.
@@ -1019,6 +1049,17 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 		Byte:    raw,
 	})
 
+	// Phase 1 Step B4 (frame-atomic-v8 §1.8): mark the bus as being in
+	// the active echo-wait phase from here until this call returns.
+	// inSendRawWithEchoActiveEchoWait() must hold for any round-9
+	// AUTO-SYN absorb fire to count toward the proxy-mediated alert
+	// counter — gating the increment on this predicate prevents future
+	// callers that mimic the absorb shape from outside the
+	// sendRawWithEcho call-stack from tripping the
+	// HelianthusRound9FiredUnderProxy alert (v8 §1.12).
+	b.activeEchoWaits.Add(1)
+	defer b.activeEchoWaits.Add(-1)
+
 	// F-23 (batch-19, Codex bot follow-up review on PR #154): for
 	// ENH-class transports, read the echo via the EscapeFlaggedReader
 	// path so we can distinguish a real wire SYN from an escape-
@@ -1161,6 +1202,21 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	// legitimate arbitration collisions where we wrote a non-SYN and
 	// the bus is idle (a real defect, not buffering interference).
 	if flagged != nil && !expectRawSyn && raw == SymbolSyn && echo == SymbolSyn && !echoWasEscaped {
+		// Phase 1 Step B4 (frame-atomic-v8 §1.8): the round-9 absorb
+		// predicate just fired. The neutrally-named round9AbsorbEntered
+		// counter increments here, gated on the runtime phase predicate
+		// inSendRawWithEchoActiveEchoWait(). At this call site the
+		// predicate is always true by construction (we are inside
+		// sendRawWithEcho between Write and echo resolution); the gate
+		// is kept as a phase assertion, not as proof of any cross-repo
+		// state (this code has zero proxy-awareness — the
+		// proxy-mediated interpretation lives in the Prometheus alert
+		// HelianthusRound9FiredUnderProxy, not in the counter name).
+		// Round-9 absorb itself is RETAINED per v8 I8 as the legacy
+		// fallback for direct-adapter mode.
+		if b.inSendRawWithEchoActiveEchoWait() {
+			b.round9AbsorbEntered.Add(1)
+		}
 		const maxPayloadAaAutoSynDrains = 3
 		absorbed := 0
 		drainExhausted := true // assume cap-exhausted; flipped to false on any non-SYN break
@@ -1456,6 +1512,42 @@ func (b *Bus) PayloadAaAutoSynRecovered() uint64 {
 // behavior for adapter-genuinely-stuck cases.
 func (b *Bus) PayloadAaAutoSynDrainExhausted() uint64 {
 	return b.payloadAaAutoSynDrainExhausted.Load()
+}
+
+// inSendRawWithEchoActiveEchoWait reports whether at least one
+// goroutine on this Bus is currently inside the active echo-wait
+// phase of sendRawWithEcho — i.e. between a successful raw-byte
+// Write and the resolution of its echo. The predicate is bus-wide,
+// not goroutine-local; it answers "is any goroutine in echo wait?",
+// not "did the caller arrive via sendRawWithEcho?". For the only
+// current call site (the round-9 absorb predicate, itself inside
+// sendRawWithEcho) the predicate is always true and the gate is a
+// no-op assertion. The hook exists for Prometheus / future call
+// sites and documents the phase invariant explicitly.
+func (b *Bus) inSendRawWithEchoActiveEchoWait() bool {
+	return b.activeEchoWaits.Load() > 0
+}
+
+// Round9AbsorbEntered returns the cumulative count of round-9
+// AUTO-SYN absorb predicate fires that occurred while the bus was in
+// the active echo-wait phase of sendRawWithEcho. The counter is
+// deliberately named neutrally: this code has no notion of whether a
+// proxy is mediating wire AUTO-SYNs, so it counts every entry
+// regardless of deployment mode. The Prometheus alert that AND-s
+// this counter with the adaptermux classifier-mode label
+// (HelianthusRound9FiredUnderProxy — see helianthus-docs-ebus →
+// deployment/prometheus-alerts.md) is what makes the round-9-under-
+// proxy interpretation. Per frame-atomic-v8 I8 the round-9 absorb
+// code itself is RETAINED as the legacy fallback for direct-adapter
+// mode; expected steady-state under classifier_mode == enforce is
+// counter rate == 0.
+//
+// Suggested Prometheus name: helianthus_round9_absorb_entered_total.
+// Pair with PayloadAaAutoSynAbsorbed / PayloadAaAutoSynRecovered /
+// PayloadAaAutoSynDrainExhausted for severity dashboards (per-byte
+// drained, recovery rate, cap exhaustion).
+func (b *Bus) Round9AbsorbEntered() uint64 {
+	return b.round9AbsorbEntered.Load()
 }
 
 func (b *Bus) emitAttemptComplete(request Frame, response *Frame, frameType FrameType, attempt uint16, startedAt time.Time) {
