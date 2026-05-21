@@ -1033,6 +1033,25 @@ func (b *Bus) sendSymbolWithEcho(runCtx, reqCtx context.Context, symbol byte, es
 // surface records the event under the collision class rather than
 // inflating the echo_mismatch population.
 func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRawSyn bool, isFirstByteAfterArbitration bool) error {
+	// F-NEW-28 (2026-05-21, round-9 layer-correct fix): signal the
+	// transport when this write is a structural SymbolSyn (terminator)
+	// vs a payload byte. The gateway adaptermux's echo tracker uses
+	// this provenance to distinguish a legitimate terminator-SYN
+	// expected echo from a payload-0xAA expected echo, closing the
+	// midWriteSyn predicate gap at `mux.go:2487` that let wire
+	// AUTO-SYNs reach echo position during payload-0xAA writes.
+	//
+	// Single one-shot signal per Write — consumed by the next Write
+	// call and reset to default ("payload") afterwards. Transports
+	// that don't implement StructuralWriteSignaler are unaffected
+	// (interface-assertion + nil check); on those transports the
+	// round-9 absorb at bus.go:1204 remains the canonical filter per
+	// v8 §1.8 retention contract.
+	if expectRawSyn {
+		if signaler, ok := b.transport.(transport.StructuralWriteSignaler); ok {
+			signaler.SignalNextWriteIsStructuralSyn()
+		}
+	}
 	written, err := b.transport.Write([]byte{raw})
 	if err != nil {
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
