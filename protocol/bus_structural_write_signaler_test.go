@@ -240,7 +240,7 @@ func TestStructuralWriteSignaler_PayloadAa_NoSignal(t *testing.T) {
 
 	// Build a non-broadcast frame whose first data byte equals
 	// SymbolSyn (payload-0xAA). The target is 0x08 (BAI), so the
-	// frame solicits a slave response.
+	// frame solicits a responder response.
 	frame := protocol.Frame{
 		Source:    0x10,
 		Target:    0x08,
@@ -260,13 +260,13 @@ func TestStructuralWriteSignaler_PayloadAa_NoSignal(t *testing.T) {
 		wasEscaped := b == protocol.SymbolSyn
 		tr.echo = append(tr.echo, signalerTestEvent{value: b, wasEscaped: wasEscaped})
 	}
-	// ACK from target (0x00), no slave response (LEN=0), terminator SYN.
+	// ACK from target (0x00), no responder response (LEN=0), terminator SYN.
 	tr.echo = append(tr.echo,
-		signalerTestEvent{value: 0x00, wasEscaped: false},                  // master ACK from target
-		signalerTestEvent{value: 0x00, wasEscaped: false},                  // slave LEN=0
-		signalerTestEvent{value: protocol.CRC([]byte{0x00}), wasEscaped: false}, // slave CRC
+		signalerTestEvent{value: 0x00, wasEscaped: false},                  // initiator ACK from target
+		signalerTestEvent{value: 0x00, wasEscaped: false},                  // responder LEN=0
+		signalerTestEvent{value: protocol.CRC([]byte{0x00}), wasEscaped: false}, // responder CRC
 	)
-	// Initiator sends ACK (0x00) to slave response, then terminator SYN.
+	// Initiator sends ACK (0x00) to responder response, then terminator SYN.
 	tr.echo = append(tr.echo,
 		signalerTestEvent{value: 0x00, wasEscaped: false},                  // initiator ACK echo
 		signalerTestEvent{value: protocol.SymbolSyn, wasEscaped: false},    // terminator SYN echo
@@ -280,7 +280,7 @@ func TestStructuralWriteSignaler_PayloadAa_NoSignal(t *testing.T) {
 	ctx := context.Background()
 	// We don't care if Send succeeds for this assertion — we only
 	// care that the signaler call pattern is correct. (The contrived
-	// echo sequence may not perfectly model a real slave handshake;
+	// echo sequence may not perfectly model a real responder handshake;
 	// if Send returns an error, the test still inspects the partial
 	// event sequence to confirm no Signal preceded the payload-0xAA
 	// write.)
