@@ -630,6 +630,187 @@ func TestDriverRuntime_ConcurrentStopReplaceSerializesRetirementAndConstruction(
 	}
 }
 
+// TestDriverRuntime_InvokeReleaseStopKeepsCallbackLeased proves that Release
+// during a callback is pending-only: Stop cannot request close until the raw
+// callback exits, and duplicate Invoke/Release calls remain harmless.
+func TestDriverRuntime_InvokeReleaseStopKeepsCallbackLeased(t *testing.T) {
+	t.Parallel()
+
+	request := make(chan struct{})
+	closed := make(chan struct{})
+	raw := &callbackProbeTransport{}
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			return &transport.ManagedRawTransport{
+				Transport: raw,
+				Lifecycle: transport.DriverLifecycleHandle{CloseRequest: request, Closed: closed},
+			}, nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: time.Second},
+	)
+	closeRequested := make(chan struct{})
+	go func() {
+		<-request
+		close(closeRequested)
+		raw.closed.Store(true)
+		close(closed)
+	}()
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	lease, err := runtime.Admit(context.Background())
+	if err != nil {
+		t.Fatalf("Admit() error = %v", err)
+	}
+
+	callbackStarted := make(chan struct{})
+	allowCallbackReturn := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	invokeDone := make(chan error, 1)
+	go func() {
+		invokeDone <- lease.Invoke(func(tr transport.RawTransport) error {
+			close(callbackStarted)
+			<-allowCallbackReturn
+			defer close(callbackReturned)
+			_, err := tr.Write([]byte{0x01})
+			return err
+		})
+	}()
+	<-callbackStarted
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() during callback error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("duplicate Release() error = %v", err)
+	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- runtime.Stop(context.Background()) }()
+
+	select {
+	case <-closeRequested:
+		t.Fatal("Stop() requested close before callback returned")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(allowCallbackReturn)
+	if err := <-invokeDone; err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	<-callbackReturned
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if got := raw.postCloseWrites.Load(); got != 0 {
+		t.Fatalf("post-close writes = %d; want 0", got)
+	}
+	if err := lease.Invoke(func(transport.RawTransport) error { return nil }); !errors.Is(err, transport.ErrStaleDriverGeneration) {
+		t.Fatalf("duplicate Invoke() error = %v; want ErrStaleDriverGeneration", err)
+	}
+}
+
+// TestDriverRuntime_StartFactoryUsesCallerCancellation ensures a factory that
+// blocks solely on its received context cannot outlive caller cancellation or
+// leak an admitted generation.
+func TestDriverRuntime_StartFactoryUsesCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	factoryStarted := make(chan context.Context, 1)
+	second := newManagedLifecycleTransport()
+	var calls atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(ctx context.Context) (*transport.ManagedRawTransport, error) {
+			switch calls.Add(1) {
+			case 1:
+				factoryStarted <- ctx
+				<-ctx.Done()
+				return nil, ctx.Err()
+			case 2:
+				return managedTransport(second), nil
+			default:
+				return nil, fmt.Errorf("unexpected constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
+	)
+	callerCtx, cancel := context.WithCancel(context.Background())
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.Start(callerCtx)
+		startDone <- err
+	}()
+	<-factoryStarted
+	cancel()
+	select {
+	case err := <-startDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled Start() error = %v; want context.Canceled", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("caller cancellation did not release blocked factory")
+	}
+	if got := runtime.Generation(); got != 0 {
+		t.Fatalf("generation after canceled factory = %d; want 0", got)
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 1 {
+		t.Fatalf("later Start() = (%d, %v); want (1, nil)", generation, err)
+	}
+}
+
+// TestDriverRuntime_StopCancelsRegisteredFactory proves the ordering rule: a
+// Start registered before Stop is canceled even though its factory is blocking
+// and no lifecycle serializer lock may delay the cancellation signal.
+func TestDriverRuntime_StopCancelsRegisteredFactory(t *testing.T) {
+	t.Parallel()
+
+	factoryStarted := make(chan context.Context, 1)
+	second := newManagedLifecycleTransport()
+	var calls atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(ctx context.Context) (*transport.ManagedRawTransport, error) {
+			switch calls.Add(1) {
+			case 1:
+				factoryStarted <- ctx
+				<-ctx.Done()
+				return nil, ctx.Err()
+			case 2:
+				return managedTransport(second), nil
+			default:
+				return nil, fmt.Errorf("unexpected constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
+	)
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.Start(context.Background())
+		startDone <- err
+	}()
+	<-factoryStarted
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- runtime.Stop(context.Background()) }()
+	select {
+	case err := <-startDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Stop-canceled Start() error = %v; want context.Canceled", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Stop() did not cancel registered blocked factory")
+	}
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("Stop() error = %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Stop() remained blocked after factory cancellation")
+	}
+	if got := runtime.Generation(); got != 0 {
+		t.Fatalf("generation after Stop-canceled factory = %d; want 0", got)
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 1 {
+		t.Fatalf("later Start() = (%d, %v); want (1, nil)", generation, err)
+	}
+}
+
 func stopWithoutPanic(t *testing.T, runtime *transport.DriverRuntime) (err error) {
 	t.Helper()
 	defer func() {
@@ -683,6 +864,23 @@ type managedLifecycleTransport struct {
 	closeConfirms bool
 	closeRelease  chan struct{}
 }
+
+type callbackProbeTransport struct {
+	closed          atomic.Bool
+	postCloseWrites atomic.Int32
+}
+
+func (t *callbackProbeTransport) ReadByte() (byte, error) { return 0, transport.ErrDriverUnavailable }
+
+func (t *callbackProbeTransport) Write(payload []byte) (int, error) {
+	if t.closed.Load() {
+		t.postCloseWrites.Add(1)
+		return 0, transport.ErrDriverUnavailable
+	}
+	return len(payload), nil
+}
+
+func (t *callbackProbeTransport) Close() error { return nil }
 
 func newManagedLifecycleTransport() *managedLifecycleTransport {
 	return &managedLifecycleTransport{confirmClose: make(chan struct{}), closeConfirms: true}
