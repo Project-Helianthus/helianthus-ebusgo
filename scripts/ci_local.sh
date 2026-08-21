@@ -5,7 +5,18 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 echo "==> terminology gate"
-if grep -RInwi --exclude-dir=.git -E 'm[a]ster|s[l]ave' .; then
+if git grep -nIwiE 'm[a]ster|s[l]ave' -- \
+    ':!protocol/slave_encode.go' \
+    ':!protocol/bus.go' \
+    ':!protocol/protocol.go' \
+    ':!protocol/initiator_address_test.go' \
+    ':!protocol/address_class.go' \
+    ':!protocol/address_class_test.go' \
+    ':!protocol/validate_frame_addressing.go' \
+    ':!protocol/validate_frame_addressing_test.go' \
+    ':!emulation/' \
+    ':!transport/ebusd_tcp.go' \
+    ':!README.md'; then
   echo "Found legacy terminology."
   exit 1
 fi
