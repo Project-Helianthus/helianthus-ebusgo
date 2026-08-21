@@ -405,6 +405,107 @@ func TestDriverRuntime_InvalidLifecycleHandleQuarantinesAtAdmission(t *testing.T
 	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
 }
 
+// TestDriverRuntime_ClosedCloseRequestQuarantinesWithoutPanic proves that an
+// adapter violating request-channel ownership cannot crash the process or hold
+// the lifecycle serializer hostage.
+func TestDriverRuntime_ClosedCloseRequestQuarantinesWithoutPanic(t *testing.T) {
+	t.Parallel()
+
+	request := make(chan struct{})
+	close(request)
+	closed := make(chan struct{})
+	raw := newManagedLifecycleTransport()
+	var constructed atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			constructed.Add(1)
+			return &transport.ManagedRawTransport{
+				Transport: raw,
+				Lifecycle: transport.DriverLifecycleHandle{CloseRequest: request, Closed: closed},
+			}, nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 25 * time.Millisecond},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	stopped := stopWithoutPanic(t, runtime)
+	if !errors.Is(stopped, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("Stop() error = %v; want ErrDriverSafetyQuarantined", stopped)
+	}
+	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
+}
+
+// TestDriverRuntime_DrainTimeoutCanSafelyRetireWithFreshCloseBudget proves
+// that a timed-out admitted lease is not an automatic quarantine when a fresh
+// close phase can still request and prove retirement.
+func TestDriverRuntime_DrainTimeoutCanSafelyRetireWithFreshCloseBudget(t *testing.T) {
+	t.Parallel()
+
+	firstRequest := make(chan struct{})
+	firstClosed := make(chan struct{})
+	first := newManagedLifecycleTransport()
+	second := newManagedLifecycleTransport()
+	var constructed atomic.Int32
+	bound := 20 * time.Millisecond
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			switch constructed.Add(1) {
+			case 1:
+				return &transport.ManagedRawTransport{
+					Transport: first,
+					Lifecycle: transport.DriverLifecycleHandle{CloseRequest: firstRequest, Closed: firstClosed},
+				}, nil
+			case 2:
+				return managedTransport(second), nil
+			default:
+				return nil, fmt.Errorf("unexpected constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: bound},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	lease, err := runtime.Admit(context.Background())
+	if err != nil {
+		t.Fatalf("Admit() error = %v", err)
+	}
+	go func() {
+		<-firstRequest
+		close(firstClosed)
+	}()
+
+	startedAt := time.Now()
+	if err := runtime.Stop(context.Background()); !errors.Is(err, transport.ErrDriverStopTimeout) {
+		t.Fatalf("Stop() error = %v; want ErrDriverStopTimeout", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 6*bound {
+		t.Fatalf("Stop() took %s; want bounded drain plus close phases", elapsed)
+	}
+	if runtime.SafetyQuarantined() {
+		t.Fatal("safe close confirmation after drain timeout quarantined runtime")
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("held lease Release() error = %v", err)
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 2 {
+		t.Fatalf("safe post-timeout Start() = (%d, %v); want (2, nil)", generation, err)
+	}
+}
+
+func stopWithoutPanic(t *testing.T, runtime *transport.DriverRuntime) (err error) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Errorf("Stop() panicked: %v", recovered)
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return runtime.Stop(context.Background())
+}
+
 func assertBoundedQuarantinedStop(t *testing.T, runtime *transport.DriverRuntime, raw *managedLifecycleTransport, bound time.Duration) {
 	t.Helper()
 	startedAt := time.Now()
