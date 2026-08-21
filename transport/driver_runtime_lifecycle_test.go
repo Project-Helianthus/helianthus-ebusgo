@@ -1200,11 +1200,13 @@ func TestDriverRuntime_StopSnapshotCancelsRegisteredConstruction(t *testing.T) {
 func TestDriverRuntime_SnapshotCancelCannotReachAdmission(t *testing.T) {
 	detachReached := make(chan struct{})
 	allowDetach := make(chan struct{})
+	snapshotReached := make(chan struct{})
 	restore := setDriverRuntimeTestHooks(driverRuntimeTestHooks{
 		BeforeConstructionDetach: func() {
 			close(detachReached)
 			<-allowDetach
 		},
+		AfterConstructionSnapshot: func() { close(snapshotReached) },
 	})
 	defer restore()
 
@@ -1227,6 +1229,7 @@ func TestDriverRuntime_SnapshotCancelCannotReachAdmission(t *testing.T) {
 	<-detachReached
 	stopDone := make(chan error, 1)
 	go func() { stopDone <- runtime.Stop(context.Background()) }()
+	<-snapshotReached
 	close(allowDetach)
 	if err := <-startDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Start() error = %v; want context.Canceled", err)

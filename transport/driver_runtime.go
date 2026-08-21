@@ -97,13 +97,64 @@ type driverRuntimeGeneration struct {
 // before admission) from the runtime-owned generation context. The forwarding
 // callback is detached under forwardMu before the generation can be admitted.
 type driverConstruction struct {
+	id            uint64
 	runtimeCtx    context.Context
 	runtimeCancel context.CancelFunc
 	callerCtx     context.Context
 	stopForward   func() bool
 
-	forwardMu sync.Mutex
-	detached  bool
+	state constructionState
+}
+
+type constructionState uint8
+
+const (
+	constructionProvisional constructionState = iota + 1
+	constructionCancelRequested
+	constructionAdmitted
+	constructionFinished
+)
+
+// driverRuntimeTestHooks exists only to make construction linearization races
+// deterministic in the in-package lifecycle tests. It is nil in production.
+type driverRuntimeTestHooks struct {
+	AfterConstructionSnapshot func()
+	BeforeConstructionDetach  func()
+}
+
+var driverRuntimeHooks struct {
+	sync.Mutex
+	hooks driverRuntimeTestHooks
+}
+
+func setDriverRuntimeTestHooks(hooks driverRuntimeTestHooks) func() {
+	driverRuntimeHooks.Lock()
+	previous := driverRuntimeHooks.hooks
+	driverRuntimeHooks.hooks = hooks
+	driverRuntimeHooks.Unlock()
+	return func() {
+		driverRuntimeHooks.Lock()
+		driverRuntimeHooks.hooks = previous
+		driverRuntimeHooks.Unlock()
+	}
+}
+
+func runAfterConstructionSnapshotHook() {
+	driverRuntimeHooks.Lock()
+	hook := driverRuntimeHooks.hooks.AfterConstructionSnapshot
+	driverRuntimeHooks.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+func runBeforeConstructionDetachHook() {
+	driverRuntimeHooks.Lock()
+	hook := driverRuntimeHooks.hooks.BeforeConstructionDetach
+	driverRuntimeHooks.Unlock()
+	if hook != nil {
+		hook()
+	}
 }
 
 // driverLease owns one admitted invocation. Although its concrete type is
@@ -226,25 +277,13 @@ func (r *DriverRuntime) startLocked(construction *driverConstruction) (uint64, e
 		r.quarantine()
 		return 0, ErrDriverSafetyQuarantined
 	}
-	if !construction.detachForAdmission() {
+	if !r.admitConstruction(construction, managed) {
 		if !r.retireUnadmitted(managed, construction.runtimeCancel) {
 			return 0, ErrDriverSafetyQuarantined
 		}
 		return 0, construction.cancellationError()
 	}
-	r.mu.Lock()
-	if r.quarantined {
-		r.mu.Unlock()
-		if !r.retireUnadmitted(managed, construction.runtimeCancel) {
-			return 0, ErrDriverSafetyQuarantined
-		}
-		return 0, ErrDriverSafetyQuarantined
-	}
-	defer r.mu.Unlock()
-	r.generation++
-	r.revision++
-	r.current = &driverRuntimeGeneration{transport: managed, cancel: construction.runtimeCancel, accepting: true, drained: make(chan struct{})}
-	return r.generation, nil
+	return r.Generation(), nil
 }
 
 func (r *DriverRuntime) registerConstruction(ctx context.Context) (*driverConstruction, uint64) {
@@ -252,52 +291,73 @@ func (r *DriverRuntime) registerConstruction(ctx context.Context) (*driverConstr
 		ctx = context.Background()
 	}
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
-	construction := &driverConstruction{runtimeCtx: runtimeCtx, runtimeCancel: runtimeCancel, callerCtx: ctx}
-	construction.stopForward = context.AfterFunc(ctx, func() {
-		construction.forwardMu.Lock()
-		defer construction.forwardMu.Unlock()
-		if !construction.detached {
-			construction.runtimeCancel()
-		}
-	})
 	r.mu.Lock()
 	r.constructionSeq++
 	id := r.constructionSeq
+	construction := &driverConstruction{id: id, runtimeCtx: runtimeCtx, runtimeCancel: runtimeCancel, callerCtx: ctx, state: constructionProvisional}
 	if r.constructions == nil {
 		r.constructions = make(map[uint64]*driverConstruction)
 	}
 	r.constructions[id] = construction
 	r.mu.Unlock()
+	construction.stopForward = context.AfterFunc(ctx, func() { r.requestConstructionCancel(id) })
 	return construction, id
 }
 
 func (r *DriverRuntime) finishConstruction(id uint64, construction *driverConstruction) {
-	construction.stopForward()
 	r.mu.Lock()
-	delete(r.constructions, id)
+	if construction.state != constructionAdmitted {
+		construction.state = constructionFinished
+		delete(r.constructions, id)
+	}
 	r.mu.Unlock()
+	if construction.stopForward != nil {
+		construction.stopForward()
+	}
 }
 
 func (r *DriverRuntime) cancelConstructions() {
 	r.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(r.constructions))
 	for _, construction := range r.constructions {
-		cancels = append(cancels, construction.runtimeCancel)
+		if construction.state == constructionProvisional {
+			construction.state = constructionCancelRequested
+			// Cancel under the same lock that owns state transition. No bare
+			// cancel snapshot can survive a later atomic admission publication.
+			construction.runtimeCancel()
+		}
 	}
+	runAfterConstructionSnapshotHook()
 	r.mu.Unlock()
-	for _, cancel := range cancels {
-		cancel()
+}
+
+func (r *DriverRuntime) requestConstructionCancel(id uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	construction := r.constructions[id]
+	if construction != nil && construction.state == constructionProvisional {
+		construction.state = constructionCancelRequested
+		construction.runtimeCancel()
 	}
 }
 
-func (c *driverConstruction) detachForAdmission() bool {
-	c.forwardMu.Lock()
-	defer c.forwardMu.Unlock()
-	if c.callerCtx.Err() != nil || c.runtimeCtx.Err() != nil {
+func (r *DriverRuntime) admitConstruction(construction *driverConstruction, managed *ManagedRawTransport) bool {
+	runBeforeConstructionDetachHook()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if construction.state != constructionProvisional || construction.callerCtx.Err() != nil || construction.runtimeCtx.Err() != nil || r.quarantined {
 		return false
 	}
-	c.detached = true
-	c.stopForward()
+	// State transition, map removal, and current publication share r.mu. Any
+	// Stop/Replace cancel action arriving afterwards sees no provisional entry
+	// and cannot retain a valid cancellation token for this generation.
+	construction.state = constructionAdmitted
+	delete(r.constructions, construction.id)
+	r.generation++
+	r.revision++
+	r.current = &driverRuntimeGeneration{transport: managed, cancel: construction.runtimeCancel, accepting: true, drained: make(chan struct{})}
+	if construction.stopForward != nil {
+		construction.stopForward()
+	}
 	return true
 }
 
