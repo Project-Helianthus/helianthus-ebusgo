@@ -49,10 +49,10 @@ func (t *writeFailTransport) Write(payload []byte) (int, error) {
 	return len(payload), nil
 }
 
-func (t *writeFailTransport) Close() error                  { return nil }
-func (t *writeFailTransport) BytesAreUnescaped() bool       { return true }
-func (t *writeFailTransport) StartArbitration(byte) error   { return nil }
-func (t *writeFailTransport) ArbitrationSendsSource() bool  { return true }
+func (t *writeFailTransport) Close() error                 { return nil }
+func (t *writeFailTransport) BytesAreUnescaped() bool      { return true }
+func (t *writeFailTransport) StartArbitration(byte) error  { return nil }
+func (t *writeFailTransport) ArbitrationSendsSource() bool { return true }
 
 // Phase 1 Step B4 (frame-atomic-v8 §1.8, §1.12, retained per v8 I8):
 // the round-9 AUTO-SYN absorb code at the payload-0xAA echo site in
