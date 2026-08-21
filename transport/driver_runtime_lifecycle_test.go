@@ -1280,6 +1280,63 @@ func TestDriverRuntime_StartAfterStopSnapshotMayProceed(t *testing.T) {
 	}
 }
 
+// TestDriverRuntime_StopBoundsIgnoringFactoryAndFencesLateResult proves Stop
+// does not wait for operation serialization held by an uncooperative factory.
+// It quarantines immediately, fences all lifecycle entry points, and retires a
+// late factory result exactly once without admitting it.
+func TestDriverRuntime_StopBoundsIgnoringFactoryAndFencesLateResult(t *testing.T) {
+	factoryStarted := make(chan struct{})
+	allowLateResult := make(chan struct{})
+	request := make(chan struct{})
+	closed := make(chan struct{})
+	closeRequests := atomic.Int32{}
+	go func() {
+		<-request
+		closeRequests.Add(1)
+		close(closed)
+	}()
+	var factoryCalls atomic.Int32
+	runtime := NewDriverRuntime(func(context.Context) (*ManagedRawTransport, error) {
+		factoryCalls.Add(1)
+		close(factoryStarted)
+		<-allowLateResult // deliberately ignores its received context
+		return &ManagedRawTransport{
+			Transport: &callbackProbeTransport{},
+			Lifecycle: DriverLifecycleHandle{CloseRequest: request, Closed: closed},
+		}, nil
+	}, DriverRuntimeConfig{DrainTimeout: 25 * time.Millisecond})
+	startDone := make(chan error, 1)
+	go func() { _, err := runtime.Start(context.Background()); startDone <- err }()
+	<-factoryStarted
+
+	stopDone := make(chan error, 1)
+	startedAt := time.Now()
+	go func() { stopDone <- runtime.Stop(context.Background()) }()
+	select {
+	case err := <-stopDone:
+		if !errors.Is(err, ErrDriverSafetyQuarantined) {
+			t.Errorf("Stop() error = %v; want ErrDriverSafetyQuarantined", err)
+		}
+		if elapsed := time.Since(startedAt); elapsed > 100*time.Millisecond {
+			t.Errorf("Stop() took %s; want bounded despite factory", elapsed)
+		}
+		assertQuarantineRejectsNewConstruction(t, runtime, &factoryCalls)
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Stop() waited behind cancellation-ignoring factory")
+	}
+
+	close(allowLateResult)
+	if err := <-startDone; !errors.Is(err, ErrDriverSafetyQuarantined) {
+		t.Errorf("late Start() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	if got := runtime.Generation(); got != 0 {
+		t.Errorf("late factory admitted generation = %d; want 0", got)
+	}
+	if got := closeRequests.Load(); got != 1 {
+		t.Errorf("late factory close requests = %d; want 1", got)
+	}
+}
+
 func stopWithoutPanic(t *testing.T, runtime *DriverRuntime) (err error) {
 	t.Helper()
 	defer func() {
