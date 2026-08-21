@@ -1380,7 +1380,12 @@ func TestDriverRuntime_RetirementFenceBlocksExternalStartUntilProof(t *testing.T
 	select {
 	case <-secondFactoryCalled:
 		t.Fatal("external Start called factory before old Closed proof")
+	case err := <-startDone:
+		if !errors.Is(err, ErrDriverUnavailable) {
+			t.Fatalf("external Start() error = %v; want ErrDriverUnavailable while retiring", err)
+		}
 	case <-time.After(30 * time.Millisecond):
+		t.Fatal("external Start did not fail boundedly while retiring")
 	}
 	if got := runtime.Generation(); got != 1 {
 		t.Fatalf("generation before retirement proof = %d; want 1", got)
@@ -1389,11 +1394,98 @@ func TestDriverRuntime_RetirementFenceBlocksExternalStartUntilProof(t *testing.T
 	if err := <-stopDone; err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
-	if err := <-startDone; err != nil {
-		t.Fatalf("post-proof Start() error = %v", err)
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 2 {
+		t.Fatalf("post-proof Start() = (%d, %v); want (2, nil)", generation, err)
 	}
-	if generation := runtime.Generation(); generation != 2 {
-		t.Fatalf("post-proof generation = %d; want 2", generation)
+	if got := oldCloseRequests.Load(); got != 1 {
+		t.Fatalf("old close requests = %d; want 1", got)
+	}
+}
+
+// TestDriverRuntime_ReplaceKeepsRetirementFenceUntilReplacementPublication
+// proves Replace owns the fence from old withdrawal through replacement
+// publication. An external Start must neither construct in the proof window
+// nor between proof and the replacement's atomic admission.
+func TestDriverRuntime_ReplaceKeepsRetirementFenceUntilReplacementPublication(t *testing.T) {
+	oldRequest := make(chan struct{})
+	oldClosed := make(chan struct{})
+	oldCloseRequests := atomic.Int32{}
+	go func() {
+		<-oldRequest
+		oldCloseRequests.Add(1)
+	}()
+	first := &ManagedRawTransport{
+		Transport: &callbackProbeTransport{},
+		Lifecycle: DriverLifecycleHandle{CloseRequest: oldRequest, Closed: oldClosed},
+	}
+	second := newManagedLifecycleTransport()
+	var factoryCalls atomic.Int32
+	replacementFactoryCalled := make(chan struct{}, 1)
+	runtime := NewDriverRuntime(func(context.Context) (*ManagedRawTransport, error) {
+		switch factoryCalls.Add(1) {
+		case 1:
+			return first, nil
+		case 2:
+			replacementFactoryCalled <- struct{}{}
+			return managedTransport(second), nil
+		default:
+			return nil, fmt.Errorf("unexpected constructor call")
+		}
+	}, DriverRuntimeConfig{DrainTimeout: 100 * time.Millisecond})
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("initial Start() error = %v", err)
+	}
+
+	admissionEntered := make(chan struct{}, 1)
+	releaseAdmission := make(chan struct{})
+	restoreHooks := setDriverRuntimeTestHooks(driverRuntimeTestHooks{
+		BeforeConstructionDetach: func() {
+			admissionEntered <- struct{}{}
+			<-releaseAdmission
+		},
+	})
+	defer restoreHooks()
+	replaceDone := make(chan struct {
+		generation uint64
+		err        error
+	}, 1)
+	go func() {
+		generation, err := runtime.Replace(context.Background())
+		replaceDone <- struct {
+			generation uint64
+			err        error
+		}{generation, err}
+	}()
+	for oldCloseRequests.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := runtime.Start(context.Background()); !errors.Is(err, ErrDriverUnavailable) {
+		t.Fatalf("Start during old proof error = %v; want ErrDriverUnavailable", err)
+	}
+	if got := factoryCalls.Load(); got != 1 {
+		t.Fatalf("factory calls during old proof = %d; want 1", got)
+	}
+	close(oldClosed)
+	select {
+	case <-replacementFactoryCalled:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("replacement factory was not called after old proof")
+	}
+	select {
+	case <-admissionEntered:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("replacement did not reach admission barrier")
+	}
+	if _, err := runtime.Start(context.Background()); !errors.Is(err, ErrDriverUnavailable) {
+		t.Fatalf("Start before replacement publication error = %v; want ErrDriverUnavailable", err)
+	}
+	if got := factoryCalls.Load(); got != 2 {
+		t.Fatalf("factory calls before replacement publication = %d; want 2", got)
+	}
+	close(releaseAdmission)
+	result := <-replaceDone
+	if result.err != nil || result.generation != 2 {
+		t.Fatalf("Replace() = (%d, %v); want (2, nil)", result.generation, result.err)
 	}
 	if got := oldCloseRequests.Load(); got != 1 {
 		t.Fatalf("old close requests = %d; want 1", got)

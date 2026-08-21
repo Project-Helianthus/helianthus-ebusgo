@@ -74,6 +74,7 @@ type DriverRuntime struct {
 	revision    uint64
 	current     *driverRuntimeGeneration
 	quarantined bool
+	retiring    bool
 
 	// constructions contains every Start or Replace factory context registered
 	// before that operation waits for operationMu. Stop cancels this set before
@@ -102,6 +103,10 @@ type driverConstruction struct {
 	runtimeCancel context.CancelFunc
 	callerCtx     context.Context
 	stopForward   func() bool
+	// releaseRetiring identifies the one construction owned by Replace while
+	// the retirement fence is held. Its admission publishes the replacement
+	// and releases that fence under the same mutex.
+	releaseRetiring bool
 
 	state constructionState
 	done  chan struct{}
@@ -208,7 +213,7 @@ func (r *DriverRuntime) SafetyQuarantined() bool {
 // Start admits a new generation only while stopped. It is idempotent for the
 // active generation and never reuses a retired transport.
 func (r *DriverRuntime) Start(ctx context.Context) (uint64, error) {
-	construction, constructionID, existing, err := r.registerConstruction(ctx)
+	construction, constructionID, existing, err := r.registerConstruction(ctx, false, false)
 	if construction == nil {
 		return existing, err
 	}
@@ -224,12 +229,28 @@ func (r *DriverRuntime) Replace(ctx context.Context) (uint64, error) {
 	}
 
 	r.operationMu.Lock()
-	if err := r.stopLocked(); err != nil {
+	if err := r.stopLocked(true); err != nil {
+		// A confirmed close can still report a drain timeout. No replacement was
+		// reserved in that case, so release the fence before returning and let a
+		// later explicit Start choose whether to construct again.
+		if !r.SafetyQuarantined() {
+			r.mu.Lock()
+			r.retiring = false
+			r.mu.Unlock()
+		}
 		r.operationMu.Unlock()
 		return 0, err
 	}
+	// Keep the retirement fence until this exact replacement is admitted. The
+	// reservation is made while operationMu is held, so an external Start
+	// cannot slip a factory between old proof and replacement publication.
+	construction, constructionID, existing, err := r.registerConstruction(ctx, true, true)
 	r.operationMu.Unlock()
-	return r.Start(ctx)
+	if construction == nil {
+		return existing, err
+	}
+	defer r.finishConstruction(constructionID, construction)
+	return r.startLocked(construction)
 }
 
 // Stop withdraws admission, cancels the exact generation, drains already
@@ -240,7 +261,7 @@ func (r *DriverRuntime) Stop(context.Context) error {
 	}
 	r.operationMu.Lock()
 	defer r.operationMu.Unlock()
-	return r.stopLocked()
+	return r.stopLocked(false)
 }
 
 func (r *DriverRuntime) startLocked(construction *driverConstruction) (uint64, error) {
@@ -251,6 +272,13 @@ func (r *DriverRuntime) startLocked(construction *driverConstruction) (uint64, e
 		r.mu.Unlock()
 		construction.runtimeCancel()
 		return 0, ErrDriverSafetyQuarantined
+	}
+	if r.retiring {
+		if !construction.releaseRetiring {
+			r.mu.Unlock()
+			construction.runtimeCancel()
+			return 0, ErrDriverUnavailable
+		}
 	}
 	if r.current != nil {
 		generation := r.generation
@@ -292,7 +320,7 @@ func (r *DriverRuntime) startLocked(construction *driverConstruction) (uint64, e
 	return r.Generation(), nil
 }
 
-func (r *DriverRuntime) registerConstruction(ctx context.Context) (*driverConstruction, uint64, uint64, error) {
+func (r *DriverRuntime) registerConstruction(ctx context.Context, allowRetiring, releaseRetiring bool) (*driverConstruction, uint64, uint64, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -302,6 +330,16 @@ func (r *DriverRuntime) registerConstruction(ctx context.Context) (*driverConstr
 		r.mu.Unlock()
 		runtimeCancel()
 		return nil, 0, 0, ErrDriverSafetyQuarantined
+	}
+	if r.retiring && !allowRetiring {
+		r.mu.Unlock()
+		runtimeCancel()
+		return nil, 0, 0, ErrDriverUnavailable
+	}
+	if allowRetiring && !r.retiring {
+		r.mu.Unlock()
+		runtimeCancel()
+		return nil, 0, 0, ErrDriverUnavailable
 	}
 	if r.current != nil {
 		generation := r.generation
@@ -316,7 +354,7 @@ func (r *DriverRuntime) registerConstruction(ctx context.Context) (*driverConstr
 	}
 	r.constructionSeq++
 	id := r.constructionSeq
-	construction := &driverConstruction{id: id, runtimeCtx: runtimeCtx, runtimeCancel: runtimeCancel, callerCtx: ctx, state: constructionProvisional, done: make(chan struct{})}
+	construction := &driverConstruction{id: id, runtimeCtx: runtimeCtx, runtimeCancel: runtimeCancel, callerCtx: ctx, releaseRetiring: releaseRetiring, state: constructionProvisional, done: make(chan struct{})}
 	if r.constructions == nil {
 		r.constructions = make(map[uint64]*driverConstruction)
 	}
@@ -332,6 +370,9 @@ func (r *DriverRuntime) finishConstruction(id uint64, construction *driverConstr
 		construction.state = constructionFinished
 		delete(r.constructions, id)
 		close(construction.done)
+		if construction.releaseRetiring && !r.quarantined {
+			r.retiring = false
+		}
 	}
 	r.mu.Unlock()
 	if construction.stopForward != nil {
@@ -396,6 +437,9 @@ func (r *DriverRuntime) admitConstruction(construction *driverConstruction, mana
 	r.generation++
 	r.revision++
 	r.current = &driverRuntimeGeneration{transport: managed, cancel: construction.runtimeCancel, accepting: true, drained: make(chan struct{})}
+	if construction.releaseRetiring {
+		r.retiring = false
+	}
 	if construction.stopForward != nil {
 		construction.stopForward()
 	}
@@ -412,7 +456,7 @@ func (c *driverConstruction) cancellationError() error {
 	return context.Canceled
 }
 
-func (r *DriverRuntime) stopLocked() error {
+func (r *DriverRuntime) stopLocked(keepRetiring bool) error {
 	r.mu.Lock()
 	if r.quarantined {
 		r.mu.Unlock()
@@ -420,9 +464,13 @@ func (r *DriverRuntime) stopLocked() error {
 	}
 	generation := r.current
 	if generation == nil {
+		r.retiring = keepRetiring
 		r.mu.Unlock()
 		return nil
 	}
+	// Fence remains held from atomic withdrawal through drain, close request,
+	// and final proof. External Start cannot reserve a factory in this window.
+	r.retiring = true
 	// This critical section is the effective-capability withdrawal boundary:
 	// after accepting becomes false no new invocation can increment inFlight.
 	generation.accepting = false
@@ -452,6 +500,11 @@ func (r *DriverRuntime) stopLocked() error {
 	if !r.retireManaged(closeDeadline, generation.transport, generation.cancel) {
 		r.quarantine()
 		return ErrDriverSafetyQuarantined
+	}
+	if !keepRetiring {
+		r.mu.Lock()
+		r.retiring = false
+		r.mu.Unlock()
 	}
 	if drainTimedOut {
 		return ErrDriverStopTimeout
