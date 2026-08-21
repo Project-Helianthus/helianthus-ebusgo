@@ -87,9 +87,10 @@ type driverRuntimeGeneration struct {
 	transport *ManagedRawTransport
 	cancel    context.CancelFunc
 
-	accepting bool
-	inFlight  int
-	drained   chan struct{}
+	accepting       bool
+	inFlight        int
+	activeCallbacks int
+	drained         chan struct{}
 }
 
 // driverLease owns one admitted invocation. Although its concrete type is
@@ -198,7 +199,13 @@ func (r *DriverRuntime) startLocked(generationCtx context.Context, cancel contex
 	}
 	managed, err := factory(generationCtx)
 	if err != nil {
-		cancel()
+		if managed != nil {
+			if !r.retireUnadmitted(managed, cancel) {
+				return 0, ErrDriverSafetyQuarantined
+			}
+		} else {
+			cancel()
+		}
 		return 0, err
 	}
 	if !validManagedTransport(managed) {
@@ -286,6 +293,15 @@ func (r *DriverRuntime) stopLocked() error {
 	drainDeadline, cancelDrain := context.WithTimeout(context.Background(), r.timeout)
 	drainTimedOut := !waitForGeneration(drainDeadline, generation.drained)
 	cancelDrain()
+	if drainTimedOut {
+		r.mu.Lock()
+		activeCallbacks := generation.activeCallbacks
+		r.mu.Unlock()
+		if activeCallbacks > 0 {
+			r.quarantine()
+			return ErrDriverSafetyQuarantined
+		}
+	}
 
 	closeDeadline, cancelClose := context.WithTimeout(context.Background(), r.timeout)
 	defer cancelClose()
@@ -417,17 +433,20 @@ func (a *driverLease) Invoke(fn func(RawTransport) error) error {
 
 	a.runtime.mu.Lock()
 	valid := !a.runtime.quarantined && a.runtime.current == a.generation && a.generation.accepting
+	if valid {
+		a.generation.activeCallbacks++
+	}
 	a.runtime.mu.Unlock()
 	if !valid {
-		a.finishInvocation()
+		a.finishInvocation(false)
 		return ErrStaleDriverGeneration
 	}
 	if fn == nil {
-		a.finishInvocation()
+		a.finishInvocation(true)
 		return ErrDriverUnavailable
 	}
 	err := fn(a.generation.transport.Transport)
-	a.finishInvocation()
+	a.finishInvocation(true)
 	return err
 }
 
@@ -450,7 +469,13 @@ func (a *driverLease) Release() error {
 	return nil
 }
 
-func (a *driverLease) finishInvocation() {
+func (a *driverLease) finishInvocation(activeCallback bool) {
+	if activeCallback {
+		a.runtime.mu.Lock()
+		a.generation.activeCallbacks--
+		a.runtime.mu.Unlock()
+	}
+
 	a.mu.Lock()
 	a.invoking = false
 	releaseNow := a.releasePending && !a.released
