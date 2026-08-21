@@ -1072,6 +1072,53 @@ func TestDriverRuntime_PanickingRuntimeInvokeFinishesAccounting(t *testing.T) {
 	}
 }
 
+// TestDriverRuntime_CallerCancelAfterAdmissionDoesNotCancelGeneration proves
+// the caller context is a pre-admission cancellation source only. Once the
+// generation is admitted, its worker must live until runtime-owned retirement.
+func TestDriverRuntime_CallerCancelAfterAdmissionDoesNotCancelGeneration(t *testing.T) {
+	t.Parallel()
+
+	workerContext := make(chan context.Context, 1)
+	workerStopped := make(chan struct{})
+	raw := newManagedLifecycleTransport()
+	runtime := transport.NewDriverRuntime(
+		func(ctx context.Context) (*transport.ManagedRawTransport, error) {
+			workerContext <- ctx
+			go func() {
+				<-ctx.Done()
+				close(workerStopped)
+			}()
+			return managedTransport(raw), nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
+	)
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	if generation, err := runtime.Start(callerCtx); err != nil || generation != 1 {
+		t.Fatalf("Start() = (%d, %v); want (1, nil)", generation, err)
+	}
+	<-workerContext
+	cancelCaller()
+	select {
+	case <-workerStopped:
+		t.Fatal("caller cancellation stopped admitted generation worker")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if err := runtime.Invoke(context.Background(), func(tr transport.RawTransport) error {
+		_, err := tr.Write([]byte{0x01})
+		return err
+	}); err != nil {
+		t.Fatalf("admitted generation Invoke() error after caller cancellation = %v", err)
+	}
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	select {
+	case <-workerStopped:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Stop() did not cancel admitted generation worker")
+	}
+}
+
 func panicLifecycleRuntime(t *testing.T) (*transport.DriverRuntime, *managedLifecycleTransport, *managedLifecycleTransport) {
 	t.Helper()
 	first := newManagedLifecycleTransport()
