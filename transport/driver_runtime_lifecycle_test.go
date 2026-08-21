@@ -495,6 +495,141 @@ func TestDriverRuntime_DrainTimeoutCanSafelyRetireWithFreshCloseBudget(t *testin
 	}
 }
 
+// TestDriverRuntime_ConcurrentStopSerializesOneRetirementRequest uses a
+// barrier to race two stops against one generation. Only one lifecycle request
+// may reach the adapter, and the released serializer must admit a later start.
+func TestDriverRuntime_ConcurrentStopSerializesOneRetirementRequest(t *testing.T) {
+	t.Parallel()
+
+	first := newManagedLifecycleTransport()
+	second := newManagedLifecycleTransport()
+	var constructed atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			switch constructed.Add(1) {
+			case 1:
+				return managedTransport(first), nil
+			case 2:
+				return managedTransport(second), nil
+			default:
+				return nil, fmt.Errorf("duplicate constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: time.Second},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	barrier := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-barrier
+			results <- runtime.Stop(context.Background())
+		}()
+	}
+	close(barrier)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent Stop() error = %v", err)
+		}
+	}
+	if got := first.closeCalls.Load(); got != 1 {
+		t.Fatalf("first retired generation close requests = %d; want 1", got)
+	}
+	if runtime.SafetyQuarantined() {
+		t.Fatal("concurrent Stop() quarantined a confirmed retirement")
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 2 {
+		t.Fatalf("post-concurrent-stop Start() = (%d, %v); want (2, nil)", generation, err)
+	}
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("cleanup Stop() error = %v", err)
+	}
+	if got := second.closeCalls.Load(); got != 1 {
+		t.Fatalf("second retired generation close requests = %d; want 1", got)
+	}
+}
+
+// TestDriverRuntime_ConcurrentStopReplaceSerializesRetirementAndConstruction
+// proves that racing operations neither duplicate a generation constructor nor
+// send more than one close request per generation they retire.
+func TestDriverRuntime_ConcurrentStopReplaceSerializesRetirementAndConstruction(t *testing.T) {
+	t.Parallel()
+
+	first := newManagedLifecycleTransport()
+	second := newManagedLifecycleTransport()
+	var constructed atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			switch constructed.Add(1) {
+			case 1:
+				return managedTransport(first), nil
+			case 2:
+				return managedTransport(second), nil
+			default:
+				return nil, fmt.Errorf("duplicate constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: time.Second},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	barrier := make(chan struct{})
+	stopResult := make(chan error, 1)
+	replaceResult := make(chan error, 1)
+	go func() {
+		<-barrier
+		stopResult <- runtime.Stop(context.Background())
+	}()
+	go func() {
+		<-barrier
+		_, err := runtime.Replace(context.Background())
+		replaceResult <- err
+	}()
+	close(barrier)
+	if err := <-stopResult; err != nil {
+		t.Fatalf("concurrent Stop() error = %v", err)
+	}
+	if err := <-replaceResult; err != nil {
+		t.Fatalf("concurrent Replace() error = %v", err)
+	}
+	if got := constructed.Load(); got != 2 {
+		t.Fatalf("constructors after Stop||Replace = %d; want exactly 2", got)
+	}
+	if got := first.closeCalls.Load(); got != 1 {
+		t.Fatalf("first retired generation close requests = %d; want 1", got)
+	}
+	if runtime.SafetyQuarantined() {
+		t.Fatal("confirmed Stop||Replace retirement quarantined runtime")
+	}
+
+	lease, err := runtime.Admit(context.Background())
+	if errors.Is(err, transport.ErrDriverUnavailable) {
+		// Replace retired first and Stop retired the replacement. The second
+		// generation must have received exactly one request too.
+		if got := second.closeCalls.Load(); got != 1 {
+			t.Fatalf("second retired generation close requests = %d; want 1", got)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("final Admit() error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("final lease Release() error = %v", err)
+	}
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("final cleanup Stop() error = %v", err)
+	}
+	if got := second.closeCalls.Load(); got != 1 {
+		t.Fatalf("second retired generation close requests = %d; want 1", got)
+	}
+}
+
 func stopWithoutPanic(t *testing.T, runtime *transport.DriverRuntime) (err error) {
 	t.Helper()
 	defer func() {
