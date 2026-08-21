@@ -74,6 +74,13 @@ type DriverRuntime struct {
 	revision    uint64
 	current     *driverRuntimeGeneration
 	quarantined bool
+
+	// constructions contains every Start or Replace factory context registered
+	// before that operation waits for operationMu. Stop cancels this set before
+	// taking operationMu, preventing a blocked factory from hiding behind the
+	// lifecycle serializer.
+	constructionSeq     uint64
+	constructionCancels map[uint64]context.CancelFunc
 }
 
 type driverRuntimeGeneration struct {
@@ -92,7 +99,12 @@ type driverLease struct {
 	runtime    *DriverRuntime
 	generation *driverRuntimeGeneration
 	id         uint64
-	once       sync.Once
+
+	mu             sync.Mutex
+	invoked        bool
+	invoking       bool
+	released       bool
+	releasePending bool
 }
 
 // NewDriverRuntime constructs a dormant runtime. It does not call factory and
@@ -130,53 +142,60 @@ func (r *DriverRuntime) SafetyQuarantined() bool {
 // Start admits a new generation only while stopped. It is idempotent for the
 // active generation and never reuses a retired transport.
 func (r *DriverRuntime) Start(ctx context.Context) (uint64, error) {
+	generationCtx, constructionID, cancel := r.registerConstruction(ctx)
+	defer r.finishConstruction(constructionID)
+
 	r.operationMu.Lock()
 	defer r.operationMu.Unlock()
-	return r.startLocked(ctx)
+	return r.startLocked(generationCtx, cancel)
 }
 
 // Replace retires the active generation before constructing a new one. If the
 // old generation cannot be proven closed, quarantine prevents replacement.
 func (r *DriverRuntime) Replace(ctx context.Context) (uint64, error) {
+	r.cancelConstructions()
+	generationCtx, constructionID, cancel := r.registerConstruction(ctx)
+	defer r.finishConstruction(constructionID)
+
 	r.operationMu.Lock()
 	defer r.operationMu.Unlock()
 
 	if err := r.stopLocked(); err != nil {
 		return 0, err
 	}
-	return r.startLocked(ctx)
+	return r.startLocked(generationCtx, cancel)
 }
 
 // Stop withdraws admission, cancels the exact generation, drains already
 // admitted work, then closes and proves the generation retired.
 func (r *DriverRuntime) Stop(context.Context) error {
+	r.cancelConstructions()
 	r.operationMu.Lock()
 	defer r.operationMu.Unlock()
 	return r.stopLocked()
 }
 
-func (r *DriverRuntime) startLocked(ctx context.Context) (uint64, error) {
+func (r *DriverRuntime) startLocked(generationCtx context.Context, cancel context.CancelFunc) (uint64, error) {
 	// Start owns operationMu in the public method; inline the implementation to
 	// keep Replace one indivisible stop-then-start operation.
 	r.mu.Lock()
 	if r.quarantined {
 		r.mu.Unlock()
+		cancel()
 		return 0, ErrDriverSafetyQuarantined
 	}
 	if r.current != nil {
 		generation := r.generation
 		r.mu.Unlock()
+		cancel()
 		return generation, nil
 	}
 	factory := r.factory
 	r.mu.Unlock()
 	if factory == nil {
+		cancel()
 		return 0, ErrDriverUnavailable
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	generationCtx, cancel := context.WithCancel(context.Background())
 	managed, err := factory(generationCtx)
 	if err != nil {
 		cancel()
@@ -187,7 +206,7 @@ func (r *DriverRuntime) startLocked(ctx context.Context) (uint64, error) {
 		r.quarantine()
 		return 0, ErrDriverSafetyQuarantined
 	}
-	if err := ctx.Err(); err != nil {
+	if err := generationCtx.Err(); err != nil {
 		if !r.retireUnadmitted(managed, cancel) {
 			return 0, ErrDriverSafetyQuarantined
 		}
@@ -206,6 +225,40 @@ func (r *DriverRuntime) startLocked(ctx context.Context) (uint64, error) {
 	r.revision++
 	r.current = &driverRuntimeGeneration{transport: managed, cancel: cancel, accepting: true, drained: make(chan struct{})}
 	return r.generation, nil
+}
+
+func (r *DriverRuntime) registerConstruction(ctx context.Context) (context.Context, uint64, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	generationCtx, cancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.constructionSeq++
+	id := r.constructionSeq
+	if r.constructionCancels == nil {
+		r.constructionCancels = make(map[uint64]context.CancelFunc)
+	}
+	r.constructionCancels[id] = cancel
+	r.mu.Unlock()
+	return generationCtx, id, cancel
+}
+
+func (r *DriverRuntime) finishConstruction(id uint64) {
+	r.mu.Lock()
+	delete(r.constructionCancels, id)
+	r.mu.Unlock()
+}
+
+func (r *DriverRuntime) cancelConstructions() {
+	r.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(r.constructionCancels))
+	for _, cancel := range r.constructionCancels {
+		cancels = append(cancels, cancel)
+	}
+	r.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (r *DriverRuntime) stopLocked() error {
@@ -353,30 +406,70 @@ func (a *driverLease) Generation() uint64 { return a.id }
 // Invoke runs fn only while the admission still belongs to the effective
 // generation. Stale callbacks receive a typed error and do not touch transport.
 func (a *driverLease) Invoke(fn func(RawTransport) error) error {
-	if fn == nil {
-		return ErrDriverUnavailable
+	a.mu.Lock()
+	if a.invoked || a.released {
+		a.mu.Unlock()
+		return ErrStaleDriverGeneration
 	}
+	a.invoked = true
+	a.invoking = true
+	a.mu.Unlock()
+
 	a.runtime.mu.Lock()
 	valid := !a.runtime.quarantined && a.runtime.current == a.generation && a.generation.accepting
 	a.runtime.mu.Unlock()
 	if !valid {
+		a.finishInvocation()
 		return ErrStaleDriverGeneration
 	}
-	return fn(a.generation.transport.Transport)
+	if fn == nil {
+		a.finishInvocation()
+		return ErrDriverUnavailable
+	}
+	err := fn(a.generation.transport.Transport)
+	a.finishInvocation()
+	return err
 }
 
 // Release ends the admission's in-flight ownership. It is safe to call once
 // or repeatedly; only the first call changes drain accounting.
 func (a *driverLease) Release() error {
-	a.once.Do(func() {
-		a.runtime.mu.Lock()
-		defer a.runtime.mu.Unlock()
-		if a.generation.inFlight > 0 {
-			a.generation.inFlight--
-			if a.generation.inFlight == 0 && !a.generation.accepting {
-				close(a.generation.drained)
-			}
-		}
-	})
+	a.mu.Lock()
+	if a.released {
+		a.mu.Unlock()
+		return nil
+	}
+	if a.invoking {
+		a.releasePending = true
+		a.mu.Unlock()
+		return nil
+	}
+	a.released = true
+	a.mu.Unlock()
+	a.releaseGeneration()
 	return nil
+}
+
+func (a *driverLease) finishInvocation() {
+	a.mu.Lock()
+	a.invoking = false
+	releaseNow := a.releasePending && !a.released
+	if releaseNow {
+		a.released = true
+	}
+	a.mu.Unlock()
+	if releaseNow {
+		a.releaseGeneration()
+	}
+}
+
+func (a *driverLease) releaseGeneration() {
+	a.runtime.mu.Lock()
+	defer a.runtime.mu.Unlock()
+	if a.generation.inFlight > 0 {
+		a.generation.inFlight--
+		if a.generation.inFlight == 0 && !a.generation.accepting {
+			close(a.generation.drained)
+		}
+	}
 }

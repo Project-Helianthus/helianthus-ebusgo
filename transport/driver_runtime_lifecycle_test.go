@@ -594,17 +594,36 @@ func TestDriverRuntime_ConcurrentStopReplaceSerializesRetirementAndConstruction(
 	if err := <-stopResult; err != nil {
 		t.Fatalf("concurrent Stop() error = %v", err)
 	}
-	if err := <-replaceResult; err != nil {
-		t.Fatalf("concurrent Replace() error = %v", err)
+	replaceErr := <-replaceResult
+	if replaceErr != nil && !errors.Is(replaceErr, context.Canceled) {
+		t.Fatalf("concurrent Replace() error = %v", replaceErr)
 	}
-	if got := constructed.Load(); got != 2 {
-		t.Fatalf("constructors after Stop||Replace = %d; want exactly 2", got)
+	if got := constructed.Load(); got < 1 || got > 2 {
+		t.Fatalf("constructors after Stop||Replace = %d; want 1 or 2", got)
 	}
 	if got := first.closeCalls.Load(); got != 1 {
 		t.Fatalf("first retired generation close requests = %d; want 1", got)
 	}
 	if runtime.SafetyQuarantined() {
 		t.Fatal("confirmed Stop||Replace retirement quarantined runtime")
+	}
+	if errors.Is(replaceErr, context.Canceled) {
+		// Stop observed the provisional Replace registration first. The
+		// replacement either observes cancellation before construction or
+		// returns one provisional resource which must be retired without ever
+		// becoming an admitted generation.
+		if got := constructed.Load(); got == 2 {
+			if closes := second.closeCalls.Load(); closes != 1 {
+				t.Fatalf("canceled provisional replacement close requests = %d; want 1", closes)
+			}
+		}
+		if got := runtime.Generation(); got != 1 {
+			t.Fatalf("Stop-canceled Replace admitted generation = %d; want 1", got)
+		}
+		if _, err := runtime.Admit(context.Background()); !errors.Is(err, transport.ErrDriverUnavailable) {
+			t.Fatalf("Stop-canceled Replace final Admit() error = %v; want ErrDriverUnavailable", err)
+		}
+		return
 	}
 
 	lease, err := runtime.Admit(context.Background())
