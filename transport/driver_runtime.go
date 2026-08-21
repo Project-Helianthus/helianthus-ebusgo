@@ -27,22 +27,29 @@ var (
 	ErrDriverStopTimeout = errors.New("ebus driver runtime stop timed out")
 )
 
-// ManagedRawTransport adds a close-confirmation boundary to RawTransport.
-// Existing RawTransport implementations remain valid and unchanged; only a
-// lifecycle-managed runtime needs to implement this stronger ownership proof.
-type ManagedRawTransport interface {
-	RawTransport
-	// InitiateClose must begin transport-owned teardown without blocking past
-	// ctx's deadline. The managed transport owns any closer goroutine; the
-	// runtime never calls the legacy RawTransport.Close method synchronously.
-	InitiateClose(context.Context) error
-	WaitClosed(context.Context) error
+// DriverLifecycleHandle is a transport-owned, data-only close handshake.
+// The adapter worker receives exactly one request on CloseRequest, starts or
+// completes its own teardown, then closes Closed only once resources and any
+// adapter-owned closer have actually retired. DriverRuntime merely selects on
+// these channels; it never invokes arbitrary transport close code or starts a
+// cleanup goroutine.
+type DriverLifecycleHandle struct {
+	CloseRequest chan<- struct{}
+	Closed       <-chan struct{}
+}
+
+// ManagedRawTransport binds an existing RawTransport to its lifecycle handle.
+// It is additive: legacy RawTransport implementations and callers remain
+// unchanged because only DriverRuntime factories use this wrapper.
+type ManagedRawTransport struct {
+	Transport RawTransport
+	Lifecycle DriverLifecycleHandle
 }
 
 // DriverRuntimeFactory constructs one fresh transport generation. The context
 // is owned by that generation and is canceled before drain and close begin.
 // A failed construction never advances DriverRuntime.Generation.
-type DriverRuntimeFactory func(context.Context) (ManagedRawTransport, error)
+type DriverRuntimeFactory func(context.Context) (*ManagedRawTransport, error)
 
 // DriverRuntimeConfig bounds both the pre-close drain and post-close proof.
 type DriverRuntimeConfig struct {
@@ -67,7 +74,7 @@ type DriverRuntime struct {
 }
 
 type driverRuntimeGeneration struct {
-	transport ManagedRawTransport
+	transport *ManagedRawTransport
 	cancel    context.CancelFunc
 
 	accepting bool
@@ -172,9 +179,10 @@ func (r *DriverRuntime) startLocked(ctx context.Context) (uint64, error) {
 		cancel()
 		return 0, err
 	}
-	if managed == nil {
+	if !validManagedTransport(managed) {
 		cancel()
-		return 0, ErrDriverUnavailable
+		r.quarantine()
+		return 0, ErrDriverSafetyQuarantined
 	}
 	if err := ctx.Err(); err != nil {
 		if !r.retireUnadmitted(managed, cancel) {
@@ -232,7 +240,7 @@ func (r *DriverRuntime) stopLocked() error {
 	return nil
 }
 
-func (r *DriverRuntime) retireUnadmitted(managed ManagedRawTransport, cancel context.CancelFunc) bool {
+func (r *DriverRuntime) retireUnadmitted(managed *ManagedRawTransport, cancel context.CancelFunc) bool {
 	deadline, stop := context.WithTimeout(context.Background(), r.timeout)
 	defer stop()
 	if !r.retireManaged(deadline, managed, cancel) {
@@ -242,12 +250,34 @@ func (r *DriverRuntime) retireUnadmitted(managed ManagedRawTransport, cancel con
 	return true
 }
 
-func (r *DriverRuntime) retireManaged(ctx context.Context, managed ManagedRawTransport, cancel context.CancelFunc) bool {
+func (r *DriverRuntime) retireManaged(ctx context.Context, managed *ManagedRawTransport, cancel context.CancelFunc) bool {
 	cancel()
-	if err := managed.InitiateClose(ctx); err != nil {
+	if !validManagedTransport(managed) {
 		return false
 	}
-	return managed.WaitClosed(ctx) == nil
+	select {
+	case managed.Lifecycle.CloseRequest <- struct{}{}:
+	case <-ctx.Done():
+		return false
+	}
+	select {
+	case <-managed.Lifecycle.Closed:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func validManagedTransport(managed *ManagedRawTransport) bool {
+	if managed == nil || managed.Transport == nil || managed.Lifecycle.CloseRequest == nil || managed.Lifecycle.Closed == nil {
+		return false
+	}
+	select {
+	case <-managed.Lifecycle.Closed:
+		return false
+	default:
+		return true
+	}
 }
 
 func (r *DriverRuntime) quarantine() {
@@ -310,7 +340,7 @@ func (a *driverLease) Invoke(fn func(RawTransport) error) error {
 	if !valid {
 		return ErrStaleDriverGeneration
 	}
-	return fn(a.generation.transport)
+	return fn(a.generation.transport.Transport)
 }
 
 // Release ends the admission's in-flight ownership. It is safe to call once
