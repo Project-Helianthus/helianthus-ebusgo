@@ -3,6 +3,7 @@ package transport_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,9 +179,152 @@ func TestDriverRuntime_StopWithdrawsAdmissionBeforeDrain(t *testing.T) {
 	}
 }
 
+// TestDriverRuntime_StartCanceledAfterFactoryQuarantinesFailedCleanup covers
+// the direct Start entry: an unadmitted transport still has to be retired and
+// a failed cleanup must fence the process epoch before another constructor can
+// run.
+func TestDriverRuntime_StartCanceledAfterFactoryQuarantinesFailedCleanup(t *testing.T) {
+	t.Parallel()
+
+	var constructed atomic.Int32
+	returned := make(chan struct{})
+	allowReturn := make(chan struct{})
+	instance := newManagedLifecycleTransport()
+	instance.closeErr = errors.New("close initiation failed")
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (transport.ManagedRawTransport, error) {
+			constructed.Add(1)
+			close(returned)
+			<-allowReturn
+			return instance, nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
+	)
+
+	startCtx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := runtime.Start(startCtx)
+		result <- err
+	}()
+	<-returned
+	cancel()
+	close(allowReturn)
+
+	if err := <-result; !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("canceled Start() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
+}
+
+// TestDriverRuntime_ReplaceCanceledAfterFactoryQuarantinesFailedCleanup covers
+// the start portion of serialized Replace after the old generation retired.
+func TestDriverRuntime_ReplaceCanceledAfterFactoryQuarantinesFailedCleanup(t *testing.T) {
+	t.Parallel()
+
+	var constructed atomic.Int32
+	returned := make(chan struct{})
+	allowReturn := make(chan struct{})
+	first := newManagedLifecycleTransport()
+	second := newManagedLifecycleTransport()
+	second.closeErr = errors.New("close initiation failed")
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (transport.ManagedRawTransport, error) {
+			switch constructed.Add(1) {
+			case 1:
+				return first, nil
+			case 2:
+				close(returned)
+				<-allowReturn
+				return second, nil
+			default:
+				return nil, fmt.Errorf("unexpected constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("initial Start() error = %v", err)
+	}
+
+	replaceCtx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := runtime.Replace(replaceCtx)
+		result <- err
+	}()
+	<-returned
+	cancel()
+	close(allowReturn)
+
+	if err := <-result; !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("canceled Replace() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
+}
+
+// TestDriverRuntime_StopBoundedWhenRawCloseBlocks ensures that the lifecycle
+// serializer never waits indefinitely on a legacy RawTransport.Close call.
+func TestDriverRuntime_StopBoundedWhenRawCloseBlocks(t *testing.T) {
+	t.Parallel()
+
+	instance := newManagedLifecycleTransport()
+	instance.confirmClose = make(chan struct{})
+	instance.closeRelease = make(chan struct{})
+	bound := 25 * time.Millisecond
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (transport.ManagedRawTransport, error) { return instance, nil },
+		transport.DriverRuntimeConfig{DrainTimeout: bound},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	stopped := make(chan error, 1)
+	startedAt := time.Now()
+	go func() { stopped <- runtime.Stop(context.Background()) }()
+	select {
+	case err := <-stopped:
+		if !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+			t.Fatalf("Stop() error = %v; want ErrDriverSafetyQuarantined", err)
+		}
+		if elapsed := time.Since(startedAt); elapsed > 4*bound {
+			t.Fatalf("Stop() took %s; want bounded by %s", elapsed, 4*bound)
+		}
+	case <-time.After(4 * bound):
+		t.Error("Stop() remained blocked behind RawTransport.Close")
+		close(instance.closeRelease) // clean up the current implementation's closer
+		<-stopped
+	}
+	if !runtime.SafetyQuarantined() {
+		t.Fatal("runtime is not safety quarantined after unconfirmed close")
+	}
+	var constructed atomic.Int32
+	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
+}
+
+func assertQuarantineRejectsNewConstruction(t *testing.T, runtime *transport.DriverRuntime, constructed *atomic.Int32) {
+	t.Helper()
+	if !runtime.SafetyQuarantined() {
+		t.Fatal("runtime is not safety quarantined")
+	}
+	before := constructed.Load()
+	if _, err := runtime.Start(context.Background()); !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("quarantined Start() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	if _, err := runtime.Replace(context.Background()); !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("quarantined Replace() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	if got := constructed.Load(); got != before {
+		t.Fatalf("quarantine constructed %d additional instances; want 0", got-before)
+	}
+}
+
 type managedLifecycleTransport struct {
 	closeCalls   atomic.Int32
 	confirmClose chan struct{}
+	closeErr     error
+	closeRelease chan struct{}
 }
 
 func newManagedLifecycleTransport() *managedLifecycleTransport {
@@ -199,7 +343,10 @@ func (t *managedLifecycleTransport) Write([]byte) (int, error) {
 
 func (t *managedLifecycleTransport) Close() error {
 	t.closeCalls.Add(1)
-	return nil
+	if t.closeRelease != nil {
+		<-t.closeRelease
+	}
+	return t.closeErr
 }
 
 func (t *managedLifecycleTransport) WaitClosed(ctx context.Context) error {
