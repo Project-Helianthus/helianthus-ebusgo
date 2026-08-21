@@ -122,6 +122,62 @@ func TestDriverRuntime_UnconfirmedCloseQuarantinesProcessEpoch(t *testing.T) {
 	}
 }
 
+// TestDriverRuntime_StopWithdrawsAdmissionBeforeDrain proves the critical
+// ordering: new work is rejected after stop begins, even while pre-withdrawal
+// work still owns the bounded drain and before Close is allowed to run.
+func TestDriverRuntime_StopWithdrawsAdmissionBeforeDrain(t *testing.T) {
+	t.Parallel()
+
+	instance := newManagedLifecycleTransport()
+	generationContexts := make(chan context.Context, 1)
+	runtime := transport.NewDriverRuntime(
+		func(ctx context.Context) (transport.ManagedRawTransport, error) {
+			generationContexts <- ctx
+			return instance, nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: time.Second},
+	)
+
+	if got := runtime.Revision(); got != 1 {
+		t.Fatalf("initial revision = %d; want 1", got)
+	}
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if got := runtime.Revision(); got != 2 {
+		t.Fatalf("post-start revision = %d; want 2", got)
+	}
+	generationCtx := <-generationContexts
+
+	admission, err := runtime.Admit(context.Background())
+	if err != nil {
+		t.Fatalf("Admit() error = %v", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- runtime.Stop(context.Background()) }()
+
+	select {
+	case <-generationCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not cancel the exact active generation")
+	}
+	if _, err := runtime.Admit(context.Background()); !errors.Is(err, transport.ErrDriverUnavailable) {
+		t.Fatalf("post-withdrawal admission error = %v; want ErrDriverUnavailable", err)
+	}
+	if got := instance.closeCalls.Load(); got != 0 {
+		t.Fatalf("Close ran before admitted work drained; calls = %d", got)
+	}
+	if err := admission.Release(); err != nil {
+		t.Fatalf("admission release error = %v", err)
+	}
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if got := runtime.Revision(); got != 3 {
+		t.Fatalf("post-stop revision = %d; want 3", got)
+	}
+}
+
 type managedLifecycleTransport struct {
 	closeCalls   atomic.Int32
 	confirmClose chan struct{}
