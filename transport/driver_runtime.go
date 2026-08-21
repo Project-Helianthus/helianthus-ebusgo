@@ -79,8 +79,8 @@ type DriverRuntime struct {
 	// before that operation waits for operationMu. Stop cancels this set before
 	// taking operationMu, preventing a blocked factory from hiding behind the
 	// lifecycle serializer.
-	constructionSeq     uint64
-	constructionCancels map[uint64]context.CancelFunc
+	constructionSeq uint64
+	constructions   map[uint64]*driverConstruction
 }
 
 type driverRuntimeGeneration struct {
@@ -91,6 +91,19 @@ type driverRuntimeGeneration struct {
 	inFlight        int
 	activeCallbacks int
 	drained         chan struct{}
+}
+
+// driverConstruction separates caller cancellation authority (valid only
+// before admission) from the runtime-owned generation context. The forwarding
+// callback is detached under forwardMu before the generation can be admitted.
+type driverConstruction struct {
+	runtimeCtx    context.Context
+	runtimeCancel context.CancelFunc
+	callerCtx     context.Context
+	stopForward   func() bool
+
+	forwardMu sync.Mutex
+	detached  bool
 }
 
 // driverLease owns one admitted invocation. Although its concrete type is
@@ -143,20 +156,20 @@ func (r *DriverRuntime) SafetyQuarantined() bool {
 // Start admits a new generation only while stopped. It is idempotent for the
 // active generation and never reuses a retired transport.
 func (r *DriverRuntime) Start(ctx context.Context) (uint64, error) {
-	generationCtx, constructionID, cancel := r.registerConstruction(ctx)
-	defer r.finishConstruction(constructionID)
+	construction, constructionID := r.registerConstruction(ctx)
+	defer r.finishConstruction(constructionID, construction)
 
 	r.operationMu.Lock()
 	defer r.operationMu.Unlock()
-	return r.startLocked(generationCtx, cancel)
+	return r.startLocked(construction)
 }
 
 // Replace retires the active generation before constructing a new one. If the
 // old generation cannot be proven closed, quarantine prevents replacement.
 func (r *DriverRuntime) Replace(ctx context.Context) (uint64, error) {
 	r.cancelConstructions()
-	generationCtx, constructionID, cancel := r.registerConstruction(ctx)
-	defer r.finishConstruction(constructionID)
+	construction, constructionID := r.registerConstruction(ctx)
+	defer r.finishConstruction(constructionID, construction)
 
 	r.operationMu.Lock()
 	defer r.operationMu.Unlock()
@@ -164,7 +177,7 @@ func (r *DriverRuntime) Replace(ctx context.Context) (uint64, error) {
 	if err := r.stopLocked(); err != nil {
 		return 0, err
 	}
-	return r.startLocked(generationCtx, cancel)
+	return r.startLocked(construction)
 }
 
 // Stop withdraws admission, cancels the exact generation, drains already
@@ -176,53 +189,53 @@ func (r *DriverRuntime) Stop(context.Context) error {
 	return r.stopLocked()
 }
 
-func (r *DriverRuntime) startLocked(generationCtx context.Context, cancel context.CancelFunc) (uint64, error) {
+func (r *DriverRuntime) startLocked(construction *driverConstruction) (uint64, error) {
 	// Start owns operationMu in the public method; inline the implementation to
 	// keep Replace one indivisible stop-then-start operation.
 	r.mu.Lock()
 	if r.quarantined {
 		r.mu.Unlock()
-		cancel()
+		construction.runtimeCancel()
 		return 0, ErrDriverSafetyQuarantined
 	}
 	if r.current != nil {
 		generation := r.generation
 		r.mu.Unlock()
-		cancel()
+		construction.runtimeCancel()
 		return generation, nil
 	}
 	factory := r.factory
 	r.mu.Unlock()
 	if factory == nil {
-		cancel()
+		construction.runtimeCancel()
 		return 0, ErrDriverUnavailable
 	}
-	managed, err := factory(generationCtx)
+	managed, err := factory(construction.runtimeCtx)
 	if err != nil {
 		if managed != nil {
-			if !r.retireUnadmitted(managed, cancel) {
+			if !r.retireUnadmitted(managed, construction.runtimeCancel) {
 				return 0, ErrDriverSafetyQuarantined
 			}
 		} else {
-			cancel()
+			construction.runtimeCancel()
 		}
 		return 0, err
 	}
 	if !validManagedTransport(managed) {
-		cancel()
+		construction.runtimeCancel()
 		r.quarantine()
 		return 0, ErrDriverSafetyQuarantined
 	}
-	if err := generationCtx.Err(); err != nil {
-		if !r.retireUnadmitted(managed, cancel) {
+	if !construction.detachForAdmission() {
+		if !r.retireUnadmitted(managed, construction.runtimeCancel) {
 			return 0, ErrDriverSafetyQuarantined
 		}
-		return 0, err
+		return 0, construction.cancellationError()
 	}
 	r.mu.Lock()
 	if r.quarantined {
 		r.mu.Unlock()
-		if !r.retireUnadmitted(managed, cancel) {
+		if !r.retireUnadmitted(managed, construction.runtimeCancel) {
 			return 0, ErrDriverSafetyQuarantined
 		}
 		return 0, ErrDriverSafetyQuarantined
@@ -230,42 +243,72 @@ func (r *DriverRuntime) startLocked(generationCtx context.Context, cancel contex
 	defer r.mu.Unlock()
 	r.generation++
 	r.revision++
-	r.current = &driverRuntimeGeneration{transport: managed, cancel: cancel, accepting: true, drained: make(chan struct{})}
+	r.current = &driverRuntimeGeneration{transport: managed, cancel: construction.runtimeCancel, accepting: true, drained: make(chan struct{})}
 	return r.generation, nil
 }
 
-func (r *DriverRuntime) registerConstruction(ctx context.Context) (context.Context, uint64, context.CancelFunc) {
+func (r *DriverRuntime) registerConstruction(ctx context.Context) (*driverConstruction, uint64) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	generationCtx, cancel := context.WithCancel(ctx)
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	construction := &driverConstruction{runtimeCtx: runtimeCtx, runtimeCancel: runtimeCancel, callerCtx: ctx}
+	construction.stopForward = context.AfterFunc(ctx, func() {
+		construction.forwardMu.Lock()
+		defer construction.forwardMu.Unlock()
+		if !construction.detached {
+			construction.runtimeCancel()
+		}
+	})
 	r.mu.Lock()
 	r.constructionSeq++
 	id := r.constructionSeq
-	if r.constructionCancels == nil {
-		r.constructionCancels = make(map[uint64]context.CancelFunc)
+	if r.constructions == nil {
+		r.constructions = make(map[uint64]*driverConstruction)
 	}
-	r.constructionCancels[id] = cancel
+	r.constructions[id] = construction
 	r.mu.Unlock()
-	return generationCtx, id, cancel
+	return construction, id
 }
 
-func (r *DriverRuntime) finishConstruction(id uint64) {
+func (r *DriverRuntime) finishConstruction(id uint64, construction *driverConstruction) {
+	construction.stopForward()
 	r.mu.Lock()
-	delete(r.constructionCancels, id)
+	delete(r.constructions, id)
 	r.mu.Unlock()
 }
 
 func (r *DriverRuntime) cancelConstructions() {
 	r.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(r.constructionCancels))
-	for _, cancel := range r.constructionCancels {
-		cancels = append(cancels, cancel)
+	cancels := make([]context.CancelFunc, 0, len(r.constructions))
+	for _, construction := range r.constructions {
+		cancels = append(cancels, construction.runtimeCancel)
 	}
 	r.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
 	}
+}
+
+func (c *driverConstruction) detachForAdmission() bool {
+	c.forwardMu.Lock()
+	defer c.forwardMu.Unlock()
+	if c.callerCtx.Err() != nil || c.runtimeCtx.Err() != nil {
+		return false
+	}
+	c.detached = true
+	c.stopForward()
+	return true
+}
+
+func (c *driverConstruction) cancellationError() error {
+	if err := c.callerCtx.Err(); err != nil {
+		return err
+	}
+	if err := c.runtimeCtx.Err(); err != nil {
+		return err
+	}
+	return context.Canceled
 }
 
 func (r *DriverRuntime) stopLocked() error {

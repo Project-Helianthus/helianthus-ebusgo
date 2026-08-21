@@ -1080,7 +1080,14 @@ func TestDriverRuntime_CallerCancelAfterAdmissionDoesNotCancelGeneration(t *test
 
 	workerContext := make(chan context.Context, 1)
 	workerStopped := make(chan struct{})
-	raw := newManagedLifecycleTransport()
+	closeRequest := make(chan struct{})
+	closed := make(chan struct{})
+	raw := &callbackProbeTransport{}
+	go func() {
+		<-closeRequest
+		raw.closed.Store(true)
+		close(closed)
+	}()
 	runtime := transport.NewDriverRuntime(
 		func(ctx context.Context) (*transport.ManagedRawTransport, error) {
 			workerContext <- ctx
@@ -1088,7 +1095,10 @@ func TestDriverRuntime_CallerCancelAfterAdmissionDoesNotCancelGeneration(t *test
 				<-ctx.Done()
 				close(workerStopped)
 			}()
-			return managedTransport(raw), nil
+			return &transport.ManagedRawTransport{
+				Transport: raw,
+				Lifecycle: transport.DriverLifecycleHandle{CloseRequest: closeRequest, Closed: closed},
+			}, nil
 		},
 		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
 	)
