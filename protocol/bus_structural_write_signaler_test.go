@@ -262,14 +262,14 @@ func TestStructuralWriteSignaler_PayloadAa_NoSignal(t *testing.T) {
 	}
 	// ACK from target (0x00), no responder response (LEN=0), terminator SYN.
 	tr.echo = append(tr.echo,
-		signalerTestEvent{value: 0x00, wasEscaped: false},                  // initiator ACK from target
-		signalerTestEvent{value: 0x00, wasEscaped: false},                  // responder LEN=0
+		signalerTestEvent{value: 0x00, wasEscaped: false},                       // initiator ACK from target
+		signalerTestEvent{value: 0x00, wasEscaped: false},                       // responder LEN=0
 		signalerTestEvent{value: protocol.CRC([]byte{0x00}), wasEscaped: false}, // responder CRC
 	)
 	// Initiator sends ACK (0x00) to responder response, then terminator SYN.
 	tr.echo = append(tr.echo,
-		signalerTestEvent{value: 0x00, wasEscaped: false},                  // initiator ACK echo
-		signalerTestEvent{value: protocol.SymbolSyn, wasEscaped: false},    // terminator SYN echo
+		signalerTestEvent{value: 0x00, wasEscaped: false},               // initiator ACK echo
+		signalerTestEvent{value: protocol.SymbolSyn, wasEscaped: false}, // terminator SYN echo
 	)
 
 	bus := protocol.NewBus(tr, protocol.DefaultBusConfig(), 8)

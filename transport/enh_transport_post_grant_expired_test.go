@@ -114,15 +114,15 @@ func TestPostGrantWindowExpired_NotIncrementedOnFirstEcho(t *testing.T) {
 // adding 5 s+ of real wall time to the suite.
 //
 // Sequencing:
-//   1. RequestStart writes REQ_START, awaitingStart=true.
-//   2. Async-write STARTED on the wire.
-//   3. ReadEvent — this drives fillPendingLocked which processes
-//      STARTED (opens postGrantPreEcho window) and returns.
-//   4. Sleep > 50 ms (overridden postGrantPreEchoTimeout).
-//   5. Async-write a non-SYN byte.
-//   6. ReadByteWithEscape — fillPendingLocked sees the byte, observes
-//      postGrantPreEchoExpired()=true, closes window, increments
-//      the expiry counter.
+//  1. RequestStart writes REQ_START, awaitingStart=true.
+//  2. Async-write STARTED on the wire.
+//  3. ReadEvent — this drives fillPendingLocked which processes
+//     STARTED (opens postGrantPreEcho window) and returns.
+//  4. Sleep > 50 ms (overridden postGrantPreEchoTimeout).
+//  5. Async-write a non-SYN byte.
+//  6. ReadByteWithEscape — fillPendingLocked sees the byte, observes
+//     postGrantPreEchoExpired()=true, closes window, increments
+//     the expiry counter.
 func TestPostGrantWindowExpired_IncrementedOnDeadline(t *testing.T) {
 	// NOT t.Parallel: overrides postGrantPreEchoTimeout via a package-
 	// global mutation; running concurrently with
