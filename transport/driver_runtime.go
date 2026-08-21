@@ -441,13 +441,14 @@ func (a *driverLease) Invoke(fn func(RawTransport) error) error {
 		a.finishInvocation(false)
 		return ErrStaleDriverGeneration
 	}
+	// Install cleanup immediately after the successful claim. It deliberately
+	// does not recover: callback panics keep their normal propagation semantics
+	// while active callback and releasePending accounting is still completed.
+	defer a.finishInvocation(true)
 	if fn == nil {
-		a.finishInvocation(true)
 		return ErrDriverUnavailable
 	}
-	err := fn(a.generation.transport.Transport)
-	a.finishInvocation(true)
-	return err
+	return fn(a.generation.transport.Transport)
 }
 
 // Release ends the admission's in-flight ownership. It is safe to call once
