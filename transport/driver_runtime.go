@@ -51,7 +51,10 @@ type ManagedRawTransport struct {
 // A failed construction never advances DriverRuntime.Generation.
 type DriverRuntimeFactory func(context.Context) (*ManagedRawTransport, error)
 
-// DriverRuntimeConfig bounds both the pre-close drain and post-close proof.
+// DriverRuntimeConfig bounds each teardown phase independently. Stop spends at
+// most one DrainTimeout waiting for admitted work and then a fresh DrainTimeout
+// requesting and proving close, for a documented total bound of twice this
+// duration (plus scheduler latency).
 type DriverRuntimeConfig struct {
 	DrainTimeout time.Duration
 }
@@ -227,10 +230,13 @@ func (r *DriverRuntime) stopLocked() error {
 	generation.cancel()
 	r.mu.Unlock()
 
-	deadline, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-	drainTimedOut := !waitForGeneration(deadline, generation.drained)
-	if !r.retireManaged(deadline, generation.transport, generation.cancel) {
+	drainDeadline, cancelDrain := context.WithTimeout(context.Background(), r.timeout)
+	drainTimedOut := !waitForGeneration(drainDeadline, generation.drained)
+	cancelDrain()
+
+	closeDeadline, cancelClose := context.WithTimeout(context.Background(), r.timeout)
+	defer cancelClose()
+	if !r.retireManaged(closeDeadline, generation.transport, generation.cancel) {
 		r.quarantine()
 		return ErrDriverSafetyQuarantined
 	}
@@ -255,13 +261,29 @@ func (r *DriverRuntime) retireManaged(ctx context.Context, managed *ManagedRawTr
 	if !validManagedTransport(managed) {
 		return false
 	}
-	select {
-	case managed.Lifecycle.CloseRequest <- struct{}{}:
-	case <-ctx.Done():
+	if !sendCloseRequest(ctx, managed.Lifecycle.CloseRequest) {
 		return false
 	}
 	select {
 	case <-managed.Lifecycle.Closed:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// sendCloseRequest contains the only send to the adapter-owned request
+// channel. A closed channel is an adapter ownership violation; recover turns
+// it into failed lifecycle proof instead of allowing a process panic. No
+// goroutine is started and an unaccepted request is bounded by ctx.
+func sendCloseRequest(ctx context.Context, request chan<- struct{}) (accepted bool) {
+	defer func() {
+		if recover() != nil {
+			accepted = false
+		}
+	}()
+	select {
+	case request <- struct{}{}:
 		return true
 	case <-ctx.Done():
 		return false
