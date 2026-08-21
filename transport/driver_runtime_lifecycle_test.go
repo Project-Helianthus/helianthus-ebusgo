@@ -830,6 +830,170 @@ func TestDriverRuntime_StopCancelsRegisteredFactory(t *testing.T) {
 	}
 }
 
+// TestDriverRuntime_ActiveCallbackDrainTimeoutQuarantinesWithoutCloseRequest
+// distinguishes executing callbacks from abandoned leases: an active callback
+// may not be force-closed after drain expiry because it could still touch the
+// raw transport.
+func TestDriverRuntime_ActiveCallbackDrainTimeoutQuarantinesWithoutCloseRequest(t *testing.T) {
+	t.Parallel()
+
+	request := make(chan struct{})
+	closed := make(chan struct{})
+	workerStop := make(chan struct{})
+	closeRequested := make(chan struct{})
+	raw := &callbackProbeTransport{}
+	go func() {
+		select {
+		case <-request:
+			close(closeRequested)
+			raw.closed.Store(true)
+			close(closed)
+		case <-workerStop:
+		}
+	}()
+	defer close(workerStop)
+
+	var constructed atomic.Int32
+	bound := 15 * time.Millisecond
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			constructed.Add(1)
+			return &transport.ManagedRawTransport{
+				Transport: raw,
+				Lifecycle: transport.DriverLifecycleHandle{CloseRequest: request, Closed: closed},
+			}, nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: bound},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	lease, err := runtime.Admit(context.Background())
+	if err != nil {
+		t.Fatalf("Admit() error = %v", err)
+	}
+	callbackStarted := make(chan struct{})
+	allowCallbackReturn := make(chan struct{})
+	invokeDone := make(chan error, 1)
+	go func() {
+		invokeDone <- lease.Invoke(func(tr transport.RawTransport) error {
+			close(callbackStarted)
+			<-allowCallbackReturn
+			_, err := tr.Write([]byte{0x01})
+			return err
+		})
+	}()
+	<-callbackStarted
+
+	startedAt := time.Now()
+	if err := runtime.Stop(context.Background()); !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("Stop() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 4*bound {
+		t.Fatalf("Stop() took %s; want bounded drain-only quarantine", elapsed)
+	}
+	select {
+	case <-closeRequested:
+		t.Fatal("active callback drain timeout sent CloseRequest")
+	default:
+	}
+	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
+	close(allowCallbackReturn)
+	if err := <-invokeDone; err != nil {
+		t.Fatalf("active callback Invoke() error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("post-callback Release() error = %v", err)
+	}
+	select {
+	case <-closeRequested:
+		t.Fatal("quarantined runtime sent CloseRequest after callback returned")
+	case <-time.After(25 * time.Millisecond):
+	}
+	if got := raw.postCloseWrites.Load(); got != 0 {
+		t.Fatalf("post-close writes = %d; want 0", got)
+	}
+}
+
+// TestDriverRuntime_FactoryManagedErrorRetiresBeforeReturning proves that a
+// factory cannot hand back a resource and an error without the resource first
+// going through the same data-only close proof as an unadmitted cancellation.
+func TestDriverRuntime_FactoryManagedErrorRetiresBeforeReturning(t *testing.T) {
+	t.Parallel()
+
+	request := make(chan struct{})
+	closed := make(chan struct{})
+	retired := make(chan struct{})
+	go func() {
+		<-request
+		close(retired)
+		close(closed)
+	}()
+	first := newManagedLifecycleTransport()
+	second := newManagedLifecycleTransport()
+	factoryErr := errors.New("factory rejected descriptor")
+	var calls atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			switch calls.Add(1) {
+			case 1:
+				return &transport.ManagedRawTransport{
+					Transport: first,
+					Lifecycle: transport.DriverLifecycleHandle{CloseRequest: request, Closed: closed},
+				}, factoryErr
+			case 2:
+				return managedTransport(second), nil
+			default:
+				return nil, fmt.Errorf("unexpected constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
+	)
+	if _, err := runtime.Start(context.Background()); !errors.Is(err, factoryErr) {
+		t.Fatalf("Start() error = %v; want factory error", err)
+	}
+	select {
+	case <-retired:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("factory managed error returned without close request/proof")
+	}
+	if got := runtime.Generation(); got != 0 {
+		t.Fatalf("factory managed error admitted generation = %d; want 0", got)
+	}
+	if runtime.SafetyQuarantined() {
+		t.Fatal("proven factory cleanup quarantined runtime")
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 1 {
+		t.Fatalf("later Start() = (%d, %v); want (1, nil)", generation, err)
+	}
+}
+
+// TestDriverRuntime_FactoryManagedErrorFailedProofQuarantines verifies the
+// conservative counterpart: a returned resource with invalid or unproven
+// lifecycle proof fences this process epoch before another constructor runs.
+func TestDriverRuntime_FactoryManagedErrorFailedProofQuarantines(t *testing.T) {
+	t.Parallel()
+
+	request := make(chan struct{}) // no adapter worker accepts it
+	closed := make(chan struct{})
+	factoryErr := errors.New("factory rejected descriptor")
+	var calls atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			calls.Add(1)
+			return &transport.ManagedRawTransport{
+				Transport: newManagedLifecycleTransport(),
+				Lifecycle: transport.DriverLifecycleHandle{CloseRequest: request, Closed: closed},
+			}, factoryErr
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 15 * time.Millisecond},
+	)
+	if _, err := runtime.Start(context.Background()); !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("Start() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	assertQuarantineRejectsNewConstruction(t, runtime, &calls)
+}
+
 func stopWithoutPanic(t *testing.T, runtime *transport.DriverRuntime) (err error) {
 	t.Helper()
 	defer func() {
