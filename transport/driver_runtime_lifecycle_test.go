@@ -1337,6 +1337,69 @@ func TestDriverRuntime_StopBoundsIgnoringFactoryAndFencesLateResult(t *testing.T
 	}
 }
 
+// TestDriverRuntime_RetirementFenceBlocksExternalStartUntilProof holds the
+// old generation's Closed proof after withdrawal. A racing external Start must
+// not register or call its factory until retirement is proven.
+func TestDriverRuntime_RetirementFenceBlocksExternalStartUntilProof(t *testing.T) {
+	oldRequest := make(chan struct{})
+	oldClosed := make(chan struct{})
+	oldCloseRequests := atomic.Int32{}
+	go func() {
+		<-oldRequest
+		oldCloseRequests.Add(1)
+		// Test owns proof timing.
+	}()
+	first := &ManagedRawTransport{
+		Transport: &callbackProbeTransport{},
+		Lifecycle: DriverLifecycleHandle{CloseRequest: oldRequest, Closed: oldClosed},
+	}
+	second := newManagedLifecycleTransport()
+	secondFactoryCalled := make(chan struct{}, 1)
+	var calls atomic.Int32
+	runtime := NewDriverRuntime(func(context.Context) (*ManagedRawTransport, error) {
+		switch calls.Add(1) {
+		case 1:
+			return first, nil
+		case 2:
+			secondFactoryCalled <- struct{}{}
+			return managedTransport(second), nil
+		default:
+			return nil, fmt.Errorf("duplicate constructor call")
+		}
+	}, DriverRuntimeConfig{DrainTimeout: 100 * time.Millisecond})
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("initial Start() error = %v", err)
+	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- runtime.Stop(context.Background()) }()
+	for oldCloseRequests.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	startDone := make(chan error, 1)
+	go func() { _, err := runtime.Start(context.Background()); startDone <- err }()
+	select {
+	case <-secondFactoryCalled:
+		t.Fatal("external Start called factory before old Closed proof")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if got := runtime.Generation(); got != 1 {
+		t.Fatalf("generation before retirement proof = %d; want 1", got)
+	}
+	close(oldClosed)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if err := <-startDone; err != nil {
+		t.Fatalf("post-proof Start() error = %v", err)
+	}
+	if generation := runtime.Generation(); generation != 2 {
+		t.Fatalf("post-proof generation = %d; want 2", generation)
+	}
+	if got := oldCloseRequests.Load(); got != 1 {
+		t.Fatalf("old close requests = %d; want 1", got)
+	}
+}
+
 func stopWithoutPanic(t *testing.T, runtime *DriverRuntime) (err error) {
 	t.Helper()
 	defer func() {
