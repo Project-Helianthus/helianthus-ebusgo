@@ -994,6 +994,115 @@ func TestDriverRuntime_FactoryManagedErrorFailedProofQuarantines(t *testing.T) {
 	assertQuarantineRejectsNewConstruction(t, runtime, &calls)
 }
 
+// TestDriverRuntime_PanickingLeaseInvokeFinishesAccounting verifies that a
+// caller-recovered callback panic cannot strand active callback accounting or
+// a releasePending lease and falsely quarantine later Stop.
+func TestDriverRuntime_PanickingLeaseInvokeFinishesAccounting(t *testing.T) {
+	t.Parallel()
+
+	runtime, first, second := panicLifecycleRuntime(t)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	lease, err := runtime.Admit(context.Background())
+	if err != nil {
+		t.Fatalf("Admit() error = %v", err)
+	}
+	recoverInvokePanic(t, func() {
+		_ = lease.Invoke(func(transport.RawTransport) error {
+			defer func() { _ = lease.Release() }()
+			panic("callback panic")
+		})
+	})
+	if err := lease.Release(); err != nil {
+		t.Fatalf("duplicate Release() error = %v", err)
+	}
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() after recovered lease panic error = %v", err)
+	}
+	if got := first.closeCalls.Load(); got != 1 {
+		t.Fatalf("first close requests = %d; want 1", got)
+	}
+	if runtime.SafetyQuarantined() {
+		t.Fatal("recovered lease panic falsely quarantined runtime")
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 2 {
+		t.Fatalf("later Start() = (%d, %v); want (2, nil)", generation, err)
+	}
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("cleanup Stop() error = %v", err)
+	}
+	if got := second.closeCalls.Load(); got != 1 {
+		t.Fatalf("second close requests = %d; want 1", got)
+	}
+}
+
+// TestDriverRuntime_PanickingRuntimeInvokeFinishesAccounting covers the
+// wrapper path, whose deferred Release must cooperate with invocation cleanup
+// exactly once while preserving the callback panic for its caller.
+func TestDriverRuntime_PanickingRuntimeInvokeFinishesAccounting(t *testing.T) {
+	t.Parallel()
+
+	runtime, first, second := panicLifecycleRuntime(t)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	recoverInvokePanic(t, func() {
+		_ = runtime.Invoke(context.Background(), func(transport.RawTransport) error {
+			panic("callback panic")
+		})
+	})
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() after recovered runtime Invoke panic error = %v", err)
+	}
+	if got := first.closeCalls.Load(); got != 1 {
+		t.Fatalf("first close requests = %d; want 1", got)
+	}
+	if runtime.SafetyQuarantined() {
+		t.Fatal("recovered runtime Invoke panic falsely quarantined runtime")
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 2 {
+		t.Fatalf("later Start() = (%d, %v); want (2, nil)", generation, err)
+	}
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("cleanup Stop() error = %v", err)
+	}
+	if got := second.closeCalls.Load(); got != 1 {
+		t.Fatalf("second close requests = %d; want 1", got)
+	}
+}
+
+func panicLifecycleRuntime(t *testing.T) (*transport.DriverRuntime, *managedLifecycleTransport, *managedLifecycleTransport) {
+	t.Helper()
+	first := newManagedLifecycleTransport()
+	second := newManagedLifecycleTransport()
+	var calls atomic.Int32
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			switch calls.Add(1) {
+			case 1:
+				return managedTransport(first), nil
+			case 2:
+				return managedTransport(second), nil
+			default:
+				return nil, fmt.Errorf("unexpected constructor call")
+			}
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: 50 * time.Millisecond},
+	)
+	return runtime, first, second
+}
+
+func recoverInvokePanic(t *testing.T, invoke func()) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatal("Invoke did not propagate callback panic")
+		}
+	}()
+	invoke()
+}
+
 func stopWithoutPanic(t *testing.T, runtime *transport.DriverRuntime) (err error) {
 	t.Helper()
 	defer func() {
