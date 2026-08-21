@@ -312,6 +312,98 @@ func TestDriverRuntime_StopBoundedWhenRawCloseBlocks(t *testing.T) {
 	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
 }
 
+// TestDriverRuntime_StopQuarantinesWhenCloseRequestIsNeverAccepted proves
+// that runtime teardown is bounded even when an adversarial adapter has no
+// worker receiving its transport-owned close request.
+func TestDriverRuntime_StopQuarantinesWhenCloseRequestIsNeverAccepted(t *testing.T) {
+	t.Parallel()
+
+	request := make(chan struct{}) // no receiver
+	closed := make(chan struct{})  // no proof
+	raw := newManagedLifecycleTransport()
+	var constructed atomic.Int32
+	bound := 25 * time.Millisecond
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			constructed.Add(1)
+			return &transport.ManagedRawTransport{
+				Transport: raw,
+				Lifecycle: transport.DriverLifecycleHandle{
+					CloseRequest: request,
+					Closed:       closed,
+				},
+			}, nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: bound},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	assertBoundedQuarantinedStop(t, runtime, raw, bound)
+	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
+}
+
+// TestDriverRuntime_StopQuarantinesWhenCloseIsNeverConfirmed proves the
+// distinct accepted-request path: a close worker receives the request but
+// never publishes closure proof.
+func TestDriverRuntime_StopQuarantinesWhenCloseIsNeverConfirmed(t *testing.T) {
+	t.Parallel()
+
+	request := make(chan struct{})
+	closed := make(chan struct{}) // worker never closes it
+	raw := newManagedLifecycleTransport()
+	var constructed atomic.Int32
+	bound := 25 * time.Millisecond
+	runtime := transport.NewDriverRuntime(
+		func(context.Context) (*transport.ManagedRawTransport, error) {
+			constructed.Add(1)
+			return &transport.ManagedRawTransport{
+				Transport: raw,
+				Lifecycle: transport.DriverLifecycleHandle{
+					CloseRequest: request,
+					Closed:       closed,
+				},
+			}, nil
+		},
+		transport.DriverRuntimeConfig{DrainTimeout: bound},
+	)
+	if _, err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	accepted := make(chan struct{})
+	go func() {
+		<-request
+		close(accepted)
+	}()
+
+	assertBoundedQuarantinedStop(t, runtime, raw, bound)
+	select {
+	case <-accepted:
+	default:
+		t.Fatal("close request was not accepted before quarantine")
+	}
+	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
+}
+
+func assertBoundedQuarantinedStop(t *testing.T, runtime *transport.DriverRuntime, raw *managedLifecycleTransport, bound time.Duration) {
+	t.Helper()
+	startedAt := time.Now()
+	err := runtime.Stop(context.Background())
+	if !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
+		t.Fatalf("Stop() error = %v; want ErrDriverSafetyQuarantined", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 4*bound {
+		t.Fatalf("Stop() took %s; want bounded by %s", elapsed, 4*bound)
+	}
+	if !runtime.SafetyQuarantined() {
+		t.Fatal("runtime is not safety quarantined")
+	}
+	if got := raw.rawCloseCalls.Load(); got != 0 {
+		t.Fatalf("runtime called RawTransport.Close %d times; want 0", got)
+	}
+}
+
 func assertQuarantineRejectsNewConstruction(t *testing.T, runtime *transport.DriverRuntime, constructed *atomic.Int32) {
 	t.Helper()
 	if !runtime.SafetyQuarantined() {
