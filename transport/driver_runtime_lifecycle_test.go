@@ -112,6 +112,9 @@ func TestDriverRuntime_UnconfirmedCloseQuarantinesProcessEpoch(t *testing.T) {
 	if !runtime.SafetyQuarantined() {
 		t.Fatal("runtime is not safety quarantined after unconfirmed close")
 	}
+	if got := instance.rawCloseCalls.Load(); got != 0 {
+		t.Fatalf("runtime called blocking RawTransport.Close %d times; want 0", got)
+	}
 	if _, err := runtime.Start(context.Background()); !errors.Is(err, transport.ErrDriverSafetyQuarantined) {
 		t.Fatalf("quarantined Start() error = %v; want ErrDriverSafetyQuarantined", err)
 	}
@@ -272,8 +275,12 @@ func TestDriverRuntime_StopBoundedWhenRawCloseBlocks(t *testing.T) {
 	instance.confirmClose = make(chan struct{})
 	instance.closeRelease = make(chan struct{})
 	bound := 25 * time.Millisecond
+	var constructed atomic.Int32
 	runtime := transport.NewDriverRuntime(
-		func(context.Context) (transport.ManagedRawTransport, error) { return instance, nil },
+		func(context.Context) (transport.ManagedRawTransport, error) {
+			constructed.Add(1)
+			return instance, nil
+		},
 		transport.DriverRuntimeConfig{DrainTimeout: bound},
 	)
 	if _, err := runtime.Start(context.Background()); err != nil {
@@ -299,7 +306,9 @@ func TestDriverRuntime_StopBoundedWhenRawCloseBlocks(t *testing.T) {
 	if !runtime.SafetyQuarantined() {
 		t.Fatal("runtime is not safety quarantined after unconfirmed close")
 	}
-	var constructed atomic.Int32
+	if got := instance.rawCloseCalls.Load(); got != 0 {
+		t.Fatalf("runtime called blocking RawTransport.Close %d times; want 0", got)
+	}
 	assertQuarantineRejectsNewConstruction(t, runtime, &constructed)
 }
 
@@ -321,10 +330,11 @@ func assertQuarantineRejectsNewConstruction(t *testing.T, runtime *transport.Dri
 }
 
 type managedLifecycleTransport struct {
-	closeCalls   atomic.Int32
-	confirmClose chan struct{}
-	closeErr     error
-	closeRelease chan struct{}
+	closeCalls    atomic.Int32
+	rawCloseCalls atomic.Int32
+	confirmClose  chan struct{}
+	closeErr      error
+	closeRelease  chan struct{}
 }
 
 func newManagedLifecycleTransport() *managedLifecycleTransport {
@@ -341,12 +351,17 @@ func (t *managedLifecycleTransport) Write([]byte) (int, error) {
 	return 0, transport.ErrDriverUnavailable
 }
 
-func (t *managedLifecycleTransport) Close() error {
+func (t *managedLifecycleTransport) InitiateClose(context.Context) error {
 	t.closeCalls.Add(1)
+	return t.closeErr
+}
+
+func (t *managedLifecycleTransport) Close() error {
+	t.rawCloseCalls.Add(1)
 	if t.closeRelease != nil {
 		<-t.closeRelease
 	}
-	return t.closeErr
+	return nil
 }
 
 func (t *managedLifecycleTransport) WaitClosed(ctx context.Context) error {

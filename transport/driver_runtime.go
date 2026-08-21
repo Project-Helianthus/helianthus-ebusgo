@@ -32,6 +32,10 @@ var (
 // lifecycle-managed runtime needs to implement this stronger ownership proof.
 type ManagedRawTransport interface {
 	RawTransport
+	// InitiateClose must begin transport-owned teardown without blocking past
+	// ctx's deadline. The managed transport owns any closer goroutine; the
+	// runtime never calls the legacy RawTransport.Close method synchronously.
+	InitiateClose(context.Context) error
 	WaitClosed(context.Context) error
 }
 
@@ -71,9 +75,10 @@ type driverRuntimeGeneration struct {
 	drained   chan struct{}
 }
 
-// DriverAdmission owns one admitted invocation. Release must be called if the
-// caller does not use Invoke. A withdrawn admission cannot invoke the transport.
-type DriverAdmission struct {
+// driverLease owns one admitted invocation. Although its concrete type is
+// intentionally private, callers of Admit can use its exported methods. This
+// prevents an adapter-local lifecycle detail becoming an exported API type.
+type driverLease struct {
 	runtime    *DriverRuntime
 	generation *driverRuntimeGeneration
 	id         uint64
@@ -117,60 +122,7 @@ func (r *DriverRuntime) SafetyQuarantined() bool {
 func (r *DriverRuntime) Start(ctx context.Context) (uint64, error) {
 	r.operationMu.Lock()
 	defer r.operationMu.Unlock()
-
-	r.mu.Lock()
-	if r.quarantined {
-		r.mu.Unlock()
-		return 0, ErrDriverSafetyQuarantined
-	}
-	if r.current != nil {
-		generation := r.generation
-		r.mu.Unlock()
-		return generation, nil
-	}
-	factory := r.factory
-	r.mu.Unlock()
-
-	if factory == nil {
-		return 0, ErrDriverUnavailable
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	generationCtx, cancel := context.WithCancel(context.Background())
-	managed, err := factory(generationCtx)
-	if err != nil {
-		cancel()
-		return 0, err
-	}
-	if managed == nil {
-		cancel()
-		return 0, ErrDriverUnavailable
-	}
-	if err := ctx.Err(); err != nil {
-		cancel()
-		_ = managed.Close()
-		return 0, err
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.quarantined {
-		cancel()
-		_ = managed.Close()
-		return 0, ErrDriverSafetyQuarantined
-	}
-	// operationMu excludes Stop and Replace, so no current generation can be
-	// installed while this factory call was in flight.
-	r.generation++
-	r.revision++
-	r.current = &driverRuntimeGeneration{
-		transport: managed,
-		cancel:    cancel,
-		accepting: true,
-		drained:   make(chan struct{}),
-	}
-	return r.generation, nil
+	return r.startLocked(ctx)
 }
 
 // Replace retires the active generation before constructing a new one. If the
@@ -225,17 +177,20 @@ func (r *DriverRuntime) startLocked(ctx context.Context) (uint64, error) {
 		return 0, ErrDriverUnavailable
 	}
 	if err := ctx.Err(); err != nil {
-		cancel()
-		_ = managed.Close()
+		if !r.retireUnadmitted(managed, cancel) {
+			return 0, ErrDriverSafetyQuarantined
+		}
 		return 0, err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.quarantined {
-		cancel()
-		_ = managed.Close()
+		r.mu.Unlock()
+		if !r.retireUnadmitted(managed, cancel) {
+			return 0, ErrDriverSafetyQuarantined
+		}
 		return 0, ErrDriverSafetyQuarantined
 	}
+	defer r.mu.Unlock()
 	r.generation++
 	r.revision++
 	r.current = &driverRuntimeGeneration{transport: managed, cancel: cancel, accepting: true, drained: make(chan struct{})}
@@ -264,14 +219,11 @@ func (r *DriverRuntime) stopLocked() error {
 	generation.cancel()
 	r.mu.Unlock()
 
-	drainTimedOut := !waitForGeneration(generation.drained, r.timeout)
-	closeErr := generation.transport.Close()
-	confirmed := closeErr == nil && waitForClose(generation.transport, r.timeout)
-	if !confirmed {
-		r.mu.Lock()
-		r.quarantined = true
-		r.revision++
-		r.mu.Unlock()
+	deadline, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	drainTimedOut := !waitForGeneration(deadline, generation.drained)
+	if !r.retireManaged(deadline, generation.transport, generation.cancel) {
+		r.quarantine()
 		return ErrDriverSafetyQuarantined
 	}
 	if drainTimedOut {
@@ -280,27 +232,46 @@ func (r *DriverRuntime) stopLocked() error {
 	return nil
 }
 
-func waitForGeneration(drained <-chan struct{}, timeout time.Duration) bool {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-drained:
-		return true
-	case <-timer.C:
+func (r *DriverRuntime) retireUnadmitted(managed ManagedRawTransport, cancel context.CancelFunc) bool {
+	deadline, stop := context.WithTimeout(context.Background(), r.timeout)
+	defer stop()
+	if !r.retireManaged(deadline, managed, cancel) {
+		r.quarantine()
 		return false
+	}
+	return true
+}
+
+func (r *DriverRuntime) retireManaged(ctx context.Context, managed ManagedRawTransport, cancel context.CancelFunc) bool {
+	cancel()
+	if err := managed.InitiateClose(ctx); err != nil {
+		return false
+	}
+	return managed.WaitClosed(ctx) == nil
+}
+
+func (r *DriverRuntime) quarantine() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.quarantined {
+		r.quarantined = true
+		r.revision++
 	}
 }
 
-func waitForClose(managed ManagedRawTransport, timeout time.Duration) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return managed.WaitClosed(ctx) == nil
+func waitForGeneration(ctx context.Context, drained <-chan struct{}) bool {
+	select {
+	case <-drained:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // Admit captures the current generation while it remains effective. Stop and
 // Replace withdraw admission under the same mutex before canceling that exact
 // generation, so post-withdrawal callers cannot reach the raw transport.
-func (r *DriverRuntime) Admit(context.Context) (*DriverAdmission, error) {
+func (r *DriverRuntime) Admit(context.Context) (*driverLease, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.quarantined {
@@ -311,7 +282,7 @@ func (r *DriverRuntime) Admit(context.Context) (*DriverAdmission, error) {
 		return nil, ErrDriverUnavailable
 	}
 	generation.inFlight++
-	return &DriverAdmission{runtime: r, generation: generation, id: r.generation}, nil
+	return &driverLease{runtime: r, generation: generation, id: r.generation}, nil
 }
 
 // Invoke admits and releases one callback atomically with respect to retirement.
@@ -325,11 +296,11 @@ func (r *DriverRuntime) Invoke(ctx context.Context, fn func(RawTransport) error)
 }
 
 // Generation returns the generation captured at admission.
-func (a *DriverAdmission) Generation() uint64 { return a.id }
+func (a *driverLease) Generation() uint64 { return a.id }
 
 // Invoke runs fn only while the admission still belongs to the effective
 // generation. Stale callbacks receive a typed error and do not touch transport.
-func (a *DriverAdmission) Invoke(fn func(RawTransport) error) error {
+func (a *driverLease) Invoke(fn func(RawTransport) error) error {
 	if fn == nil {
 		return ErrDriverUnavailable
 	}
@@ -344,7 +315,7 @@ func (a *DriverAdmission) Invoke(fn func(RawTransport) error) error {
 
 // Release ends the admission's in-flight ownership. It is safe to call once
 // or repeatedly; only the first call changes drain accounting.
-func (a *DriverAdmission) Release() error {
+func (a *driverLease) Release() error {
 	a.once.Do(func() {
 		a.runtime.mu.Lock()
 		defer a.runtime.mu.Unlock()
