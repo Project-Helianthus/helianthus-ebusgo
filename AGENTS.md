@@ -6,10 +6,10 @@
 
 Public protocol references:
 
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
-- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
+- https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
+- https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh.md
+- https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ens.md
+- https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
 
 ## Working rules
 
@@ -17,7 +17,7 @@ Public protocol references:
 - Preserve public API and framing compatibility unless the issue explicitly changes them. Partial failures must not cause callers to discard valid state they still own.
 - Run `./scripts/ci_local.sh` before pushing. For a transport or protocol-code change, provide the applicable T01..T88 transport-matrix result; unexpected fail or xpass blocks the PR unless the owner records an override reason.
 - Review the exact PR HEAD in a fresh context. Fix valid P0-P2 findings and re-review the new HEAD; P3-P4 are triaged without blocking.
-- Use squash merge only after CI and fresh exact-HEAD review are clear. Do not merge or make follow-on changes unless the operator asks.
+- Use squash merge only after CI and fresh exact-HEAD review are clear. Verify remote `main` and stop at the requested boundary.
 - Stop for explicit action-time confirmation before credential handling, real installation writes, live-device mutation, or destructive/irreversible operations.
 
 ## Documentation
