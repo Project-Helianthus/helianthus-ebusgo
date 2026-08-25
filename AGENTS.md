@@ -1,72 +1,25 @@
 # AGENTS
 
-This repository is part of the **Helianthus Multi-Protocol HVAC Gateway Platform**.
+## Scope
 
-## Dual-AI Operating Model
+`helianthus-ebusgo` owns eBUS transport, framing, addressing, and protocol-engine behavior. Keep eBUS-specific types and logic at this boundary; do not add registry, universal semantic, consumer, MCP, GraphQL, or Home Assistant policy here.
 
-All development follows the dual-AI orchestrator protocol defined in the workspace-root [`AGENTS.md`](../AGENTS.md):
+Public protocol references:
 
-- **Orchestrator:** Claude Code — orchestration, hard dev (complexity 7–10), angry tester, deep consultant
-- **Co-Pilot:** Codex — adversarial planning, easy dev (complexity 1–6), code review, second opinions
-- Phases: Adversarial Planning → Smart Routing → Dual Code Review
-- Hard rules: one issue/PR per repo, squash+merge only, doc-gate, transport-gate, MCP-first
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
+- https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
 
-See the root AGENTS.md for the full protocol, routing tables, system prompts, and invariants.
+## Working rules
 
----
+- One focused issue and one PR at a time. Branches use `issue/<number>-<slug>` and start from a clean `origin/main` worktree.
+- Preserve public API and framing compatibility unless the issue explicitly changes them. Partial failures must not cause callers to discard valid state they still own.
+- Run `./scripts/ci_local.sh` before pushing. For a transport or protocol-code change, provide the applicable T01..T88 transport-matrix result; unexpected fail or xpass blocks the PR unless the owner records an override reason.
+- Review the exact PR HEAD in a fresh context. Fix valid P0-P2 findings and re-review the new HEAD; P3-P4 are triaged without blocking.
+- Use squash merge only after CI and fresh exact-HEAD review are clear. Do not merge or make follow-on changes unless the operator asks.
+- Stop for explicit action-time confirmation before credential handling, real installation writes, live-device mutation, or destructive/irreversible operations.
 
-## Repo-Specific Rules
+## Documentation
 
-These instructions apply to the entire repository.
-
-### Workflow
-
-1. Work one issue at a time and keep changes scoped to that issue.
-2. Keep at most one open PR for this repository at any time.
-3. Run `./scripts/ci_local.sh` before pushing.
-4. React (emoji) to every review comment and reply with status when actioned.
-5. If a change modifies externally visible behavior (exports, transport semantics, protocol behavior), open/update the corresponding docs in `helianthus-docs-ebus` and merge docs alongside code (doc-gate).
-6. Transport/protocol changes require a full 88-case runtime matrix pass (`TRANSPORT_MATRIX_REPORT=<index.json>`), unless explicitly overridden by owner approval (`TRANSPORT_GATE_OWNER_OVERRIDE=OVERRIDE_TRANSPORT_GATE_BY_OWNER` with a reason).
-
-### MCP-first Policy
-
-#### Scope and ordering
-- MCP is the primary prototyping/exploration interface.
-- GraphQL is second and may reach parity only after MCP tools are deterministic and contract-solid.
-- Home Assistant and other consumers are enabled only after GraphQL parity and stability gates are met.
-
-#### Tool taxonomy and naming
-- Core stable tools use versioned names: `ebus.v<MAJOR>.<domain>.<subdomain>.<verb>`.
-- Experimental tools live under `ebus.experimental.*` and are never used by external consumers.
-- Prefer composable tools over monolithic endpoints.
-
-#### Contract envelope (required for ebus.v1.*)
-Each `ebus.v1.*` tool returns:
-- `meta` with `contract`, `consistency`, `data_timestamp`, `data_hash`
-- `data`
-- `error` (null or structured error)
-
-#### Determinism requirements
-- List ordering must be stable.
-- Snapshot mode must produce stable `data_hash` for identical snapshot + request.
-- Tool schemas and outputs must have golden snapshots.
-
-#### Invoke safety
-`ebus.v1.rpc.invoke` requires:
-- explicit `intent` (`READ_ONLY` or `MUTATE`)
-- `allow_dangerous=true` for mutating or unknown methods
-- `idempotency_key` for mutating intent
-
-#### Graduation gates (MCP -> GraphQL)
-A capability may graduate to GraphQL only if:
-1. it exists as core stable MCP (`ebus.v1.*`)
-2. it passes determinism + contract + golden tests
-3. parity tests MCP <-> GraphQL are green
-
-#### End-of-cycle cleanup
-At cycle end, each `ebus.experimental.*` tool must be promoted, deleted, or moved to internal-only with written justification.
-No temporary/junk tool may remain in the showroom surface.
-
-#### CI gates
-- Breaking changes in `ebus.v1.*` require a new major namespace.
-- Parity drift MCP vs GraphQL fails CI.
+When a change establishes or changes public eBUS transport/framing knowledge, update the public documentation in `helianthus-docs-ebus` in the same delivery cycle. Documentation-only instruction changes do not create a protocol claim.
