@@ -6,7 +6,7 @@
 
 Public protocol references:
 
-- https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
+- https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebus-services/ebus-overview.md
 - https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh.md
 - https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ens.md
 - https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
