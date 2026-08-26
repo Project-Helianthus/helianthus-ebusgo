@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1277,6 +1278,61 @@ func TestDriverRuntime_StartAfterStopSnapshotMayProceed(t *testing.T) {
 	}
 	if got := runtime.Generation(); got != 1 {
 		t.Fatalf("generation after sequential Start = %d; want 1", got)
+	}
+}
+
+func TestDriverRuntime_StartReturnsItsAtomicallyAdmittedGeneration(t *testing.T) {
+	firstAdmissionReached := make(chan struct{})
+	allowFirstReturn := make(chan struct{})
+	var blockFirstAdmission sync.Once
+	restore := setDriverRuntimeTestHooks(driverRuntimeTestHooks{
+		AfterConstructionAdmission: func() {
+			blockFirstAdmission.Do(func() {
+				close(firstAdmissionReached)
+				<-allowFirstReturn
+			})
+		},
+	})
+	defer restore()
+
+	first := newManagedLifecycleTransport()
+	second := newManagedLifecycleTransport()
+	var constructions atomic.Int32
+	runtime := NewDriverRuntime(func(context.Context) (*ManagedRawTransport, error) {
+		switch constructions.Add(1) {
+		case 1:
+			return managedTransport(first), nil
+		case 2:
+			return managedTransport(second), nil
+		default:
+			return nil, errors.New("unexpected construction")
+		}
+	}, DriverRuntimeConfig{DrainTimeout: time.Second})
+
+	type startResult struct {
+		generation uint64
+		err        error
+	}
+	firstStart := make(chan startResult, 1)
+	go func() {
+		generation, err := runtime.Start(context.Background())
+		firstStart <- startResult{generation: generation, err: err}
+	}()
+	select {
+	case <-firstAdmissionReached:
+	case <-time.After(time.Second):
+		t.Fatal("first Start did not admit a generation")
+	}
+	if err := runtime.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if generation, err := runtime.Start(context.Background()); err != nil || generation != 2 {
+		t.Fatalf("second Start() = (%d, %v); want (2, nil)", generation, err)
+	}
+	close(allowFirstReturn)
+	result := <-firstStart
+	if result.err != nil || result.generation != 1 {
+		t.Fatalf("first Start() = (%d, %v); want (1, nil)", result.generation, result.err)
 	}
 }
 
