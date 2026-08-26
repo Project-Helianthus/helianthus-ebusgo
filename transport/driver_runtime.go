@@ -124,8 +124,9 @@ const (
 // driverRuntimeTestHooks exists only to make construction linearization races
 // deterministic in the in-package lifecycle tests. It is nil in production.
 type driverRuntimeTestHooks struct {
-	AfterConstructionSnapshot func()
-	BeforeConstructionDetach  func()
+	AfterConstructionSnapshot  func()
+	BeforeConstructionDetach   func()
+	afterConstructionAdmission func()
 }
 
 var driverRuntimeHooks struct {
@@ -157,6 +158,15 @@ func runAfterConstructionSnapshotHook() {
 func runBeforeConstructionDetachHook() {
 	driverRuntimeHooks.Lock()
 	hook := driverRuntimeHooks.hooks.BeforeConstructionDetach
+	driverRuntimeHooks.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+func runAfterConstructionAdmissionHook() {
+	driverRuntimeHooks.Lock()
+	hook := driverRuntimeHooks.hooks.afterConstructionAdmission
 	driverRuntimeHooks.Unlock()
 	if hook != nil {
 		hook()
@@ -308,7 +318,8 @@ func (r *DriverRuntime) startLocked(construction *driverConstruction) (uint64, e
 		r.quarantine()
 		return 0, ErrDriverSafetyQuarantined
 	}
-	if !r.admitConstruction(construction, managed) {
+	generation, admitted := r.admitConstruction(construction, managed)
+	if !admitted {
 		if !r.retireUnadmitted(managed, construction.runtimeCancel) {
 			return 0, ErrDriverSafetyQuarantined
 		}
@@ -317,7 +328,8 @@ func (r *DriverRuntime) startLocked(construction *driverConstruction) (uint64, e
 		}
 		return 0, construction.cancellationError()
 	}
-	return r.Generation(), nil
+	runAfterConstructionAdmissionHook()
+	return generation, nil
 }
 
 func (r *DriverRuntime) registerConstruction(ctx context.Context, allowRetiring, releaseRetiring bool) (*driverConstruction, uint64, uint64, error) {
@@ -422,12 +434,12 @@ func (r *DriverRuntime) requestConstructionCancel(id uint64) {
 	}
 }
 
-func (r *DriverRuntime) admitConstruction(construction *driverConstruction, managed *ManagedRawTransport) bool {
+func (r *DriverRuntime) admitConstruction(construction *driverConstruction, managed *ManagedRawTransport) (uint64, bool) {
 	runBeforeConstructionDetachHook()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if construction.state != constructionProvisional || construction.callerCtx.Err() != nil || construction.runtimeCtx.Err() != nil || r.quarantined {
-		return false
+		return 0, false
 	}
 	// State transition, map removal, and current publication share r.mu. Any
 	// Stop/Replace cancel action arriving afterwards sees no provisional entry
@@ -443,7 +455,7 @@ func (r *DriverRuntime) admitConstruction(construction *driverConstruction, mana
 	if construction.stopForward != nil {
 		construction.stopForward()
 	}
-	return true
+	return r.generation, true
 }
 
 func (c *driverConstruction) cancellationError() error {

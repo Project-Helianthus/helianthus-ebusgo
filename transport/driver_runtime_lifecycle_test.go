@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1284,13 +1283,13 @@ func TestDriverRuntime_StartAfterStopSnapshotMayProceed(t *testing.T) {
 func TestDriverRuntime_StartReturnsItsAtomicallyAdmittedGeneration(t *testing.T) {
 	firstAdmissionReached := make(chan struct{})
 	allowFirstReturn := make(chan struct{})
-	var blockFirstAdmission sync.Once
+	var firstAdmissionBlocked atomic.Bool
 	restore := setDriverRuntimeTestHooks(driverRuntimeTestHooks{
-		AfterConstructionAdmission: func() {
-			blockFirstAdmission.Do(func() {
+		afterConstructionAdmission: func() {
+			if firstAdmissionBlocked.CompareAndSwap(false, true) {
 				close(firstAdmissionReached)
 				<-allowFirstReturn
-			})
+			}
 		},
 	})
 	defer restore()
