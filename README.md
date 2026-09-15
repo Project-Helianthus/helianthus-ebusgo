@@ -98,6 +98,13 @@ profile.MappedCommands = []emulation.VR90MappedCommand{
 target, err := emulation.NewVR90Target(profile)
 ```
 
+`PayloadExact` and `PayloadPrefix` use nil to mean "no payload matcher." An
+explicit non-nil empty `PayloadExact` matches only an empty request payload;
+leave both fields nil for PB/SB-only matching. Existing non-empty exact and
+prefix matchers keep their behavior. An explicit empty prefix matches every
+payload and is equivalent to PB/SB-only matching. Configure at most one payload
+matcher on each mapped command.
+
 ## Change area -> focused validation
 
 | Change area | Focused command(s) |
