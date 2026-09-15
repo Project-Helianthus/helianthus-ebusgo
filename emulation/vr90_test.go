@@ -176,6 +176,22 @@ func TestNewVR90Target_Errors(t *testing.T) {
 			want: ErrInvalidConfiguration,
 		},
 		{
+			name: "mapped command has empty exact and prefix matchers",
+			profile: VR90Profile{
+				Address: testVR90Address,
+				MappedCommands: []VR90MappedCommand{
+					{
+						Primary:       0xB5,
+						Secondary:     0x06,
+						PayloadExact:  []byte{},
+						PayloadPrefix: []byte{0x01},
+						ResponseData:  []byte{0x00},
+					},
+				},
+			},
+			want: ErrInvalidConfiguration,
+		},
+		{
 			name: "mapped command empty response",
 			profile: VR90Profile{
 				Address: testVR90Address,
@@ -481,6 +497,89 @@ func TestVR90Target_MappedCommandResponse(t *testing.T) {
 	}
 	if !bytes.Equal(next.Frame.Data, wantData) {
 		t.Fatalf("second Frame data = %x; want %x", next.Frame.Data, wantData)
+	}
+}
+
+func TestVR90Target_MappedCommandExactPayloadPresence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		payloadExact []byte
+		requestData  []byte
+		wantMatch    bool
+	}{
+		{
+			name:        "unset matcher accepts nonempty payload",
+			requestData: []byte{0x01},
+			wantMatch:   true,
+		},
+		{
+			name:         "explicit empty matcher accepts empty payload",
+			payloadExact: []byte{},
+			wantMatch:    true,
+		},
+		{
+			name:         "explicit empty matcher rejects nonempty payload",
+			payloadExact: []byte{},
+			requestData:  []byte{0x01},
+			wantMatch:    false,
+		},
+		{
+			name:         "explicit nonempty matcher accepts exact payload",
+			payloadExact: []byte{0x01},
+			requestData:  []byte{0x01},
+			wantMatch:    true,
+		},
+		{
+			name:         "explicit nonempty matcher rejects empty payload",
+			payloadExact: []byte{0x01},
+			wantMatch:    false,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			profile := defaultVR90TestProfile()
+			profile.MappedCommands = []VR90MappedCommand{
+				{
+					Name:         "payload-presence",
+					Primary:      0xB5,
+					Secondary:    0x06,
+					PayloadExact: test.payloadExact,
+					ResponseData: []byte{0x00},
+				},
+			}
+			target, err := NewVR90Target(profile)
+			if err != nil {
+				t.Fatalf("NewVR90Target() error = %v", err)
+			}
+
+			response, err := target.Emulate(RequestEvent{
+				Frame: protocol.Frame{
+					Source:    0x10,
+					Target:    testVR90Address,
+					Primary:   0xB5,
+					Secondary: 0x06,
+					Data:      test.requestData,
+				},
+			})
+			if test.wantMatch {
+				if err != nil {
+					t.Fatalf("Emulate() error = %v; want match", err)
+				}
+				if response.Rule != "payload-presence" {
+					t.Fatalf("Rule = %q; want payload-presence", response.Rule)
+				}
+				return
+			}
+			if !errors.Is(err, ErrNoMatchingRule) {
+				t.Fatalf("Emulate() error = %v; want %v", err, ErrNoMatchingRule)
+			}
+		})
 	}
 }
 

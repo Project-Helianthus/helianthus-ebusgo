@@ -47,10 +47,14 @@ type VR90Profile struct {
 }
 
 type VR90MappedCommand struct {
-	Name          string
-	Primary       byte
-	Secondary     byte
-	PayloadExact  []byte
+	Name      string
+	Primary   byte
+	Secondary byte
+	// PayloadExact is unset when nil. A non-nil empty slice matches only an
+	// empty payload.
+	PayloadExact []byte
+	// PayloadPrefix is unset when nil. A non-nil empty slice matches every
+	// payload and is therefore equivalent to matching only Primary/Secondary.
 	PayloadPrefix []byte
 	ResponseData  []byte
 }
@@ -172,7 +176,7 @@ func normalizeVR90MappedCommands(commands []VR90MappedCommand) ([]VR90MappedComm
 		if command.Name == "" {
 			command.Name = fmt.Sprintf("mapped-pb-0x%02x-sb-0x%02x-%d", command.Primary, command.Secondary, idx)
 		}
-		if len(command.PayloadExact) > 0 && len(command.PayloadPrefix) > 0 {
+		if command.PayloadExact != nil && command.PayloadPrefix != nil {
 			return nil, fmt.Errorf(
 				"vr90 mapped command[%d] has both exact and prefix payload matchers: %w",
 				idx,
@@ -186,8 +190,8 @@ func normalizeVR90MappedCommands(commands []VR90MappedCommand) ([]VR90MappedComm
 				ErrInvalidConfiguration,
 			)
 		}
-		command.PayloadExact = append([]byte(nil), command.PayloadExact...)
-		command.PayloadPrefix = append([]byte(nil), command.PayloadPrefix...)
+		command.PayloadExact = cloneOptionalBytes(command.PayloadExact)
+		command.PayloadPrefix = cloneOptionalBytes(command.PayloadPrefix)
 		command.ResponseData = append([]byte(nil), command.ResponseData...)
 		normalized = append(normalized, command)
 	}
@@ -210,18 +214,27 @@ func vr90MappedRule(command VR90MappedCommand, delay time.Duration) Rule {
 }
 
 func vr90MappedCommandMatcher(command VR90MappedCommand) MatchFunc {
-	if len(command.PayloadExact) > 0 {
-		payload := append([]byte(nil), command.PayloadExact...)
+	if command.PayloadExact != nil {
+		payload := cloneOptionalBytes(command.PayloadExact)
 		return func(frame protocol.Frame) bool {
 			return frame.Primary == command.Primary &&
 				frame.Secondary == command.Secondary &&
 				bytes.Equal(frame.Data, payload)
 		}
 	}
-	if len(command.PayloadPrefix) > 0 {
+	if command.PayloadPrefix != nil {
 		return MatchPrimarySecondaryWithPrefix(command.Primary, command.Secondary, command.PayloadPrefix)
 	}
 	return MatchPrimarySecondary(command.Primary, command.Secondary)
+}
+
+func cloneOptionalBytes(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]byte, len(value))
+	copy(cloned, value)
+	return cloned
 }
 
 func normalizeVR90ScanID(scanID string) string {
