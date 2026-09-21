@@ -94,6 +94,10 @@ type arbitrationSourceBehavior interface {
 	ArbitrationSendsSource() bool
 }
 
+type collisionRecoveryLifecycle interface {
+	transport.CollisionRecoveryLifecycle
+}
+
 // Bus orchestrates prioritized frame sending and transaction matching.
 type Bus struct {
 	transport transport.RawTransport
@@ -372,6 +376,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 
 		if err := b.startArbitration(request.frame.Source, frameType, attemptCount); err != nil {
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
+				lifecycle, token := b.collisionRecoveryLifecycle()
 				// Arbitration can be lost while another initiator owns the bus.
 				// ebusd waits for subsequent SYN symbols before retrying; do the
 				// same here (bounded by request context deadline).
@@ -384,16 +389,21 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 					select {
 					case <-time.After(collisionBackoffFloor):
 					case <-runCtx.Done():
+						b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 						return nil, b.wrapRetryError(runCtx.Err())
 					case <-request.ctx.Done():
+						b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 						return nil, b.wrapRetryError(request.ctx.Err())
 					}
 					if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+						b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 						b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
 						return nil, b.wrapRetryError(waitErr)
 					}
+					b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryRetry)
 					continue
 				}
+				b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 				b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err, time.Since(startedAt))
 				return nil, b.wrapRetryError(err)
 			}
@@ -432,6 +442,7 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 			timeoutAttempts, nackAttempts = timeoutAttempts2, nackAttempts2
 			b.emitRetryEvent(request.frame, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), err)
 			if errors.Is(err, ebuserrors.ErrBusCollision) {
+				lifecycle, token := b.collisionRecoveryLifecycle()
 				// EG36: This branch only fires for genuine bus collisions
 				// (ErrBusCollision). Timeout wraps ErrTimeout and HOST errors
 				// wrap ErrAdapterHostError, neither of which satisfies Is(ErrBusCollision).
@@ -439,14 +450,18 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				select {
 				case <-time.After(collisionBackoffFloor):
 				case <-runCtx.Done():
+					b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 					return nil, b.wrapRetryError(runCtx.Err())
 				case <-request.ctx.Done():
+					b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 					return nil, b.wrapRetryError(request.ctx.Err())
 				}
 				if waitErr := b.waitForSyn(runCtx, request.ctx, 2); waitErr != nil {
+					b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 					b.emitRequestComplete(request.frame, nil, frameType, attemptCount, uint16(timeoutAttempts), uint16(nackAttempts), waitErr, time.Since(startedAt))
 					return nil, b.wrapRetryError(waitErr)
 				}
+				b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryRetry)
 			}
 			if errors.Is(err, ebuserrors.ErrAdapterReset) {
 				select {
@@ -458,6 +473,10 @@ func (b *Bus) sendWithRetries(runCtx context.Context, request *busRequest) (*Fra
 				}
 			}
 			continue
+		}
+		if errors.Is(err, ebuserrors.ErrBusCollision) {
+			lifecycle, token := b.collisionRecoveryLifecycle()
+			b.completeCollisionRecovery(lifecycle, token, transport.CollisionRecoveryAbandon)
 		}
 		// Retry budget exhausted — try transport reconnect for
 		// timeout-class errors before giving up.
@@ -550,6 +569,20 @@ func (b *Bus) startArbitration(initiator byte, frameType FrameType, attempt uint
 		DurationMicros: durationMicros(time.Since(startedAt)),
 	})
 	return nil
+}
+
+func (b *Bus) collisionRecoveryLifecycle() (collisionRecoveryLifecycle, uint64) {
+	lifecycle, ok := b.transport.(collisionRecoveryLifecycle)
+	if !ok {
+		return nil, 0
+	}
+	return lifecycle, lifecycle.CollisionRecoveryToken()
+}
+
+func (b *Bus) completeCollisionRecovery(lifecycle collisionRecoveryLifecycle, token uint64, decision transport.CollisionRecoveryDecision) {
+	if lifecycle != nil && token != 0 {
+		lifecycle.CompleteCollisionRecovery(token, decision)
+	}
 }
 
 func shouldRetry(err error, policy RetryPolicy, timeoutAttempts, nackAttempts int, deadlineBoundsRetries bool) (bool, int, int) {

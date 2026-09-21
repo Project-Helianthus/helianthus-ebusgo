@@ -15,6 +15,27 @@ type RawTransport interface {
 	Close() error
 }
 
+// CollisionRecoveryDecision completes an optional, transport-owned recovery
+// transaction after protocol.Bus has classified a confirmed arbitration
+// collision.
+type CollisionRecoveryDecision uint8
+
+const (
+	CollisionRecoveryRetry CollisionRecoveryDecision = iota + 1
+	CollisionRecoveryAbandon
+)
+
+// CollisionRecoveryLifecycle is an optional extension for transports that
+// expose a confirmed first-byte arbitration-loss recovery. CollisionRecoveryToken
+// returns a non-zero opaque token only while that recovery is live. Complete
+// is idempotent: unknown, stale, duplicated, and invalidated tokens are no-ops.
+// RawTransport implementations that do not implement this interface retain
+// their existing behavior.
+type CollisionRecoveryLifecycle interface {
+	CollisionRecoveryToken() uint64
+	CompleteCollisionRecovery(token uint64, decision CollisionRecoveryDecision)
+}
+
 // StreamEventKind identifies optional non-byte transport events surfaced to
 // passive consumers that need reset/lifecycle boundaries.
 type StreamEventKind uint8
