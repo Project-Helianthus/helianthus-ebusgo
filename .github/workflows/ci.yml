@@ -10,7 +10,8 @@ concurrency:
 
 jobs:
   terminology:
-    runs-on: [self-hosted, synology]
+    # fork pull requests never run on the persistent runners
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'synology' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +37,8 @@ jobs:
           fi
 
   public-symbols:
-    runs-on: [self-hosted, synology]
+    # fork pull requests never run on the persistent runners
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'synology' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +51,8 @@ jobs:
       - run: ./scripts/public_symbol_gate.sh
 
   build:
-    runs-on: [self-hosted, synology]
+    # fork pull requests never run on the persistent runners
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'synology' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +66,8 @@ jobs:
       - run: go build ./...
 
   test:
-    runs-on: [self-hosted, synology]
+    # fork pull requests never run on the persistent runners
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'synology' }}
     timeout-minutes: 45
     env:
       GOFLAGS: -p=4
@@ -79,7 +83,8 @@ jobs:
       - run: go test -race -count=1 ./...
 
   tinygo:                                    # ebusgo and ebusreg only
-    runs-on: [self-hosted, synology]
+    # fork pull requests never run on the persistent runners
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'synology' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +109,8 @@ jobs:
           done
 
   lint:
-    runs-on: [self-hosted, synology]
+    # fork pull requests never run on the persistent runners
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'synology' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
