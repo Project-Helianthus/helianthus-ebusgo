@@ -49,6 +49,7 @@ else
 fi
 
 echo "==> transport gate"
+bash ./scripts/transport_gate_test.sh
 ./scripts/transport_gate.sh
 
 if command -v tinygo >/dev/null 2>&1; then

@@ -13,7 +13,8 @@ if ! git rev-parse --verify "${base_ref}" >/dev/null 2>&1; then
   exit 0
 fi
 
-changed_files="$(git diff --name-only "${base_ref}...HEAD")"
+# Include removed production paths when files are renamed to test-only paths.
+changed_files="$(git diff --no-renames --name-only "${base_ref}...HEAD")"
 if [[ -z "${changed_files}" ]]; then
   echo "transport gate: no changes against ${base_ref}."
   exit 0
@@ -22,6 +23,9 @@ fi
 requires_gate=0
 while IFS= read -r file; do
   [[ -z "${file}" ]] && continue
+  case "${file}" in
+    *_test.go) continue ;;
+  esac
   if [[ "${file}" =~ ^(transport/|protocol/) ]]; then
     requires_gate=1
     break
