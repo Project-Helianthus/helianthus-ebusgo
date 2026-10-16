@@ -1,6 +1,13 @@
 package transport
 
-import ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+import (
+	"fmt"
+
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+)
+
+// ErrUnknownENHCommand identifies an undefined ENH command and wraps ErrInvalidPayload.
+var ErrUnknownENHCommand = fmt.Errorf("%w: unknown ENH command", ebuserrors.ErrInvalidPayload)
 
 // ENHCommand represents an enhanced protocol command or response ID.
 type ENHCommand byte
@@ -55,7 +62,7 @@ func DecodeENH(byte1, byte2 byte) (ENHFrame, error) {
 		ENHResFailed, ENHResErrorEBUS, ENHResErrorHost:
 		// Valid (note: 0x0..0x3 overlap request/response by direction)
 	default:
-		return ENHFrame{}, ebuserrors.ErrInvalidPayload
+		return ENHFrame{}, ErrUnknownENHCommand
 	}
 	data := byte(((byte1 & 0x03) << 6) | (byte2 & 0x3F))
 	return ENHFrame{Command: cmd, Data: data}, nil
@@ -103,12 +110,12 @@ func (p *ENHParser) Feed(b byte) (ENHMessage, bool, error) {
 	}
 
 	if b&enhByteMask != enhByte2 {
-		p.pending = false
+		p.Reset()
 		return ENHMessage{}, false, ebuserrors.ErrInvalidPayload
 	}
 
 	frame, err := DecodeENH(p.byte1, b)
-	p.pending = false
+	p.Reset()
 	if err != nil {
 		return ENHMessage{}, false, err
 	}
