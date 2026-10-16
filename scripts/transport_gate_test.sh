@@ -6,7 +6,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 git() {
   case "$1" in
     rev-parse) return 0 ;;
-    diff) printf '%s\n' "${TEST_CHANGED_FILES}" ;;
+    diff)
+      # Fixtures list both sides of renames, as Git does with --no-renames.
+      if [[ " $* " != *' --no-renames '* ]]; then
+        echo 'FAIL: git diff must disable rename detection' >&2
+        return 2
+      fi
+      printf '%s\n' "${TEST_CHANGED_FILES}"
+      ;;
     *) return 2 ;;
   esac
 }
@@ -34,6 +41,9 @@ check_gate 'production transport file' 'transport/example.go' 1 "${report_requir
 check_gate 'mixed diff' $'transport/example_test.go\ntransport/example.go' 1 "${report_required}"
 check_gate 'production before test' $'transport/example.go\ntransport/example_test.go' 1 "${report_required}"
 check_gate 'production protocol file' 'protocol/example.go' 1 "${report_required}"
+check_gate 'transport production-to-test rename' $'transport/example.go\ntransport/example_test.go' 1 "${report_required}"
+check_gate 'protocol production-to-test rename' $'protocol/example.go\nprotocol/example_test.go' 1 "${report_required}"
+check_gate 'test-to-test rename' $'transport/old_test.go\ntransport/new_test.go' 0 "${not_triggered}"
 check_gate 'unqualified fixture remains gated' 'transport/testdata/example.json' 1 "${report_required}"
 check_gate 'non-test suffix remains gated' 'transport/example_test.go.txt' 1 "${report_required}"
 check_gate 'unrelated file' 'scripts/example.sh' 0 "${not_triggered}"
