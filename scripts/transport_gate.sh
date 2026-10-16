@@ -22,6 +22,9 @@ fi
 requires_gate=0
 while IFS= read -r file; do
   [[ -z "${file}" ]] && continue
+  case "${file}" in
+    *_test.go) continue ;;
+  esac
   if [[ "${file}" =~ ^(transport/|protocol/) ]]; then
     requires_gate=1
     break
