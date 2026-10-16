@@ -241,6 +241,13 @@ type ENHTransport struct {
 	// catching. Note: this is per-byte, not per-pair — a single pair
 	// that absorbed 3 AAs increments this counter by 3.
 	escapeAaAbsorbedTotal atomic.Uint64
+
+	// Transport-instance observations; never cleared by lifecycle/parser resets.
+	// Atomic loads keep metrics readers independent of blocking readMu/I/O.
+	receivedSymbolsTotal       atomic.Uint64
+	enhFramingErrorsTotal      atomic.Uint64
+	enhParserResetsTotal       atomic.Uint64
+	adapterResetResponsesTotal atomic.Uint64
 }
 
 // NewENHTransport creates a new ENH transport with read/write timeouts.
@@ -377,7 +384,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 	for {
 		remaining := maxWait - time.Since(start)
 		if remaining <= 0 {
-			t.parser.Reset() // Clear stale byte1 from partial frame
+			t.resetENHParserLocked() // Clear stale byte1 from partial frame
 			t.deferredErr = nil
 			t.awaitingStart.Store(false)
 			return InitResult{}, nil
@@ -393,7 +400,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
 			if isTimeout(err) {
-				t.parser.Reset() // Clear stale byte1 from partial frame
+				t.resetENHParserLocked() // Clear stale byte1 from partial frame
 				t.deferredErr = nil
 				t.awaitingStart.Store(false)
 				return InitResult{}, nil
@@ -404,7 +411,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 			continue
 		}
 
-		msgs, parseErr := t.parser.Parse(t.buffer[:n])
+		msgs, parseErr := t.parseObservedLocked(t.buffer[:n])
 
 		// Process valid messages before handling parse error — a valid
 		// RESETTED followed by a corrupt trailing byte should succeed.
@@ -431,7 +438,7 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 			}
 		}
 		if parseErr != nil {
-			t.parser.Reset()
+			t.resetENHParserLocked()
 			// F-23 (batch-19, Codex bot P-r3): protocol fault on the
 			// ENH frame layer — orphan byte2 or unknown command. The
 			// wire-stream interpretation cannot be trusted across
@@ -748,7 +755,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		n, err := t.conn.Read(t.buffer)
 		if err != nil {
 			if isTimeout(err) {
-				t.parser.Reset() // Clear any pending byte1 from partial frame
+				t.resetENHParserLocked() // Clear any pending byte1 from partial frame
 				t.deferredErr = nil
 				t.awaitingStart.Store(false)
 				// F-23 (Codex bot r5 on #154): blocking arbitration
@@ -771,7 +778,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			continue
 		}
 
-		msgs, parseErr := t.parser.Parse(t.buffer[:n])
+		msgs, parseErr := t.parseObservedLocked(t.buffer[:n])
 
 		// Process valid messages before handling parse error — a buffer
 		// with a valid STARTED followed by a corrupt trailing byte should
@@ -831,7 +838,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 			// alongside the STARTED/FAILED response. Stale RECEIVED bytes
 			// in pendingEvents would be consumed as echoes by
 			// sendRawWithEcho, causing echo mismatch errors.
-			t.parser.Reset()
+			t.resetENHParserLocked()
 			t.pendingEvents = nil
 			t.deferredErr = nil
 			t.awaitingStart.Store(false)
@@ -860,7 +867,7 @@ func (t *ENHTransport) StartArbitration(initiator byte) error {
 		// Handle parse error only after processing valid messages — a
 		// corrupt trailing byte should not mask a valid STARTED/FAILED.
 		if parseErr != nil {
-			t.parser.Reset()
+			t.resetENHParserLocked()
 			t.deferredErr = nil
 			t.awaitingStart.Store(false)
 			// F-23 (batch-19, Codex bot P-r3): parse-error resync is
@@ -975,7 +982,7 @@ func (t *ENHTransport) postGrantPreEchoExpired() bool {
 // and BEFORE releasing writeMu, eliminates the race entirely.
 func (t *ENHTransport) requestInfoFail(err error) error {
 	wasAwaitingStart := t.awaitingStart.Load()
-	t.parser.Reset()
+	t.resetENHParserLocked()
 	t.deferredErr = nil
 	t.awaitingStart.Store(false)
 	t.arbitrationDeadline.Store(0)
@@ -1078,7 +1085,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 			continue
 		}
 
-		msgs, parseErr := t.parser.Parse(t.buffer[:n])
+		msgs, parseErr := t.parseObservedLocked(t.buffer[:n])
 
 		// Process valid messages before handling parse error — a valid
 		// INFO response followed by a corrupt trailing byte should succeed.
@@ -1345,7 +1352,7 @@ func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
 }
 
 func (t *ENHTransport) resetStateLocked() {
-	t.parser.Reset()
+	t.resetENHParserLocked()
 	t.pendingEvents = nil
 	// Clear any deferred parse error — state discard means previously
 	// deferred errors from before this boundary are stale and must not
@@ -1632,7 +1639,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 	bytesRead, err := t.conn.Read(t.buffer)
 	if err != nil {
 		if isTimeout(err) {
-			t.parser.Reset() // EG9: clear any pending byte1 from partial frame
+			t.resetENHParserLocked() // EG9: clear any pending byte1 from partial frame
 			// Close async arbitration window on read timeout — if STARTED/
 			// FAILED didn't arrive, the RequestStart caller should treat
 			// this as a timed-out arbitration. Leaving awaitingStart set
@@ -1660,7 +1667,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 	// EG8/EG34: Parse now returns valid messages alongside the first error.
 	// Process all returned messages BEFORE checking the error so that valid
 	// bytes parsed before a corrupt byte are not lost.
-	msgs, parseErr := t.parser.Parse(t.buffer[:bytesRead])
+	msgs, parseErr := t.parseObservedLocked(t.buffer[:bytesRead])
 	for _, msg := range msgs {
 		switch msg.Command {
 		case ENHResReceived:
@@ -1853,7 +1860,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 		if errors.Is(parseErr, ebuserrors.ErrInvalidPayload) {
 			// Parser desync: orphan byte2, missing byte2, or unknown command.
 			// Reset parser to re-synchronize on the next valid byte1.
-			t.parser.Reset()
+			t.resetENHParserLocked()
 			// F-23 (batch-19, Codex bot P-r3): protocol fault on the
 			// ENH frame layer invalidates wire-stream interpretation.
 			// Wipe in-flight escape state alongside the parser so a
@@ -1976,3 +1983,48 @@ var _ InfoRequester = (*ENHTransport)(nil)
 var _ Reconnectable = (*ENHTransport)(nil)
 var _ EscapeAware = (*ENHTransport)(nil)
 var _ EscapeFlaggedReader = (*ENHTransport)(nil)
+
+// BaudObservabilitySnapshot returns transport-owned observations without
+// acquiring I/O locks or performing any bus/adapter request. Physical baud,
+// symbol timing and rate-attributable UART faults are unavailable over net.Conn.
+func (t *ENHTransport) BaudObservabilitySnapshot() BaudObservabilitySnapshot {
+	return BaudObservabilitySnapshot{
+		ReceivedSymbolsTotal:       t.receivedSymbolsTotal.Load(),
+		ENHFramingErrorsTotal:      t.enhFramingErrorsTotal.Load(),
+		ENHParserResetsTotal:       t.enhParserResetsTotal.Load(),
+		AdapterResetResponsesTotal: t.adapterResetResponsesTotal.Load(),
+		EscapeDecodeFaultsTotal:    t.DecodeFaultTotal(),
+		EscapeRecoveriesTotal:      t.EscapeRecoveryTotal(),
+		EscapeBudgetExhaustedTotal: t.EscapeBudgetExhaustedTotal(),
+		EscapePendingTimeoutsTotal: t.EscapePendingTimeoutTotal(),
+	}
+}
+
+// parseObservedLocked covers INIT, blocking arbitration, INFO and steady-state
+// reads at their common parse boundary. Count before any path-specific filtering
+// or early return so decoded observations are independent of consumer delivery.
+// Caller holds readMu. Parse's existing first-error boundary is unchanged.
+func (t *ENHTransport) parseObservedLocked(data []byte) ([]ENHMessage, error) {
+	msgs, err := t.parser.Parse(data)
+	for _, msg := range msgs {
+		switch msg.Command {
+		case ENHResReceived:
+			t.receivedSymbolsTotal.Add(1)
+		case ENHResResetted:
+			t.adapterResetResponsesTotal.Add(1)
+		}
+	}
+	if err != nil {
+		t.enhFramingErrorsTotal.Add(1)
+	}
+	return msgs, err
+}
+
+// resetENHParserLocked records the existing reset action without changing its
+// cause, timing, error precedence or stream handling. Caller holds readMu.
+func (t *ENHTransport) resetENHParserLocked() {
+	t.parser.Reset()
+	t.enhParserResetsTotal.Add(1)
+}
+
+var _ BaudObservability = (*ENHTransport)(nil)

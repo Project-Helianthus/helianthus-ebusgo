@@ -105,6 +105,62 @@ prefix matchers keep their behavior. An explicit empty prefix matches every
 payload and is equivalent to PB/SB-only matching. Configure at most one payload
 matcher on each mapped command.
 
+## Transport observations for baud-series consumers
+
+ENH and ENS implement the optional `transport.BaudObservability` interface.
+`BaudObservabilitySnapshot()` only loads instance-local counters: it takes no
+I/O lock and sends no adapter request. `RawTransport` and on-wire behavior are
+unchanged. Plain TCP/UDP, ebusd-tcp and loopback do not implement this surface;
+consumers must treat its absence as unavailable and omit those series.
+
+| Snapshot field | Meaning and unit |
+|---|---|
+| `ConfiguredBaud`, `ConfiguredBaudKnown` | Configured UART bits/s, valid only when known. ENH/ENS over `net.Conn` leave these at zero/false; omit the gauge. No default baud is assumed. |
+| `ReceivedSymbolsTotal` | Count of parsed RECEIVED symbols, including compact raw bytes, escape leads/completions, idle SYNs and echoes. Counted before unescaping, arbitration/SYN suppression and queue eviction. Control/INFO frames and bytes beyond the parser's first-error boundary are excluded. |
+| `ENHFramingErrorsTotal` | Number of ENH parse errors, including a trailing error when an earlier valid response lets INIT, arbitration or INFO succeed. These are host-adapter framing faults, with no UART/baud attribution. |
+| `ENHParserResetsTotal` | Number of actual parser reset actions: resynchronization attempts, including normal INIT/arbitration/reconnect boundaries and timeout cleanup. This is neither confirmed recovery nor an error-only counter. |
+| `AdapterResetResponsesTotal` | Number of parsed RESETTED responses, including expected INIT confirmations. This does not count only unexpected adapter reboots. |
+| `EscapeDecodeFaultsTotal` | Existing `DecodeFaultTotal()` counter, in decoder fault events. |
+| `EscapeRecoveriesTotal`, `EscapeBudgetExhaustedTotal` | Existing escape recovery/budget-exhaustion event counters; subsets of `EscapeDecodeFaultsTotal`. |
+| `EscapePendingTimeoutsTotal` | Existing escape pending-timeout events; separate from decode faults. |
+
+A transport session here is the lifetime of one constructed transport instance.
+Counters survive INIT, adapter reset, reconnect and Close; a fresh transport
+instance (including a fresh DriverRuntime generation) starts at zero. Keep the
+generation with the sample so consumers can handle counter resets. Snapshot
+fields are independently loaded atomics, not a transactional collection; a
+concurrent scrape can briefly see a fault/subset pair at different instants.
+
+Sample through the existing DriverRuntime admission surface to associate the
+observations with the exact generation:
+
+```go
+lease, err := runtime.Admit(ctx)
+if err != nil {
+    return err
+}
+defer lease.Release()
+generation := lease.Generation()
+var snapshot transport.BaudObservabilitySnapshot
+var available bool
+err = lease.Invoke(func(raw transport.RawTransport) error {
+    if provider, ok := raw.(transport.BaudObservability); ok {
+        snapshot = provider.BaudObservabilitySnapshot()
+        available = true
+    }
+    return nil
+})
+// Publish generation/snapshot only if err == nil && available.
+// Wrappers must forward the optional interface to retain its availability.
+```
+
+A delta of `ReceivedSymbolsTotal` over scrape elapsed seconds measures
+host-observed ingress throughput in symbols/s. TCP batching, adapter buffering,
+idle traffic and echoes prevent interpreting it as physical baud or precise
+inter-symbol timing. No hardware symbol timestamps or baud-attributable UART
+framing errors are available in these transports, so this surface exposes no
+such measurements. The gateway owns Prometheus names, rendering and wiring.
+
 ## Change area -> focused validation
 
 | Change area | Focused command(s) |
