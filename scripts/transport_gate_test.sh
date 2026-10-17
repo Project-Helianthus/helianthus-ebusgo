@@ -38,9 +38,11 @@ not_triggered='transport gate: not triggered.'
 report_required='transport gate: TRANSPORT_MATRIX_REPORT is required for transport/protocol changes.'
 check_gate 'test-only diff' $'transport/example_test.go\nprotocol/example_test.go' 0 "${not_triggered}"
 check_gate 'production transport file' 'transport/example.go' 1 "${report_required}"
+check_gate 'production transport test.go suffix' 'transport/latest.go' 1 "${report_required}"
 check_gate 'mixed diff' $'transport/example_test.go\ntransport/example.go' 1 "${report_required}"
 check_gate 'production before test' $'transport/example.go\ntransport/example_test.go' 1 "${report_required}"
 check_gate 'production protocol file' 'protocol/example.go' 1 "${report_required}"
+check_gate 'production protocol test.go suffix' 'protocol/contest.go' 1 "${report_required}"
 check_gate 'transport production-to-test rename' $'transport/example.go\ntransport/example_test.go' 1 "${report_required}"
 check_gate 'protocol production-to-test rename' $'protocol/example.go\nprotocol/example_test.go' 1 "${report_required}"
 check_gate 'test-to-test rename' $'transport/old_test.go\ntransport/new_test.go' 0 "${not_triggered}"
