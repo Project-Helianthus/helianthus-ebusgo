@@ -181,6 +181,9 @@ type ENHTransport struct {
 	// only under readMu (every byte-emission site that feeds into it
 	// is locked). F-23, batch-19, 2026-05-13. See transport/ebus_escape.go.
 	escDecoder EbusEscapeDecoder
+	// escapeNow supplies observation time only to escDecoder.Feed.
+	// Set at construction, or before reading through the test-only bridge.
+	escapeNow func() time.Time
 	// escapeResetPending is set by writer-side async arbitration aborts that
 	// cannot reset escDecoder directly because they do not hold readMu. The
 	// next read-side non-dropped byte consumes this flag and resets before
@@ -266,6 +269,7 @@ func NewENHTransport(conn net.Conn, readTimeout, writeTimeout time.Duration, opt
 		readTimeout:            readTimeout,
 		writeTimeout:           writeTimeout,
 		buffer:                 make([]byte, 256),
+		escapeNow:              time.Now,
 		arbitrationSendsSource: true,
 	}
 	for _, opt := range opts {
@@ -1428,7 +1432,7 @@ func (t *ENHTransport) feedEscapeDecoderLocked(raw byte) (decoded byte, ok bool,
 	absorbedBefore := t.escDecoder.AbsorbedCount()
 
 	var admin AdminEvent
-	decoded, ok, wasEscaped, admin = t.escDecoder.Feed(raw, time.Now())
+	decoded, ok, wasEscaped, admin = t.escDecoder.Feed(raw, t.escapeNow())
 
 	// Account for any AA absorbed by this specific Feed call. The
 	// absorber increments AbsorbedCount when a 0xAA arrives mid-pair
