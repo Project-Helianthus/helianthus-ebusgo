@@ -486,9 +486,10 @@ func TestENH_Transport_AwaitingStartDropDoesNotStrandEscape(t *testing.T) {
 // u14SplitReadConn returns exactly one complete ENH frame per successful Read.
 // It never blocks or starts a goroutine; exhaustion is reported as EOF.
 type u14SplitReadConn struct {
-	frames [][2]byte
-	reads  int
-	closed bool
+	frames     [][2]byte
+	reads      int
+	closed     bool
+	beforeRead func(int)
 }
 
 func (c *u14SplitReadConn) Read(p []byte) (int, error) {
@@ -496,6 +497,9 @@ func (c *u14SplitReadConn) Read(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	c.reads++
+	if c.beforeRead != nil {
+		c.beforeRead(c.reads)
+	}
 	if len(c.frames) == 0 {
 		return 0, io.EOF
 	}
@@ -535,6 +539,7 @@ func TestENH_Transport_EscapePersistsAcrossConnReadBoundary(t *testing.T) {
 			}}
 			t.Cleanup(func() { _ = conn.Close() })
 			enh := transport.NewENHTransport(conn, 500*time.Millisecond, 500*time.Millisecond)
+			transport.SetEscapeClockForTest(enh, func() time.Time { return time.Unix(1, 0) })
 
 			ev, err := enh.ReadEvent()
 			if err != nil {
