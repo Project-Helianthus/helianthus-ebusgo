@@ -483,41 +483,78 @@ func TestENH_Transport_AwaitingStartDropDoesNotStrandEscape(t *testing.T) {
 	}
 }
 
-// TestENH_Transport_EscapePersistsAcrossConnReadBoundary pins the
-// Codex bot P3 follow-up: the escape decoder lives on the transport
-// struct, so an A9 lead arriving in one conn.Read must correctly
-// pair with the 0x00/0x01 in the NEXT conn.Read. net.Pipe is
-// synchronous, so writing the lead frame on its own forces a
-// separate transport-side conn.Read; the pair-completion frame on
-// the next Write happens in a distinct Read call.
+// u14SplitReadConn returns exactly one complete ENH frame per successful Read.
+// It never blocks or starts a goroutine; exhaustion is reported as EOF.
+type u14SplitReadConn struct {
+	frames [][2]byte
+	reads  int
+	closed bool
+}
+
+func (c *u14SplitReadConn) Read(p []byte) (int, error) {
+	if c.closed {
+		return 0, net.ErrClosed
+	}
+	c.reads++
+	if len(c.frames) == 0 {
+		return 0, io.EOF
+	}
+	if len(p) < len(c.frames[0]) {
+		return 0, io.ErrShortBuffer
+	}
+	n := copy(p, c.frames[0][:])
+	c.frames = c.frames[1:]
+	return n, nil
+}
+
+func (c *u14SplitReadConn) Write([]byte) (int, error)        { return 0, io.ErrClosedPipe }
+func (c *u14SplitReadConn) Close() error                     { c.closed = true; return nil }
+func (c *u14SplitReadConn) LocalAddr() net.Addr              { return nil }
+func (c *u14SplitReadConn) RemoteAddr() net.Addr             { return nil }
+func (c *u14SplitReadConn) SetDeadline(time.Time) error      { return nil }
+func (c *u14SplitReadConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *u14SplitReadConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestENH_Transport_EscapePersistsAcrossConnReadBoundary checks escape state
+// and provenance across two observed connection reads, without ordering delays.
 func TestENH_Transport_EscapePersistsAcrossConnReadBoundary(t *testing.T) {
 	t.Parallel()
 
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
+	for _, tc := range []struct {
+		name         string
+		continuation byte
+		want         byte
+	}{
+		{"syn", 0x01, 0xAA},
+		{"escape", 0x00, 0xA9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &u14SplitReadConn{frames: [][2]byte{
+				transport.EncodeENH(transport.ENHResReceived, 0xA9),
+				transport.EncodeENH(transport.ENHResReceived, tc.continuation),
+			}}
+			t.Cleanup(func() { _ = conn.Close() })
+			enh := transport.NewENHTransport(conn, 500*time.Millisecond, 500*time.Millisecond)
 
-	enh := transport.NewENHTransport(client, 500*time.Millisecond, 500*time.Millisecond)
-
-	leadSeq := transport.EncodeENH(transport.ENHResReceived, 0xA9)
-	pairSeq := transport.EncodeENH(transport.ENHResReceived, 0x01)
-
-	// Server writes the lead frame, waits, then writes the pair-
-	// completion frame in a separate Write. Each Write blocks on
-	// its counterpart Read (net.Pipe synchronous semantics), which
-	// forces the transport to do TWO distinct conn.Read calls.
-	go func() {
-		_, _ = server.Write(leadSeq[:])
-		// Brief sleep guarantees the transport has begun a fresh
-		// fillPendingLocked Read call before the pair arrives.
-		time.Sleep(20 * time.Millisecond)
-		_, _ = server.Write(pairSeq[:])
-	}()
-
-	events := drainBytes(t, enh, 1)
-	if events[0].Byte != 0xAA || !events[0].WasEscaped {
-		t.Fatalf("event = {Byte=0x%02X WasEscaped=%v}; want {0xAA, true} (escape pair must complete across conn.Read boundary)",
-			events[0].Byte, events[0].WasEscaped)
+			ev, err := enh.ReadEvent()
+			if err != nil {
+				t.Fatalf("ReadEvent: %v", err)
+			}
+			if conn.reads != 2 || len(conn.frames) != 0 {
+				t.Fatalf("read boundary: calls=%d remaining frames=%d; want two reads consuming both frames", conn.reads, len(conn.frames))
+			}
+			if ev.Kind != transport.StreamEventByte || ev.Byte != tc.want || !ev.WasEscaped {
+				t.Fatalf("event = {Kind=%v Byte=0x%02X WasEscaped=%v}; want byte {0x%02X, true}",
+					ev.Kind, ev.Byte, ev.WasEscaped, tc.want)
+			}
+			// A terminal read proves the pair produced exactly one event.
+			if extra, err := enh.ReadEvent(); !errors.Is(err, ebuserrors.ErrTransportClosed) {
+				t.Fatalf("after pair: event=%+v err=%v; want stream exhausted", extra, err)
+			}
+			if conn.reads != 3 {
+				t.Fatalf("read calls after EOF probe=%d; want 3", conn.reads)
+			}
+		})
 	}
 }
 
