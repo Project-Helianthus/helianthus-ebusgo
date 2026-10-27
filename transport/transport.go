@@ -96,6 +96,37 @@ type StreamEventReader interface {
 	ReadEvent() (StreamEvent, error)
 }
 
+// RawSymbolStreamReader is an optional extension for transports that decode
+// eBUS escape pairs internally (EscapeAware) but can additionally surface
+// each observed RECEIVED wire symbol in stream order, before escape decoding
+// completes. A proxy that forwards the ENH symbol stream to downstream ENH
+// clients needs an escape lead the moment it is observed: a client that
+// transmits a reserved byte as two raw symbols waits for the lead's echo
+// before it sends the suffix, so withholding the lead until the pair decodes
+// deadlocks that client.
+//
+// ReadEventWithRawSymbol returns exactly one stream item per call:
+//
+//   - hasSymbol=true: symbol is one observed RECEIVED wire symbol that passed
+//     the transport's own arrival filters (the same filters that govern the
+//     logical stream). ev is the logical item this symbol completed
+//     (StreamEventByte with WasEscaped provenance, or StreamEventWireSyn), or
+//     the zero StreamEvent when it completed none: an escape lead, a 0xAA
+//     absorbed inside a pending pair, or a symbol discarded by an escape
+//     decode fault. The raw symbol is the observed value; it is never
+//     regenerated from a logical byte.
+//   - hasSymbol=false: ev is a control item exactly as ReadEvent would
+//     return it (StreamEventStarted, StreamEventFailed, StreamEventReset),
+//     or a logical item that was queued before raw capture was enabled.
+//
+// Items are returned in the order the transport observed them. The first
+// call enables raw capture for the remaining lifetime of the transport;
+// ReadEvent and ReadByte keep their logical-only semantics and never return
+// raw items.
+type RawSymbolStreamReader interface {
+	ReadEventWithRawSymbol() (ev StreamEvent, symbol byte, hasSymbol bool, err error)
+}
+
 // InfoRequester is an optional extension implemented by transports that support
 // enhanced protocol INFO queries for adapter hardware telemetry and identity.
 // Plain TCP and UDP transports do not implement this interface.
