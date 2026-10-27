@@ -20,6 +20,15 @@ import (
 // when bus traffic floods the transport during INFO or normal read paths.
 const maxPendingEvents = 256
 
+// streamEventRawSymbol is a transport-private pendingEvents marker for one
+// observed RECEIVED wire symbol. It is queued only after raw capture was
+// enabled by ReadEventWithRawSymbol; ReadEvent and ReadByte never return it.
+const streamEventRawSymbol StreamEventKind = 0xFF
+
+// rawSymbolCompletesNext in a raw item's Data marks that the immediately
+// following pending item is the logical item this wire symbol completed.
+const rawSymbolCompletesNext byte = 1
+
 // arbitrationWindowTimeout bounds the async arbitration window opened by
 // RequestStart(). If STARTED/FAILED does not arrive within this budget,
 // the window is force-closed so subsequent RECEIVED bytes stop being
@@ -184,6 +193,11 @@ type ENHTransport struct {
 	// escapeNow supplies observation time only to escDecoder.Feed.
 	// Set at construction, or before reading through the test-only bridge.
 	escapeNow func() time.Time
+	// rawSymbolItems is set by the first ReadEventWithRawSymbol call. While
+	// set, each RECEIVED wire symbol that passes this transport's arrival
+	// filters is queued as a private raw item immediately ahead of the
+	// logical item it completed, if any. Accessed only under readMu.
+	rawSymbolItems bool
 	// escapeResetPending is set by writer-side async arbitration aborts that
 	// cannot reset escDecoder directly because they do not hold readMu. The
 	// next read-side non-dropped byte consumes this flag and resets before
@@ -428,7 +442,9 @@ func (t *ENHTransport) initRecvResultLocked() (InitResult, error) {
 				// suppression, so we append immediately when the
 				// decoder produces a logical byte.
 				if decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data); ok {
-					t.appendDecodedByteLocked(decoded, wasEscaped)
+					t.queueObservedSymbolLocked(msg.Data, StreamEvent{Kind: StreamEventByte, Byte: decoded, WasEscaped: wasEscaped}, true)
+				} else {
+					t.queueObservedSymbolLocked(msg.Data, StreamEvent{}, false)
 				}
 			case ENHResResetted:
 				t.resetStateLocked()
@@ -628,6 +644,11 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 		if len(t.pendingEvents) > 0 {
 			ev := t.pendingEvents[0]
 			t.pendingEvents = t.pendingEvents[1:]
+			if ev.Kind == streamEventRawSymbol {
+				// Raw items exist only after ReadEventWithRawSymbol enabled
+				// capture; ReadEvent keeps its logical-only contract.
+				continue
+			}
 			return ev, nil
 		}
 
@@ -643,6 +664,55 @@ func (t *ENHTransport) ReadEvent() (StreamEvent, error) {
 		}
 		if t.resets == 0 && len(t.pendingEvents) == 0 {
 			continue
+		}
+	}
+}
+
+// ReadEventWithRawSymbol implements RawSymbolStreamReader. The first call
+// enables raw capture for the rest of this transport's lifetime. Each call
+// returns one stream item in observation order: an observed RECEIVED wire
+// symbol together with the logical item it completed (if any), or a control
+// item. Raw symbols are the adapter-reported values; they are never
+// regenerated from logical bytes.
+func (t *ENHTransport) ReadEventWithRawSymbol() (StreamEvent, byte, bool, error) {
+	if t.closed.Load() {
+		return StreamEvent{}, 0, false, fmt.Errorf("enh transport closed: %w", ebuserrors.ErrTransportClosed)
+	}
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+	t.rawSymbolItems = true
+
+	for {
+		if t.resets > 0 {
+			t.resets--
+			return StreamEvent{Kind: StreamEventReset}, 0, false, nil
+		}
+
+		if len(t.pendingEvents) > 0 {
+			ev := t.pendingEvents[0]
+			t.pendingEvents = t.pendingEvents[1:]
+			if ev.Kind != streamEventRawSymbol {
+				// Control item, or a logical item queued before raw
+				// capture was enabled.
+				return ev, 0, false, nil
+			}
+			if ev.Data == rawSymbolCompletesNext && len(t.pendingEvents) > 0 {
+				logical := t.pendingEvents[0]
+				t.pendingEvents = t.pendingEvents[1:]
+				return logical, ev.Byte, true, nil
+			}
+			return StreamEvent{}, ev.Byte, true, nil
+		}
+
+		// Surface deferred parse error after pendingEvents is fully drained.
+		if t.deferredErr != nil {
+			err := t.deferredErr
+			t.deferredErr = nil
+			return StreamEvent{}, 0, false, err
+		}
+
+		if err := t.fillPendingLocked(); err != nil {
+			return StreamEvent{}, 0, false, err
 		}
 	}
 }
@@ -1179,7 +1249,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 							// as the first echo by sendRawWithEcho's wait
 							// loop, which would mis-classify them as a wire
 							// collision.
-							t.appendWireSynLocked()
+							t.queueObservedSymbolLocked(msg.Data, StreamEvent{Kind: StreamEventWireSyn, Byte: ebusSymbolSyn}, true)
 						}
 						continue
 					}
@@ -1194,6 +1264,10 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 				// bus SYN.
 				decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
 				if !ok {
+					// Escape lead, absorbed 0xAA or decode-fault symbol:
+					// no logical item, but the observed symbol stays
+					// visible to raw-capture readers.
+					t.queueObservedSymbolLocked(msg.Data, StreamEvent{}, false)
 					continue
 				}
 				// Post-grant pre-echo window: suppress idle SYN bytes that
@@ -1220,7 +1294,7 @@ func (t *ENHTransport) RequestInfo(id AdapterInfoID) ([]byte, error) {
 						t.closePostGrantPreEchoWindow()
 					}
 				}
-				t.appendDecodedByteLocked(decoded, wasEscaped)
+				t.queueObservedSymbolLocked(msg.Data, StreamEvent{Kind: StreamEventByte, Byte: decoded, WasEscaped: wasEscaped}, true)
 				// Drop when at cap — INFO is bounded by deadline anyway.
 			case ENHResStarted:
 				// Only a STARTED matching the expected initiator is OUR
@@ -1329,7 +1403,7 @@ func (t *ENHTransport) Close() error {
 // WireSyn in the evictable class makes that ordering invariant
 // strict.
 func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
-	if len(t.pendingEvents) >= maxPendingEvents {
+	if len(t.pendingEvents) >= t.pendingCapLocked() {
 		// Evict oldest evictable entry first — byte events (data is
 		// recoverable; gateway re-reads bus state) or passive wire-SYN
 		// markers (explicitly lossy backlog per the kind's contract).
@@ -1339,10 +1413,19 @@ func (t *ENHTransport) appendControlEventLocked(ev StreamEvent) {
 		// preserves the bounded-backpressure guarantee strictly while
 		// keeping the most recent control event (always more relevant
 		// than a stale one from an earlier arbitration cycle).
+		//
+		// A raw-capture item is evictable data as well. It always precedes
+		// the logical item it completed, so the scan meets it first and
+		// evicts both together: the raw and logical views never disagree
+		// about which observed symbol was lost.
 		evicted := false
 		for i, existing := range t.pendingEvents {
-			if existing.Kind == StreamEventByte || existing.Kind == StreamEventWireSyn {
-				t.pendingEvents = append(t.pendingEvents[:i], t.pendingEvents[i+1:]...)
+			if existing.Kind == StreamEventByte || existing.Kind == StreamEventWireSyn || existing.Kind == streamEventRawSymbol {
+				n := 1
+				if existing.Kind == streamEventRawSymbol && existing.Data == rawSymbolCompletesNext && i+1 < len(t.pendingEvents) {
+					n = 2
+				}
+				t.pendingEvents = append(t.pendingEvents[:i], t.pendingEvents[i+n:]...)
 				evicted = true
 				break
 			}
@@ -1510,6 +1593,59 @@ func applyEscapeAdminEvent(
 	}
 	// AdminEventNone — no admin event, nothing to do.
 	return false
+}
+
+// pendingCapLocked is the bound on pendingEvents. Raw capture queues up to
+// two items per observed symbol (the raw item and the logical item it
+// completed), so its bound is doubled to keep the per-symbol capacity of the
+// logical-only stream. Caller must hold readMu.
+func (t *ENHTransport) pendingCapLocked() int {
+	if t.rawSymbolItems {
+		return 2 * maxPendingEvents
+	}
+	return maxPendingEvents
+}
+
+// queueObservedSymbolLocked records one RECEIVED wire symbol that passed the
+// caller's arrival filters together with the logical item it completed
+// (hasLogical). Without raw capture this is exactly the logical emission the
+// read paths performed before raw capture existed: a StreamEventByte or
+// StreamEventWireSyn subject to maxPendingEvents, and nothing for a symbol
+// that completed no logical item. With raw capture the raw item and its
+// logical item are queued as one unit; when the bounded queue cannot hold
+// both, both are dropped, so the two views stay consistent about every
+// observed symbol. Caller must hold readMu and must already have advanced
+// the escape decoder for this symbol.
+func (t *ENHTransport) queueObservedSymbolLocked(symbol byte, logical StreamEvent, hasLogical bool) {
+	if !t.rawSymbolItems {
+		if !hasLogical {
+			return
+		}
+		if logical.Kind == StreamEventWireSyn {
+			t.appendWireSynLocked()
+			return
+		}
+		t.appendDecodedByteLocked(logical.Byte, logical.WasEscaped)
+		return
+	}
+	// A symbol that completes no logical item is an escape lead. Its suffix
+	// will need two slots (raw plus logical), so the lead is only accepted
+	// when the queue can also hold that completion.
+	need := 3
+	if hasLogical {
+		need = 2
+	}
+	if len(t.pendingEvents)+need > t.pendingCapLocked() {
+		return
+	}
+	raw := StreamEvent{Kind: streamEventRawSymbol, Byte: symbol}
+	if hasLogical {
+		raw.Data = rawSymbolCompletesNext
+	}
+	t.pendingEvents = append(t.pendingEvents, raw)
+	if hasLogical {
+		t.pendingEvents = append(t.pendingEvents, logical)
+	}
 }
 
 // appendDecodedByteLocked emits a fully-decoded logical byte to
@@ -1723,7 +1859,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 						// instead of consuming the pre-grant SYN as the
 						// first echo (which sendRawWithEcho's collision
 						// guard would reject as unexpected wire SYN).
-						t.appendWireSynLocked()
+						t.queueObservedSymbolLocked(msg.Data, StreamEvent{Kind: StreamEventWireSyn, Byte: ebusSymbolSyn}, true)
 					}
 					continue
 				}
@@ -1736,6 +1872,11 @@ func (t *ENHTransport) fillPendingLocked() error {
 			// never mistaken for an idle bus SYN.
 			decoded, ok, wasEscaped := t.feedEscapeDecoderLocked(msg.Data)
 			if !ok {
+				// Escape lead, absorbed 0xAA or decode-fault symbol: no
+				// logical item, but the observed symbol stays visible to
+				// raw-capture readers immediately (a raw ENH client waits
+				// for the lead's echo before it sends the suffix).
+				t.queueObservedSymbolLocked(msg.Data, StreamEvent{}, false)
 				continue
 			}
 			// Post-grant pre-echo window: suppress idle SYN bytes that
@@ -1763,7 +1904,7 @@ func (t *ENHTransport) fillPendingLocked() error {
 					t.closePostGrantPreEchoWindow()
 				}
 			}
-			t.appendDecodedByteLocked(decoded, wasEscaped)
+			t.queueObservedSymbolLocked(msg.Data, StreamEvent{Kind: StreamEventByte, Byte: decoded, WasEscaped: wasEscaped}, true)
 		case ENHResStarted:
 			// If an async arbitration window is open, only a STARTED that
 			// matches the expected initiator is OUR grant. STARTED with a
@@ -1987,6 +2128,7 @@ var _ InfoRequester = (*ENHTransport)(nil)
 var _ Reconnectable = (*ENHTransport)(nil)
 var _ EscapeAware = (*ENHTransport)(nil)
 var _ EscapeFlaggedReader = (*ENHTransport)(nil)
+var _ RawSymbolStreamReader = (*ENHTransport)(nil)
 
 // BaudObservabilitySnapshot returns transport-owned observations without
 // acquiring I/O locks or performing any bus/adapter request. Physical baud,
