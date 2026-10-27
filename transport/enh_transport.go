@@ -1628,7 +1628,10 @@ func (t *ENHTransport) queueObservedSymbolLocked(symbol byte, logical StreamEven
 		t.appendDecodedByteLocked(logical.Byte, logical.WasEscaped)
 		return
 	}
-	need := 1
+	// A symbol that completes no logical item is an escape lead. Its suffix
+	// will need two slots (raw plus logical), so the lead is only accepted
+	// when the queue can also hold that completion.
+	need := 3
 	if hasLogical {
 		need = 2
 	}

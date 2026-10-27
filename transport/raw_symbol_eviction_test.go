@@ -77,3 +77,30 @@ func TestQueueObservedSymbolLocked_LogicalOnlyWithoutRawCapture(t *testing.T) {
 		}
 	}
 }
+
+// An escape lead is accepted under raw capture only when its suffix can
+// still be queued, so a lead is never delivered without its completion.
+func TestQueueObservedSymbolLocked_LeadReservesSuffixCapacity(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+	tr := NewENHTransport(client, time.Second, time.Second)
+
+	tr.readMu.Lock()
+	defer tr.readMu.Unlock()
+	tr.rawSymbolItems = true
+	limit := tr.pendingCapLocked()
+	for len(tr.pendingEvents) < limit-1 {
+		tr.queueObservedSymbolLocked(0x10, StreamEvent{Kind: StreamEventByte, Byte: 0x10}, true)
+	}
+	tr.appendControlEventLocked(StreamEvent{Kind: StreamEventStarted})
+	if len(tr.pendingEvents) != limit-1 {
+		// Force an odd fill: one free slot below the bound.
+		t.Fatalf("setup length = %d; want %d", len(tr.pendingEvents), limit-1)
+	}
+	before := len(tr.pendingEvents)
+	tr.queueObservedSymbolLocked(0xA9, StreamEvent{}, false)
+	if got := len(tr.pendingEvents); got != before {
+		t.Fatalf("lead accepted with one free slot: length %d -> %d; want dropped", before, got)
+	}
+}
