@@ -377,7 +377,8 @@ func AA25NewEngine(aa25Config AA25Config, aa25Ports AA25Ports) (*AA25Engine, err
 		aa25Config.AA25ResponderAddress == aa25SymbolEscape ||
 		aa25Config.AA25ResponderAddress == aa25SymbolSyn ||
 		aa25Config.AA25ResponderAddress == aa25AddressBroadcast ||
-		aa25InitiatorAddress(aa25Config.AA25ResponderAddress) {
+		aa25InitiatorAddress(aa25Config.AA25ResponderAddress) ||
+		aa25Config.AA25TurnaroundTicks > aa25Config.AA25TickHz {
 		return nil, AA25ErrInvalidConfig
 	}
 	aa25BitWhole, _ := aa25RationalAt(1, aa25Config.AA25TickHz, AA25NominalBaud)

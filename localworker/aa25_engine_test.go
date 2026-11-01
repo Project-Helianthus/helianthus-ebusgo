@@ -1568,6 +1568,11 @@ func TestAA25ConfigAndPreparedValidation(aa25T *aa25testing.T) {
 	if _, aa25Err := AA25NewEngine(aa25TestConfig(), aa25Ports); aa25Err != nil {
 		aa25T.Fatalf("aa25 control config: %v", aa25Err)
 	}
+	aa25Boundary := aa25TestConfig()
+	aa25Boundary.AA25TurnaroundTicks = aa25Boundary.AA25TickHz
+	if _, aa25Err := AA25NewEngine(aa25Boundary, aa25Ports); aa25Err != nil {
+		aa25T.Fatalf("aa25 turnaround boundary control: %v", aa25Err)
+	}
 	aa25BitTicks := aa25TestHz / 2400
 	aa25CharacterTicks := aa25TestHz / 240
 	for _, aa25Mutate := range []func(*AA25Config){
@@ -1580,6 +1585,11 @@ func TestAA25ConfigAndPreparedValidation(aa25T *aa25testing.T) {
 		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0x10 },
 		func(aa25Config *AA25Config) { aa25Config.AA25TXLateToleranceTicks = aa25BitTicks },
 		func(aa25Config *AA25Config) { aa25Config.AA25EchoAllowanceTicks = aa25CharacterTicks },
+		func(aa25Config *AA25Config) { aa25Config.AA25TurnaroundTicks = aa25Config.AA25TickHz + 1 },
+		func(aa25Config *AA25Config) {
+			aa25Config.AA25TickHz = 24_000_000
+			aa25Config.AA25TurnaroundTicks = ^uint64(0) - 100_000
+		},
 	} {
 		aa25Config := aa25TestConfig()
 		aa25Mutate(&aa25Config)
