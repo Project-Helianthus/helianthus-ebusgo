@@ -2378,6 +2378,36 @@ func TestAA24FenceRetainedOutstandingRejectsPostFenceCompletion(aa24T *aa24testi
 	}
 }
 
+// Catches a repeated stop that moves a retained cancelled identity into lingering with
+// a newer horizon once polling frees room: its post-fence completion would be accepted.
+func TestAA24RepeatedStopKeepsRetainedHorizonAfterRoomFrees(aa24T *aa24testing.T) {
+	aa24Mem := aa24FixtureMemory(aa24FixtureBytes())
+	aa24Config := aa24FixtureConfig
+	aa24Config.AA24Lanes[AA24LaneWorkerData-1].AA24Capacity = 2
+	aa24Expected, _, aa24Err := AA24InitMapping(aa24Mem, aa24FixtureBinding(), aa24Config, aa24FixtureLimits)
+	if aa24Err != nil {
+		aa24T.Fatalf("init: %v", aa24Err)
+	}
+	aa24Pair := aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24Host.aa24Lingering = append(aa24Pair.aa24Host.aa24Lingering[:0], aa24Lingered{aa24Horizon: 1}, aa24Lingered{aa24Horizon: 1})
+	aa24Pair.aa24Host.aa24Lingering = aa24Pair.aa24Host.aa24Lingering[:cap(aa24Pair.aa24Host.aa24Lingering)]
+	aa24Early := aa24Pair.aa24Admit(1, 1, 10)
+	aa24Want(aa24T, "early complete", aa24Pair.aa24Worker.AA24Complete(aa24Early, AA24StatusAccepted, aa24At(10)), nil)
+	aa24Identity := aa24Pair.aa24Admit(1, 2, 10)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(11)), nil)
+	aa24Want(aa24T, "complete after fence", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(12)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(13)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("pre-fence completion: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "second stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(14)), nil)
+	aa24Delivery, aa24OK, aa24Err = aa24Pair.aa24Poll(15)
+	if aa24OK || !aa24errorstest.Is(aa24Err, ErrAA24Stale) {
+		aa24T.Fatalf("post-fence completion accepted: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
 // Catches a delayed termination notice after a graceful teardown that reads the
 // cleared lane mapping and panics.
 func TestAA24ObserveWorkerTerminatedAfterTeardownIsSafe(aa24T *aa24testing.T) {

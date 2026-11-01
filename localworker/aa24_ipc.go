@@ -1643,9 +1643,12 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	// before the fence still matches instead of draining as stale.
 	// An entry already lingering from expiry cleanup is tightened to the same horizon,
 	// so a completion posted after the fence is stale there too.
+	// The horizon is read once, so every identity shares one snapshot of the head, and
+	// a retained identity keeps the horizon it already held when it moves to lingering.
+	var aa24FenceHorizon uint64
 	if !aa24Host.aa24Detached {
 		aa24FenceData := aa24Host.aa24Lane(AA24LaneWorkerData)
-		aa24FenceHorizon := aa24LoadAcquire(aa24FenceData.aa24Mem, aa24FenceData.aa24Layout.aa24ProducerOffset)
+		aa24FenceHorizon = aa24LoadAcquire(aa24FenceData.aa24Mem, aa24FenceData.aa24Layout.aa24ProducerOffset)
 		for aa24Index := range aa24Host.aa24Lingering {
 			aa24Held := &aa24Host.aa24Lingering[aa24Index]
 			if !aa24Held.aa24Strict {
@@ -1656,12 +1659,16 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 			}
 		}
 	}
+	aa24LingerHorizon := aa24FenceHorizon
+	if aa24Host.aa24RetainedStrict && aa24Host.aa24RetainedHorizon < aa24LingerHorizon {
+		aa24LingerHorizon = aa24Host.aa24RetainedHorizon
+	}
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
 		if !aa24Host.aa24Cancelling(aa24Identity) {
 			aa24Host.aa24Cancelled = append(aa24Host.aa24Cancelled, aa24Identity)
 		}
-		if aa24Host.aa24Detached || !aa24Host.aa24Linger(aa24Identity, true) {
+		if aa24Host.aa24Detached || !aa24Host.aa24Linger(aa24Identity, true, &aa24LingerHorizon) {
 			if !aa24Host.aa24Detached {
 				aa24Kept = append(aa24Kept, aa24Identity)
 			}
@@ -1671,8 +1678,6 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	// Identities that found no lingering room stay outstanding but share the fence
 	// horizon, so a completion posted after the fence is stale for them too.
 	if len(aa24Kept) > 0 && !aa24Host.aa24Detached {
-		aa24FenceData := aa24Host.aa24Lane(AA24LaneWorkerData)
-		aa24FenceHorizon := aa24LoadAcquire(aa24FenceData.aa24Mem, aa24FenceData.aa24Layout.aa24ProducerOffset)
 		if !aa24Host.aa24RetainedStrict || aa24Host.aa24RetainedHorizon > aa24FenceHorizon {
 			aa24Host.aa24RetainedHorizon = aa24FenceHorizon
 		}
@@ -1809,7 +1814,7 @@ type aa24Lingered struct {
 // A full list first drops entries whose horizon the data tail has passed; it never
 // evicts an entry that may still have a queued completion. Without room it reports
 // false and the caller keeps the identity outstanding.
-func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Strict bool) bool {
+func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Strict bool, aa24At *uint64) bool {
 	if cap(aa24Host.aa24Lingering) == 0 {
 		return false
 	}
@@ -1826,7 +1831,12 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Stric
 			return false
 		}
 	}
-	aa24Horizon := aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
+	var aa24Horizon uint64
+	if aa24At != nil {
+		aa24Horizon = *aa24At
+	} else {
+		aa24Horizon = aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
+	}
 	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Lingered{aa24Identity: aa24Identity, aa24Horizon: aa24Horizon, aa24Strict: aa24Strict})
 	return true
 }
@@ -1837,7 +1847,7 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Stric
 func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24Linger(aa24Identity, false) {
+		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24Linger(aa24Identity, false, nil) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}
@@ -2032,7 +2042,7 @@ func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23
 	aa24Retired := aa24Record.aa24Ref()
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24Linger(aa24Identity, false) {
+		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24Linger(aa24Identity, false, nil) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}
