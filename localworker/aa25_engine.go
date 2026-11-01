@@ -354,6 +354,7 @@ type AA25Engine struct {
 	aa25TXBit       uint64
 	aa25TXBase      uint64
 	aa25TXRetried   bool
+	aa25RetryCancel bool
 	aa25AckSince    uint64
 	aa25TXLevel     AA25Level
 	aa25EchoIndex   uint64
@@ -545,6 +546,12 @@ func (aa25Engine *AA25Engine) aa25BeginCharacter(aa25Index, aa25Now uint64) {
 	aa25Engine.aa25CharShift = 0
 	aa25Engine.aa25CharEdgePhase = [aa25SamplesPerBit]uint8{}
 	aa25Engine.aa25FinalComplete = false
+	// A start seen once every response symbol has echoed is the awaited final
+	// symbol, not an extra echo: complete the response before judging it.
+	if aa25Engine.aa25TXState == aa25TXActive && aa25Engine.aa25TXBit == uint64(aa25Engine.aa25Pinned.aa25WireLen)*aa25BitsPerCharacter &&
+		aa25Engine.aa25EchoIndex == uint64(aa25Engine.aa25Pinned.aa25WireLen) {
+		aa25Engine.aa25CompleteTX(aa25Now)
+	}
 	aa25Engine.aa25CharEcho = aa25Engine.aa25TXState == aa25TXActive
 	switch aa25Engine.aa25TXState {
 	case aa25TXWaiting:
@@ -813,6 +820,7 @@ func (aa25Engine *AA25Engine) aa25AdmitResponse(aa25Now uint64) {
 	aa25Engine.aa25TXBit = 0
 	aa25Engine.aa25TXBase = 0
 	aa25Engine.aa25TXRetried = false
+	aa25Engine.aa25RetryCancel = false
 	aa25Engine.aa25EchoIndex = 0
 	aa25Engine.aa25Publish(AA25Event{
 		AA25Kind:       AA25EventAdmitted,
@@ -884,16 +892,21 @@ func (aa25Engine *AA25Engine) aa25StepTX(aa25Now uint64) {
 		return
 	}
 	if aa25Engine.aa25EchoIndex == aa25Length && aa25Now >= aa25Engine.aa25TXDeadline(aa25Total) {
-		aa25Engine.aa25Publish(AA25Event{
-			AA25Kind:       AA25EventTXComplete,
-			AA25Tick:       aa25Now,
-			AA25Generation: aa25Engine.aa25Pinned.AA25Generation,
-		})
-		// The pin stays until the initiator's final symbol: a NACK there
-		// retransmits the response portion once.
-		aa25Engine.aa25TXState = aa25TXAwaitAck
-		aa25Engine.aa25AckSince = aa25Now
+		aa25Engine.aa25CompleteTX(aa25Now)
 	}
+}
+
+// aa25CompleteTX ends the transmission once every symbol was driven and echoed.
+func (aa25Engine *AA25Engine) aa25CompleteTX(aa25Now uint64) {
+	aa25Engine.aa25Publish(AA25Event{
+		AA25Kind:       AA25EventTXComplete,
+		AA25Tick:       aa25Now,
+		AA25Generation: aa25Engine.aa25Pinned.AA25Generation,
+	})
+	// The pin stays until the initiator's final symbol: a NACK there
+	// retransmits the response portion once.
+	aa25Engine.aa25TXState = aa25TXAwaitAck
+	aa25Engine.aa25AckSince = aa25Now
 }
 
 // aa25AckDeadline is the end of the final-ACK wait: 200 ms of injected ticks.
@@ -909,6 +922,9 @@ func (aa25Engine *AA25Engine) aa25HandleFinalAck(aa25Symbol byte, aa25Now uint64
 	aa25Engine.aa25TXState = aa25TXIdle
 	aa25Engine.aa25PinnedValid = false
 	if aa25Symbol != aa25SymbolNack || aa25Expired {
+		return
+	}
+	if aa25Engine.aa25RetryCancel {
 		return
 	}
 	if aa25Engine.aa25TXRetried {
@@ -1009,6 +1025,8 @@ func (aa25Engine *AA25Engine) aa25StepHousekeeping(aa25Now uint64) {
 		if aa25Engine.aa25TXState == aa25TXWaiting || aa25Engine.aa25TXState == aa25TXAwaitAck {
 			aa25Engine.aa25AbortTX(aa25Now)
 		}
+		// Retry cancellation outlives completion of a response still on the wire.
+		aa25Engine.aa25RetryCancel = true
 		if aa25Engine.aa25TXState == aa25TXIdle {
 			aa25Engine.aa25PinnedValid = false
 		}

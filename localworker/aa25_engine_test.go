@@ -1889,3 +1889,82 @@ func TestAA25FinalAckWaitExpiresBeforeLateNack(aa25T *aa25testing.T) {
 		})
 	}
 }
+
+func TestAA25FinalSymbolAtResponseBoundaryIsNotUnsolicitedEcho(aa25T *aa25testing.T) {
+	// The initiator starts its final symbol exactly where the response's last
+	// stop bit ends. Mutation caught: judging that start before the fully echoed
+	// response moves to the final-ACK wait, which faults it as unsolicited echo,
+	// suppresses TXComplete, withdraws the response and drops the NACK resend.
+	for _, aa25Case := range []struct {
+		aa25Name    string
+		aa25Symbol  byte
+		aa25Resends int
+	}{{"ack", 0x00, 0}, {"nack", 0xFF, 1}} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			// An integral sample period puts the response end on the sample grid,
+			// so the final symbol's first low sample and the completion deadline
+			// fall in the same pass.
+			aa25Config := aa25TestConfig()
+			aa25Config.AA25TickHz = 24_000_000
+			aa25Self := aa25NewBench(aa25T, aa25Config)
+			aa25Prepared := aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0xAB)
+			aa25Wire := aa25PreparedWire(aa25Prepared)
+			aa25End := aa25Self.aa25SendRequest(aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, 0x01))
+			aa25Self.aa25RunUntilEvent(AA25EventAdmitted, aa25TickAfter(aa25End, 2000, aa25Self))
+			aa25Start := aa25Self.aa25FinalStart()
+			aa25Want := aa25Self.aa25ExpectedEdges(aa25Start, aa25Wire)
+			aa25Boundary := aa25Rat(aa25Start+aa25Self.aa25Config.AA25TurnaroundTicks, 1)
+			aa25Span := aa25Rat(10+10*uint64(len(aa25Wire)), 1)
+			aa25Boundary.Add(aa25Boundary, aa25Span.Mul(aa25Span, aa25Rat(aa25Self.aa25Hz, 2400)))
+			aa25SymbolEnd := aa25Self.aa25Send(aa25Boundary, aa25Case.aa25Symbol)
+			if aa25Case.aa25Resends > 0 {
+				aa25Self.aa25RunUntilCompletes(2, aa25TickAfter(aa25SymbolEnd, 2000, aa25Self))
+				aa25Want = append(aa25Want, aa25Self.aa25ExpectedEdges(aa25Self.aa25FinalStart(), aa25Wire[1:])...)
+			}
+			aa25Self.aa25Run(aa25TickAfter(aa25SymbolEnd, 2000, aa25Self))
+			if aa25Self.aa25HasFault(AA25FaultEchoUnsolicited) {
+				aa25T.Fatalf("aa25 boundary symbol faulted as unsolicited echo: %v", aa25Self.aa25Faults())
+			}
+			if aa25Got := len(aa25Self.aa25Select(AA25EventTXComplete)); aa25Got != 1+aa25Case.aa25Resends {
+				aa25T.Fatalf("aa25 completes %d; want %d (faults %v)", aa25Got, 1+aa25Case.aa25Resends, aa25Self.aa25Faults())
+			}
+			if !aa25EqualEdges(aa25Self.aa25Writes, aa25Want) {
+				aa25T.Fatalf("aa25 edges %v; want %v", aa25Self.aa25Writes, aa25Want)
+			}
+		})
+	}
+}
+
+func TestAA25WithdrawalDuringTransmitCancelsNackRetransmit(aa25T *aa25testing.T) {
+	// Withdrawal arrives while the response is on the wire; the response still
+	// finishes. Mutation caught: letting completion enter the final-ACK wait
+	// without retaining the cancellation, so a later NACK retransmits anyway.
+	for _, aa25Case := range []struct {
+		aa25Name     string
+		aa25Withdraw bool
+	}{{"control-no-withdraw", false}, {"withdrawn", true}} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+			aa25Prepared := aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0xAB)
+			aa25Wire := aa25PreparedWire(aa25Prepared)
+			aa25End := aa25Self.aa25SendRequest(aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, 0x01))
+			aa25Self.aa25RunUntilEvent(AA25EventTXIntent, aa25TickAfter(aa25End, 2000, aa25Self))
+			if aa25Case.aa25Withdraw {
+				if !aa25Self.aa25Engine.AA25OfferWithdraw() {
+					aa25T.Fatal("aa25 withdraw refused")
+				}
+				aa25Self.aa25Step(aa25Self.aa25Now)
+			}
+			aa25Self.aa25RunUntilCompletes(1, aa25TickAfter(aa25End, 4000, aa25Self))
+			aa25Want := aa25Self.aa25ExpectedEdges(aa25Self.aa25FinalStart(), aa25Wire)
+			aa25SymbolEnd := aa25Self.aa25QueueFinalSymbol(0xFF, 1)
+			aa25Self.aa25Run(aa25TickAfter(aa25SymbolEnd, 2000, aa25Self))
+			if aa25Resent := len(aa25Self.aa25Writes) > len(aa25Want); aa25Resent == aa25Case.aa25Withdraw {
+				aa25T.Fatalf("aa25 resent %v with withdraw %v (faults %v)", aa25Resent, aa25Case.aa25Withdraw, aa25Self.aa25Faults())
+			}
+			if aa25Case.aa25Withdraw && !aa25EqualEdges(aa25Self.aa25Writes, aa25Want) {
+				aa25T.Fatalf("aa25 edges %v; want %v", aa25Self.aa25Writes, aa25Want)
+			}
+		})
+	}
+}
