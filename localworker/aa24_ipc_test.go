@@ -1941,3 +1941,101 @@ func TestAA24RefusedPublicationIsRetiredByRevocation(aa24T *aa24testing.T) {
 		aa24T.Fatalf("refused plan stayed quarantined: %+v", aa24Plans)
 	}
 }
+
+func TestAA24RefusedRetirementSurvivesSaturatedControl(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Worker := aa24Pair.aa24Worker
+	for aa24Plan := AA23PlanGeneration(1); aa24Plan <= 2; aa24Plan++ {
+		aa24Tick := AA23Tick(10 * aa24Plan)
+		aa24Ref := aa24Pair.aa24Publish(aa24Plan, aa24Tick)
+		aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(aa24Tick+1)), nil)
+		aa24Want(aa24T, "worker poll", aa24Worker.AA24PollControl(aa24At(aa24Tick+1)), nil)
+		aa24Want(aa24T, "ack fills a usable control slot", aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(aa24Tick+2)), nil)
+	}
+	aa24Refused := aa24FixtureRef(3)
+	aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs, aa24Refused)
+	aa24Record := AA24Record{AA24Kind: AA24RecordRevoke}
+	aa24Record.aa24ApplyRef(aa24Refused)
+	aa24Want(aa24T, "revoke of the refused plan", aa24Pair.aa24Host.aa24WriteControl(&aa24Record), nil)
+	aa24Want(aa24T, "worker poll on saturated control", aa24Worker.AA24PollControl(aa24At(23)), nil)
+	if len(aa24Worker.aa24RefusedRefs) != 1 || len(aa24Worker.aa24RetireRetry) != 1 {
+		aa24T.Fatalf("reference must stay until acknowledged: refused %d retry %d", len(aa24Worker.aa24RefusedRefs), len(aa24Worker.aa24RetireRetry))
+	}
+	aa24Control := aa24Worker.aa24Lane(AA24LaneWorkerControl)
+	aa24Before, _, aa24Err := aa24Control.aa24Indices()
+	if aa24Err != nil {
+		aa24T.Fatal(aa24Err)
+	}
+	for aa24Tick := AA23Tick(24); aa24Tick < 27; aa24Tick++ {
+		if _, aa24OK, aa24Err := aa24Pair.aa24Poll(aa24Tick); !aa24OK || aa24Err != nil {
+			aa24T.Fatalf("host poll: %v %v", aa24OK, aa24Err)
+		}
+	}
+	aa24Want(aa24T, "worker retry", aa24Worker.AA24PollControl(aa24At(28)), nil)
+	if len(aa24Worker.aa24RefusedRefs) != 0 || len(aa24Worker.aa24RetireRetry) != 0 {
+		aa24T.Fatalf("retired reference lingers: refused %d retry %d", len(aa24Worker.aa24RefusedRefs), len(aa24Worker.aa24RetireRetry))
+	}
+	if aa24After, _, aa24Err := aa24Control.aa24Indices(); aa24Err != nil || aa24After != aa24Before+1 {
+		aa24T.Fatalf("retirement must be written once the room returns: before %d after %d err %v", aa24Before, aa24After, aa24Err)
+	}
+}
+
+func TestAA24RevokedActiveCommandsLeaveOutstanding(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	for aa24Cycle := AA23PlanGeneration(1); aa24Cycle <= 6; aa24Cycle++ {
+		aa24Tick := AA23Tick(10 * aa24Cycle)
+		aa24Ref := aa24Pair.aa24Publish(aa24Cycle, aa24Tick)
+		aa24Pair.aa24Admit(aa24Cycle, AA24OwnerToken(aa24Cycle), aa24Tick+1)
+		if len(aa24Pair.aa24Host.aa24Outstanding) != 1 {
+			aa24T.Fatalf("cycle %d: outstanding %d", aa24Cycle, len(aa24Pair.aa24Host.aa24Outstanding))
+		}
+		aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(aa24Tick+2)), nil)
+		aa24Want(aa24T, "worker poll", aa24Pair.aa24Worker.AA24PollControl(aa24At(aa24Tick+3)), nil)
+		aa24Want(aa24T, "ack", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(aa24Tick+4)), nil)
+		if _, aa24OK, aa24Err := aa24Pair.aa24Poll(aa24Tick + 5); !aa24OK || aa24Err != nil {
+			aa24T.Fatalf("host poll: %v %v", aa24OK, aa24Err)
+		}
+		if len(aa24Pair.aa24Host.aa24Outstanding) != 0 {
+			aa24T.Fatalf("cycle %d: commands of the retired plan stay outstanding: %d", aa24Cycle, len(aa24Pair.aa24Host.aa24Outstanding))
+		}
+	}
+}
+
+func TestAA24StopStillFlowsAfterClockFence(aa24T *aa24testing.T) {
+	aa24T.Run("worker clock fence", func(aa24T *aa24testing.T) {
+		aa24Pair := aa24NewPair(aa24T)
+		if _, aa24Err := aa24Pair.aa24Worker.AA24ObserveRaw(aa24FixtureRaw(1), aa24At(20)); aa24Err != nil {
+			aa24T.Fatal(aa24Err)
+		}
+		aa24Want(aa24T, "regressed worker clock", aa24Pair.aa24Worker.AA24PollControl(aa24At(19)), ErrAA24Clock)
+		aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(30)
+		if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordGap {
+			aa24T.Fatalf("gap: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+		}
+		aa24Want(aa24T, "acknowledge", aa24Pair.aa24Host.AA24AcknowledgeGap(aa24Delivery.AA24Record.AA24CaptureSequence, aa24At(31)), nil)
+		aa24Want(aa24T, "fenced worker drains the stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(19)), ErrAA24Clock)
+		if _, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24FixtureStream + 1); aa24Err != nil {
+			aa24T.Fatalf("resync stays blocked: %v", aa24Err)
+		}
+	})
+	aa24T.Run("host clock fence", func(aa24T *aa24testing.T) {
+		for _, aa24Name := range []string{"acknowledge", "request"} {
+			aa24Pair := aa24NewPair(aa24T)
+			aa24Want(aa24T, aa24Name+" poll", aa24Pair.aa24Worker.AA24PollControl(aa24At(10)), nil)
+			if _, _, aa24Err := aa24Pair.aa24Poll(30); aa24Err != nil {
+				aa24T.Fatal(aa24Err)
+			}
+			_, _, aa24Err := aa24Pair.aa24Poll(29)
+			aa24Want(aa24T, aa24Name+" regressed host clock", aa24Err, ErrAA24Clock)
+			if aa24Name == "acknowledge" {
+				aa24Want(aa24T, "acknowledge on a fenced clock", aa24Pair.aa24Host.AA24AcknowledgeGap(0, aa24At(29)), nil)
+			} else {
+				aa24Want(aa24T, "request on a fenced clock", aa24Pair.aa24Host.AA24RequestStop(aa24At(29)), nil)
+			}
+			aa24Want(aa24T, aa24Name+" worker drains", aa24Pair.aa24Worker.AA24PollControl(aa24At(40)), nil)
+			if aa24Pair.aa24Worker.AA24Fence().AA24Reason != AA24FenceStop {
+				aa24T.Fatalf("%s: worker fence %+v", aa24Name, aa24Pair.aa24Worker.AA24Fence())
+			}
+		}
+	})
+}

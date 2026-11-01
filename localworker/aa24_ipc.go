@@ -971,6 +971,7 @@ type AA24Worker struct {
 	aa24StopObserved bool
 	aa24Adopted      []aa24AdoptedPlan
 	aa24RefusedRefs  []AA24PlanRef
+	aa24RetireRetry  []AA24PlanRef
 	aa24Scratch      []byte
 	aa24PlanFloor    AA23PlanGeneration
 	aa24TokenFloor   AA24OwnerToken
@@ -993,6 +994,7 @@ func AA24AttachWorker(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Worker, e
 		aa24NextSequence: 1,
 		aa24Adopted:      make([]aa24AdoptedPlan, 0, aa24Expected.AA24Limits.AA24MaxPlans),
 		aa24RefusedRefs:  make([]AA24PlanRef, 0, aa24Expected.AA24Limits.AA24MaxPlans),
+		aa24RetireRetry:  make([]AA24PlanRef, 0, aa24Expected.AA24Limits.AA24MaxPlans),
 		aa24Scratch:      make([]byte, 0, aa24Expected.AA24Limits.AA24MaxPayloadBytes),
 		aa24PlanFloor:    aa24Expected.AA24PlanFloor,
 		aa24TokenFloor:   aa24Expected.AA24TokenFloor,
@@ -1117,20 +1119,14 @@ func (aa24Worker *AA24Worker) aa24Tick(aa24Now AA23ClockReading) error {
 // lane first, so a revocation or stop never waits behind any data backlog.
 func (aa24Worker *AA24Worker) aa24Service(aa24Now AA23ClockReading) error {
 	if aa24Err := aa24Worker.aa24Tick(aa24Now); aa24Err != nil {
+		if aa24Err == ErrAA24Clock {
+			// The latched clock fence still lets a stop through, so the host can
+			// acknowledge the gap; nothing here makes an output decision.
+			aa24Worker.aa24DrainControl(aa24Now.AA23Tick, true)
+		}
 		return aa24Err
 	}
-	aa24Control := aa24Worker.aa24Lane(AA24LaneHostControl)
-	for aa24Budget := aa24Control.aa24Layout.aa24Capacity; aa24Budget > 0; aa24Budget-- {
-		aa24Record, aa24OK, aa24Err := aa24Control.aa24Read(aa24Worker.aa24Scratch)
-		if aa24Err != nil {
-			aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
-			return nil
-		}
-		if !aa24OK {
-			break
-		}
-		aa24Worker.aa24HandleControl(&aa24Record, aa24Now.AA23Tick)
-	}
+	aa24Worker.aa24DrainControl(aa24Now.AA23Tick, false)
 	for aa24Index := range aa24Worker.aa24Lanes {
 		if aa24Worker.aa24Lanes[aa24Index].aa24Saturated {
 			aa24Worker.aa24RaiseLocalGap(AA24FenceCounter)
@@ -1142,7 +1138,48 @@ func (aa24Worker *AA24Worker) aa24Service(aa24Now AA23ClockReading) error {
 	} else if aa24Expired {
 		aa24Worker.aa24RaiseLocalGap(AA24FenceControlDeadline)
 	}
+	aa24Worker.aa24RetryRetired(aa24Now.AA23Tick)
 	return nil
+}
+
+// aa24DrainControl reads the bounded host control lane. A fenced drain consumes
+// publications without adopting them.
+func (aa24Worker *AA24Worker) aa24DrainControl(aa24Now AA23Tick, aa24Fenced bool) {
+	aa24Control := aa24Worker.aa24Lane(AA24LaneHostControl)
+	for aa24Budget := aa24Control.aa24Layout.aa24Capacity; aa24Budget > 0; aa24Budget-- {
+		aa24Record, aa24OK, aa24Err := aa24Control.aa24Read(aa24Worker.aa24Scratch)
+		if aa24Err != nil {
+			aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
+			return
+		}
+		if !aa24OK {
+			break
+		}
+		aa24Worker.aa24HandleControl(&aa24Record, aa24Now, aa24Fenced)
+	}
+}
+
+// aa24RetryRetired posts the retirement of refused publications whose first
+// acknowledgement found no room. A reference stays until its post succeeds.
+func (aa24Worker *AA24Worker) aa24RetryRetired(aa24Now AA23Tick) {
+	for aa24Index := 0; aa24Index < len(aa24Worker.aa24RetireRetry); {
+		aa24Ref := aa24Worker.aa24RetireRetry[aa24Index]
+		aa24HasRoom, aa24Err := aa24Worker.aa24Lane(AA24LaneWorkerControl).aa24HasRoom(aa24ReservedSlots)
+		if aa24Err != nil || !aa24HasRoom || aa24Worker.aa24PostRetired(aa24Ref, aa24Now) != nil {
+			return
+		}
+		aa24Worker.aa24RetireRetry = append(aa24Worker.aa24RetireRetry[:aa24Index], aa24Worker.aa24RetireRetry[aa24Index+1:]...)
+		aa24Worker.aa24DropRefused(aa24Ref)
+	}
+}
+
+func (aa24Worker *AA24Worker) aa24DropRefused(aa24Ref AA24PlanRef) {
+	for aa24Index := range aa24Worker.aa24RefusedRefs {
+		if aa24Worker.aa24RefusedRefs[aa24Index].aa24Matches(aa24Ref) {
+			aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs[:aa24Index], aa24Worker.aa24RefusedRefs[aa24Index+1:]...)
+			return
+		}
+	}
 }
 
 func (aa24Worker *AA24Worker) aa24IdentityMatches(aa24Record *AA24Record) bool {
@@ -1150,7 +1187,7 @@ func (aa24Worker *AA24Worker) aa24IdentityMatches(aa24Record *AA24Record) bool {
 		aa24Record.AA24Stream == aa24Worker.aa24Expected.AA24Binding.AA24Stream
 }
 
-func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23Tick) {
+func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23Tick, aa24Fenced bool) {
 	aa24Control := aa24Worker.aa24Lane(AA24LaneHostControl)
 	if !aa24Worker.aa24IdentityMatches(aa24Record) {
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
@@ -1175,13 +1212,22 @@ func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now 
 		// its exact retirement is acknowledged at once.
 		for aa24Index := range aa24Worker.aa24RefusedRefs {
 			if aa24Worker.aa24RefusedRefs[aa24Index].aa24Matches(aa24Ref) {
-				aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs[:aa24Index], aa24Worker.aa24RefusedRefs[aa24Index+1:]...)
-				_ = aa24Worker.aa24PostRetired(aa24Ref, aa24Now)
+				// The reference leaves only after the acknowledgement is written;
+				// until then the service pass retries it.
+				if aa24Worker.aa24PostRetired(aa24Ref, aa24Now) == nil {
+					aa24Worker.aa24DropRefused(aa24Ref)
+				} else if len(aa24Worker.aa24RetireRetry) < cap(aa24Worker.aa24RetireRetry) {
+					aa24Worker.aa24RetireRetry = append(aa24Worker.aa24RetireRetry, aa24Ref)
+				}
 				return
 			}
 		}
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
 	case AA24RecordPublish:
+		if aa24Fenced {
+			aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
+			return
+		}
 		if aa24Record.AA24Plan <= aa24Worker.aa24PlanFloor || aa24Now >= aa24Record.AA24PlanExpiry ||
 			len(aa24Worker.aa24Adopted) == cap(aa24Worker.aa24Adopted) {
 			aa24Worker.aa24Refused++
@@ -1471,6 +1517,7 @@ func (aa24Worker *AA24Worker) AA24Teardown() error {
 	aa24Worker.aa24Lanes = [aa24LaneCount]aa24Lane{}
 	aa24Worker.aa24Adopted = nil
 	aa24Worker.aa24RefusedRefs = nil
+	aa24Worker.aa24RetireRetry = nil
 	return nil
 }
 
@@ -1825,6 +1872,16 @@ func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23
 		return AA24Delivery{}, false, ErrAA24Stale
 	}
 	aa24Host.aa24Plans = append(aa24Host.aa24Plans[:aa24Index], aa24Host.aa24Plans[aa24Index+1:]...)
+	// The worker cleared its active state for the retired plan and refuses its
+	// commands without a completion, so they cannot stay outstanding.
+	aa24Retired := aa24Record.aa24Ref()
+	aa24Kept := aa24Host.aa24Outstanding[:0]
+	for _, aa24Identity := range aa24Host.aa24Outstanding {
+		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) {
+			aa24Kept = append(aa24Kept, aa24Identity)
+		}
+	}
+	aa24Host.aa24Outstanding = aa24Kept
 	return aa24Delivery, true, nil
 }
 
@@ -1879,7 +1936,7 @@ func (aa24Host *AA24Host) aa24SendStop() error {
 // AA24AcknowledgeGap names the exact observed fence and queues the stop that
 // acknowledges it. The stop uses the reserved control slot.
 func (aa24Host *AA24Host) AA24AcknowledgeGap(aa24Sequence uint64, aa24Now AA23ClockReading) error {
-	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil {
+	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil && aa24Err != ErrAA24Clock {
 		return aa24Err
 	}
 	if aa24Host.aa24Fence.AA24Reason == AA24FenceNone {
@@ -1893,7 +1950,7 @@ func (aa24Host *AA24Host) AA24AcknowledgeGap(aa24Sequence uint64, aa24Now AA23Cl
 
 // AA24RequestStop fences this side and queues the stream's stop for teardown.
 func (aa24Host *AA24Host) AA24RequestStop(aa24Now AA23ClockReading) error {
-	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil {
+	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil && aa24Err != ErrAA24Clock {
 		return aa24Err
 	}
 	aa24Host.aa24Close(AA24FenceStop, 0, 0)
