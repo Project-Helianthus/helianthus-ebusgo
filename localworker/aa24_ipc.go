@@ -1475,24 +1475,33 @@ func (aa24Worker *AA24Worker) aa24PostRetired(aa24Ref AA24PlanRef, aa24Now AA23T
 	return nil
 }
 
+// aa24FenceAcknowledged reports whether the exact stop was observed and any raised
+// gap was consumed by the host. Resynchronization and teardown share it.
+func (aa24Worker *AA24Worker) aa24FenceAcknowledged() error {
+	if !aa24Worker.aa24StopObserved {
+		return ErrAA24NotAcknowledged
+	}
+	if aa24Worker.aa24GapLatched {
+		aa24Control := aa24Worker.aa24Lane(AA24LaneWorkerControl)
+		if !aa24Worker.aa24GapWritten {
+			return ErrAA24NotAcknowledged
+		}
+		_, aa24Consumer, aa24Err := aa24Control.aa24Indices()
+		if aa24Err != nil || aa24Consumer <= aa24Worker.aa24GapIndex {
+			return ErrAA24NotAcknowledged
+		}
+	}
+	return nil
+}
+
 // AA24ResyncExpected names the successor mapping once the host has acknowledged the
 // fence: the exact stop was observed and any raised gap was consumed.
 func (aa24Worker *AA24Worker) AA24ResyncExpected(aa24Next AA23StreamGeneration) (AA24Expected, error) {
 	if aa24Worker.aa24Detached {
 		return AA24Expected{}, ErrAA24Detached
 	}
-	if !aa24Worker.aa24StopObserved {
-		return AA24Expected{}, ErrAA24NotAcknowledged
-	}
-	if aa24Worker.aa24GapLatched {
-		aa24Control := aa24Worker.aa24Lane(AA24LaneWorkerControl)
-		if !aa24Worker.aa24GapWritten {
-			return AA24Expected{}, ErrAA24NotAcknowledged
-		}
-		_, aa24Consumer, aa24Err := aa24Control.aa24Indices()
-		if aa24Err != nil || aa24Consumer <= aa24Worker.aa24GapIndex {
-			return AA24Expected{}, ErrAA24NotAcknowledged
-		}
+	if aa24Err := aa24Worker.aa24FenceAcknowledged(); aa24Err != nil {
+		return AA24Expected{}, aa24Err
 	}
 	if aa24Next <= aa24Worker.aa24Expected.AA24Binding.AA24Stream {
 		return AA24Expected{}, ErrAA24Stale
@@ -1510,7 +1519,7 @@ func (aa24Worker *AA24Worker) AA24Teardown() error {
 	if aa24Worker.aa24Detached {
 		return nil
 	}
-	if aa24Worker.AA24OutputOpen() {
+	if aa24Worker.AA24OutputOpen() || aa24Worker.aa24FenceAcknowledged() != nil {
 		return ErrAA24NotAcknowledged
 	}
 	aa24Worker.aa24Detached = true
@@ -1542,6 +1551,7 @@ type AA24Host struct {
 	aa24PlanFloor       AA23PlanGeneration
 	aa24TokenFloor      AA24OwnerToken
 	aa24Outstanding     []AA24CommandIdentity
+	aa24Lingering       []AA24CommandIdentity
 	aa24Cancelled       []AA24CommandIdentity
 	aa24NextCapture     uint64
 	aa24Explained       []uint64
@@ -1565,6 +1575,7 @@ func AA24AttachHost(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Host, error
 		aa24PlanFloor:   aa24Expected.AA24PlanFloor,
 		aa24TokenFloor:  aa24Expected.AA24TokenFloor,
 		aa24Outstanding: make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
+		aa24Lingering:   make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
 		aa24Cancelled:   make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
 		aa24NextCapture: 1,
 		aa24Explained:   make([]uint64, 0, aa24Lanes[AA24LaneWorkerControl-1].aa24Layout.aa24Capacity),
@@ -1607,6 +1618,7 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	}
 	aa24Host.aa24Cancelled = append(aa24Host.aa24Cancelled, aa24Host.aa24Outstanding...)
 	aa24Host.aa24Outstanding = aa24Host.aa24Outstanding[:0]
+	aa24Host.aa24Lingering = aa24Host.aa24Lingering[:0]
 }
 
 func (aa24Host *AA24Host) aa24Tick(aa24Now AA23ClockReading) error {
@@ -1710,13 +1722,28 @@ func (aa24Host *AA24Host) AA24RevokePlan(aa24Ref AA24PlanRef, aa24Now AA23ClockR
 	return nil
 }
 
-// aa24RetireExpired drops outstanding commands whose deadline has passed: the
-// worker refuses them without a completion, so they can never be answered.
+// aa24Linger keeps an identity that no longer occupies outstanding capacity, since
+// a completion queued before the worker refused or retired it may still be waiting
+// in the data lane. The list is bounded and evicts its oldest entry.
+func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity) {
+	if cap(aa24Host.aa24Lingering) == 0 {
+		return
+	}
+	if len(aa24Host.aa24Lingering) == cap(aa24Host.aa24Lingering) {
+		aa24Host.aa24Lingering = append(aa24Host.aa24Lingering[:0], aa24Host.aa24Lingering[1:]...)
+	}
+	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Identity)
+}
+
+// aa24RetireExpired moves outstanding commands whose deadline has passed out of the
+// capacity count: the worker refuses them, though an earlier completion may linger.
 func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
 		if aa24Identity.aa24Live(aa24Now) {
 			aa24Kept = append(aa24Kept, aa24Identity)
+		} else {
+			aa24Host.aa24Linger(aa24Identity)
 		}
 	}
 	aa24Host.aa24Outstanding = aa24Kept
@@ -1879,6 +1906,8 @@ func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
 		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) {
 			aa24Kept = append(aa24Kept, aa24Identity)
+		} else {
+			aa24Host.aa24Linger(aa24Identity)
 		}
 	}
 	aa24Host.aa24Outstanding = aa24Kept
@@ -1905,6 +1934,12 @@ func (aa24Host *AA24Host) aa24HandleData(aa24Record *AA24Record, aa24Now AA23Tic
 		for aa24Index := range aa24Host.aa24Outstanding {
 			if aa24Host.aa24Outstanding[aa24Index].aa24Matches(aa24Identity) {
 				aa24Host.aa24Outstanding = append(aa24Host.aa24Outstanding[:aa24Index], aa24Host.aa24Outstanding[aa24Index+1:]...)
+				return aa24Delivery, true, nil
+			}
+		}
+		for aa24Index := range aa24Host.aa24Lingering {
+			if aa24Host.aa24Lingering[aa24Index].aa24Matches(aa24Identity) {
+				aa24Host.aa24Lingering = append(aa24Host.aa24Lingering[:aa24Index], aa24Host.aa24Lingering[aa24Index+1:]...)
 				return aa24Delivery, true, nil
 			}
 		}
@@ -2033,5 +2068,6 @@ func (aa24Host *AA24Host) AA24Teardown() error {
 	aa24Host.aa24Lanes = [aa24LaneCount]aa24Lane{}
 	aa24Host.aa24Plans = nil
 	aa24Host.aa24Outstanding = nil
+	aa24Host.aa24Lingering = nil
 	return nil
 }

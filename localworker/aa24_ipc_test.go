@@ -2039,3 +2039,64 @@ func TestAA24StopStillFlowsAfterClockFence(aa24T *aa24testing.T) {
 		}
 	})
 }
+
+func TestAA24QueuedCompletionSurvivesExpiryCleanup(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24First := aa24FixtureCommand(1, 1)
+	aa24First.AA24RequestDeadline = 20
+	aa24Want(aa24T, "send", aa24Pair.aa24Host.AA24SendCommand(aa24First, []byte{1}, aa24At(10)), nil)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(11)); aa24Err != nil || !aa24OK {
+		aa24T.Fatalf("next: %v %v", aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "complete before the deadline", aa24Pair.aa24Worker.AA24Complete(aa24First, AA24StatusAccepted, aa24At(12)), nil)
+	aa24Want(aa24T, "second send at the first deadline", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 2), nil, aa24At(20)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(21)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("queued completion lost: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	// Positive control: the same completion is not accepted twice.
+	aa24Replay := AA24Record{AA24Kind: AA24RecordCompletion, AA24Status: AA24StatusAccepted, AA24CaptureSequence: 2, AA24CaptureTime: 22}
+	aa24Replay.aa24ApplyIdentity(aa24First)
+	aa24Replay.AA24Worker, aa24Replay.AA24Stream = aa24FixtureWorker, aa24FixtureStream
+	aa24Want(aa24T, "inject replay", aa24Pair.aa24Worker.aa24Lane(AA24LaneWorkerData).aa24Write(&aa24Replay, 0), nil)
+	_, _, aa24Err = aa24Pair.aa24Poll(23)
+	aa24Want(aa24T, "replay is stale", aa24Err, ErrAA24Stale)
+}
+
+func TestAA24QueuedCompletionSurvivesQueuedRetirement(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24Pair.aa24Publish(1, 10)
+	aa24Identity := aa24Pair.aa24Admit(1, 1, 10)
+	aa24Want(aa24T, "complete", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(11)), nil)
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(12)), nil)
+	aa24Want(aa24T, "worker poll", aa24Pair.aa24Worker.AA24PollControl(aa24At(13)), nil)
+	aa24Want(aa24T, "retire", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(14)), nil)
+	aa24First, aa24OK, aa24Err := aa24Pair.aa24Poll(15)
+	if aa24Err != nil || !aa24OK || aa24First.AA24Record.AA24Kind != AA24RecordAcknowledge {
+		aa24T.Fatalf("control first: %+v %v %v", aa24First, aa24OK, aa24Err)
+	}
+	aa24Second, aa24OK, aa24Err := aa24Pair.aa24Poll(16)
+	if aa24Err != nil || !aa24OK || aa24Second.AA24Record.AA24Kind != AA24RecordCompletion {
+		aa24T.Fatalf("queued completion lost: %+v %v %v", aa24Second, aa24OK, aa24Err)
+	}
+	if aa24Len := len(aa24Pair.aa24Host.aa24Outstanding); aa24Len != 0 {
+		aa24T.Fatalf("outstanding %d", aa24Len)
+	}
+}
+
+func TestAA24WorkerTeardownRequiresTheStopHandshake(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
+	if aa24Pair.aa24Worker.AA24OutputOpen() {
+		aa24T.Fatal("local fault must close output")
+	}
+	aa24Want(aa24T, "fenced but no stop", aa24Pair.aa24Worker.AA24Teardown(), ErrAA24NotAcknowledged)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(11)), nil)
+	aa24Want(aa24T, "stop read, gap unread", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	aa24Want(aa24T, "gap not consumed", aa24Pair.aa24Worker.AA24Teardown(), ErrAA24NotAcknowledged)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Poll(13); aa24Err != nil || !aa24OK {
+		aa24T.Fatalf("host reads gap: %v %v", aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "acknowledged", aa24Pair.aa24Worker.AA24Teardown(), nil)
+}
