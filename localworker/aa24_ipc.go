@@ -1495,8 +1495,11 @@ func (aa24Worker *AA24Worker) aa24FenceAcknowledged() error {
 }
 
 // AA24ResyncExpected names the successor mapping once the host has acknowledged the
-// fence: the exact stop was observed and any raised gap was consumed.
-func (aa24Worker *AA24Worker) AA24ResyncExpected(aa24Next AA23StreamGeneration) (AA24Expected, error) {
+// fence: the exact stop was observed and any raised gap was consumed. The host is
+// authoritative for the identity floors, since it may have assigned identities the
+// worker never drained; the successor carries the higher of each worker floor and
+// the supplied host floor, so recovery cannot reuse an assigned identity.
+func (aa24Worker *AA24Worker) AA24ResyncExpected(aa24Next AA23StreamGeneration, aa24HostPlanFloor AA23PlanGeneration, aa24HostTokenFloor AA24OwnerToken) (AA24Expected, error) {
 	if aa24Worker.aa24Detached {
 		return AA24Expected{}, ErrAA24Detached
 	}
@@ -1509,7 +1512,13 @@ func (aa24Worker *AA24Worker) AA24ResyncExpected(aa24Next AA23StreamGeneration) 
 	aa24Successor := aa24Worker.aa24Expected
 	aa24Successor.AA24Binding.AA24Stream = aa24Next
 	aa24Successor.AA24PlanFloor = aa24Worker.aa24PlanFloor
+	if aa24HostPlanFloor > aa24Successor.AA24PlanFloor {
+		aa24Successor.AA24PlanFloor = aa24HostPlanFloor
+	}
 	aa24Successor.AA24TokenFloor = aa24Worker.aa24TokenFloor
+	if aa24HostTokenFloor > aa24Successor.AA24TokenFloor {
+		aa24Successor.AA24TokenFloor = aa24HostTokenFloor
+	}
 	return aa24Successor, nil
 }
 
@@ -1551,7 +1560,7 @@ type AA24Host struct {
 	aa24PlanFloor       AA23PlanGeneration
 	aa24TokenFloor      AA24OwnerToken
 	aa24Outstanding     []AA24CommandIdentity
-	aa24Lingering       []AA24CommandIdentity
+	aa24Lingering       []aa24Lingered
 	aa24Cancelled       []AA24CommandIdentity
 	aa24NextCapture     uint64
 	aa24Explained       []uint64
@@ -1575,7 +1584,7 @@ func AA24AttachHost(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Host, error
 		aa24PlanFloor:   aa24Expected.AA24PlanFloor,
 		aa24TokenFloor:  aa24Expected.AA24TokenFloor,
 		aa24Outstanding: make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
-		aa24Lingering:   make([]AA24CommandIdentity, 0, aa24Lanes[AA24LaneWorkerData-1].aa24Layout.aa24Capacity),
+		aa24Lingering:   make([]aa24Lingered, 0, aa24Lanes[AA24LaneWorkerData-1].aa24Layout.aa24Capacity),
 		aa24Cancelled:   make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
 		aa24NextCapture: 1,
 		aa24Explained:   make([]uint64, 0, aa24Lanes[AA24LaneWorkerControl-1].aa24Layout.aa24Capacity),
@@ -1721,30 +1730,50 @@ func (aa24Host *AA24Host) AA24RevokePlan(aa24Ref AA24PlanRef, aa24Now AA23ClockR
 	return nil
 }
 
+// aa24Lingered is a retired identity with the worker data head seen at retirement:
+// a completion queued before that head is consumed once the data tail passes it.
+type aa24Lingered struct {
+	aa24Identity AA24CommandIdentity
+	aa24Horizon  uint64
+}
+
 // aa24Linger keeps an identity that no longer occupies outstanding capacity, since
 // a completion queued before the worker refused or retired it may still be waiting
 // in the data lane. A fence keeps the list, so evidence queued earlier stays
-// matchable while old data drains. The list is bounded by the data lane capacity,
-// which also bounds the completions that can be queued, and evicts its oldest entry.
-func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity) {
+// matchable while old data drains. The list is bounded by the data lane capacity.
+// A full list first drops entries whose horizon the data tail has passed; it never
+// evicts an entry that may still have a queued completion. Without room it reports
+// false and the caller keeps the identity outstanding.
+func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity) bool {
 	if cap(aa24Host.aa24Lingering) == 0 {
-		return
+		return false
 	}
+	aa24Data := aa24Host.aa24Lane(AA24LaneWorkerData)
 	if len(aa24Host.aa24Lingering) == cap(aa24Host.aa24Lingering) {
-		aa24Host.aa24Lingering = append(aa24Host.aa24Lingering[:0], aa24Host.aa24Lingering[1:]...)
+		aa24Kept := aa24Host.aa24Lingering[:0]
+		for _, aa24Held := range aa24Host.aa24Lingering {
+			if aa24Held.aa24Horizon > aa24Data.aa24LocalConsumer {
+				aa24Kept = append(aa24Kept, aa24Held)
+			}
+		}
+		aa24Host.aa24Lingering = aa24Kept
+		if len(aa24Host.aa24Lingering) == cap(aa24Host.aa24Lingering) {
+			return false
+		}
 	}
-	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Identity)
+	aa24Horizon := aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
+	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Lingered{aa24Identity: aa24Identity, aa24Horizon: aa24Horizon})
+	return true
 }
 
 // aa24RetireExpired moves outstanding commands whose deadline has passed out of the
 // capacity count: the worker refuses them, though an earlier completion may linger.
+// An identity with no room to linger stays outstanding.
 func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if aa24Identity.aa24Live(aa24Now) {
+		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24Linger(aa24Identity) {
 			aa24Kept = append(aa24Kept, aa24Identity)
-		} else {
-			aa24Host.aa24Linger(aa24Identity)
 		}
 	}
 	aa24Host.aa24Outstanding = aa24Kept
@@ -1839,12 +1868,21 @@ func (aa24Host *AA24Host) AA24Poll(aa24Dst []byte, aa24Now AA23ClockReading) (AA
 	aa24Data := aa24Host.aa24Lane(AA24LaneWorkerData)
 	aa24DataHead := aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
 	aa24Control := aa24Host.aa24Lane(AA24LaneWorkerControl)
-	aa24Record, aa24OK, aa24Err := aa24Control.aa24Read(aa24Dst)
-	if aa24Err != nil {
-		return AA24Delivery{}, false, aa24Host.aa24ReadFailed(aa24Err)
-	}
-	if aa24OK {
-		return aa24Host.aa24HandleControl(&aa24Record, aa24Now.AA23Tick, false)
+	// While the early-control list is full and older data is visible, that data is
+	// drained first: another control record could not be explained, and the overtaking
+	// count is bounded by the data already queued rather than by the lane capacity.
+	aa24DrainData := len(aa24Host.aa24Explained) == cap(aa24Host.aa24Explained) && aa24Data.aa24LocalConsumer < aa24DataHead
+	var aa24Record AA24Record
+	var aa24OK bool
+	var aa24Err error
+	if !aa24DrainData {
+		aa24Record, aa24OK, aa24Err = aa24Control.aa24Read(aa24Dst)
+		if aa24Err != nil {
+			return AA24Delivery{}, false, aa24Host.aa24ReadFailed(aa24Err)
+		}
+		if aa24OK {
+			return aa24Host.aa24HandleControl(&aa24Record, aa24Now.AA23Tick, false)
+		}
 	}
 	if aa24Data.aa24LocalConsumer >= aa24DataHead {
 		if _, _, aa24Err := aa24Data.aa24Indices(); aa24Err != nil {
@@ -1929,10 +1967,8 @@ func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23
 	aa24Retired := aa24Record.aa24Ref()
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) {
+		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24Linger(aa24Identity) {
 			aa24Kept = append(aa24Kept, aa24Identity)
-		} else {
-			aa24Host.aa24Linger(aa24Identity)
 		}
 	}
 	aa24Host.aa24Outstanding = aa24Kept
@@ -1963,7 +1999,7 @@ func (aa24Host *AA24Host) aa24HandleData(aa24Record *AA24Record, aa24Now AA23Tic
 			}
 		}
 		for aa24Index := range aa24Host.aa24Lingering {
-			if aa24Host.aa24Lingering[aa24Index].aa24Matches(aa24Identity) {
+			if aa24Host.aa24Lingering[aa24Index].aa24Identity.aa24Matches(aa24Identity) {
 				aa24Host.aa24Lingering = append(aa24Host.aa24Lingering[:aa24Index], aa24Host.aa24Lingering[aa24Index+1:]...)
 				return aa24Delivery, true, nil
 			}

@@ -1694,7 +1694,7 @@ func TestAA24GapMustBeAcknowledgedBeforeResynchronization(aa24T *aa24testing.T) 
 	_, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24Next)
 	aa24Want(aa24T, "open host", aa24Err, ErrAA24NotFenced)
 	aa24Want(aa24T, "no fence to acknowledge", aa24Pair.aa24Host.AA24AcknowledgeGap(0, aa24At(10)), ErrAA24NotFenced)
-	_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next)
+	_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor)
 	aa24Want(aa24T, "open worker", aa24Err, ErrAA24NotAcknowledged)
 
 	for aa24Octet := byte(0); aa24Octet < 2; aa24Octet++ {
@@ -1705,7 +1705,7 @@ func TestAA24GapMustBeAcknowledgedBeforeResynchronization(aa24T *aa24testing.T) 
 	if _, aa24Err := aa24Pair.aa24Worker.AA24ObserveRaw(aa24FixtureRaw(2), aa24At(20)); !aa24errorstest.Is(aa24Err, ErrAA24Gap) {
 		aa24T.Fatalf("symbol past the lane: got %v, want %v", aa24Err, ErrAA24Gap)
 	}
-	_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next)
+	_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor)
 	aa24Want(aa24T, "gap unacknowledged at worker", aa24Err, ErrAA24NotAcknowledged)
 	if _, aa24OK, aa24Err := aa24Pair.aa24Poll(21); !aa24OK || aa24Err != nil {
 		aa24T.Fatalf("gap poll: %v %v", aa24OK, aa24Err)
@@ -1729,14 +1729,14 @@ func TestAA24GapMustBeAcknowledgedBeforeResynchronization(aa24T *aa24testing.T) 
 	for _, aa24Generation := range aa24Generations {
 		_, aa24Err = aa24Pair.aa24Host.AA24ResyncExpected(aa24Generation)
 		aa24Want(aa24T, "host generation must advance", aa24Err, ErrAA24Stale)
-		_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24Generation)
+		_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24Generation, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor)
 		aa24Want(aa24T, "worker generation must advance", aa24Err, ErrAA24Stale)
 	}
 	aa24HostNext, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24Next)
 	if aa24Err != nil {
 		aa24T.Fatal(aa24Err)
 	}
-	aa24WorkerNext, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next)
+	aa24WorkerNext, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor)
 	if aa24Err != nil {
 		aa24T.Fatal(aa24Err)
 	}
@@ -1796,7 +1796,7 @@ func TestAA24WorkerStaysFencedUntilItsGapIsConsumed(aa24T *aa24testing.T) {
 	aa24Want(aa24T, "host stops without reading the gap", aa24Pair.aa24Host.AA24RequestStop(aa24At(21)), nil)
 	aa24Want(aa24T, "worker reads stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(22)), nil)
 	aa24Next := aa24FixtureStream + 1
-	_, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next)
+	_, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor)
 	aa24Want(aa24T, "worker: gap unread", aa24Err, ErrAA24NotAcknowledged)
 	_, aa24Err = aa24Pair.aa24Host.AA24ResyncExpected(aa24Next)
 	aa24Want(aa24T, "host: gap unread", aa24Err, ErrAA24NotAcknowledged)
@@ -1806,7 +1806,7 @@ func TestAA24WorkerStaysFencedUntilItsGapIsConsumed(aa24T *aa24testing.T) {
 	if aa24Pair.aa24Host.AA24Fence().AA24Reason != AA24FenceWorkerGap {
 		aa24T.Fatalf("gap must replace the local cause: %+v", aa24Pair.aa24Host.AA24Fence())
 	}
-	if _, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next); aa24Err != nil {
+	if _, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor); aa24Err != nil {
 		aa24T.Fatal(aa24Err)
 	}
 	if _, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24Next); aa24Err != nil {
@@ -1880,7 +1880,7 @@ func TestAA24TeardownDoesNotDrainSaturatedData(aa24T *aa24testing.T) {
 		aa24Want(aa24T, "admit", aa24Pair.aa24Worker.AA24AdmitOutput(aa24Identity, aa24At(13)), ErrAA24Detached)
 		aa24Want(aa24T, "complete", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusRetired, aa24At(13)), ErrAA24Detached)
 		aa24Want(aa24T, "ack", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(13)), ErrAA24Detached)
-		_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24FixtureStream + 1)
+		_, aa24Err = aa24Pair.aa24Worker.AA24ResyncExpected(aa24FixtureStream+1, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor)
 		aa24Want(aa24T, "worker resync", aa24Err, ErrAA24Detached)
 		_, _, aa24Err = aa24Pair.aa24Host.AA24Poll(nil, aa24At(13))
 		aa24Want(aa24T, "host poll", aa24Err, ErrAA24Detached)
@@ -2014,7 +2014,7 @@ func TestAA24StopStillFlowsAfterClockFence(aa24T *aa24testing.T) {
 		}
 		aa24Want(aa24T, "acknowledge", aa24Pair.aa24Host.AA24AcknowledgeGap(aa24Delivery.AA24Record.AA24CaptureSequence, aa24At(31)), nil)
 		aa24Want(aa24T, "fenced worker drains the stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(19)), ErrAA24Clock)
-		if _, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24FixtureStream + 1); aa24Err != nil {
+		if _, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24FixtureStream+1, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor); aa24Err != nil {
 			aa24T.Fatalf("resync stays blocked: %v", aa24Err)
 		}
 	})
@@ -2191,5 +2191,95 @@ func TestAA24ClockFencedPollDrainsControl(aa24T *aa24testing.T) {
 	aa24Want(aa24T, "worker reads stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(40)), nil)
 	if _, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24FixtureStream + 1); aa24Err != nil {
 		aa24T.Fatalf("resync after the fenced drain: %v", aa24Err)
+	}
+}
+
+// aa24LingerExpiring sends a command with a short deadline and lets the worker drop it
+// at dequeue after the deadline, so no completion exists for it.
+func (aa24Pair *aa24Pair) aa24LingerExpiring(aa24Token AA24OwnerToken, aa24Tick AA23Tick) {
+	aa24Pair.aa24T.Helper()
+	aa24Identity := aa24FixtureCommand(1, aa24Token)
+	aa24Identity.AA24RequestDeadline = aa24Tick + 10
+	aa24Want(aa24Pair.aa24T, "send", aa24Pair.aa24Host.AA24SendCommand(aa24Identity, nil, aa24At(aa24Tick)), nil)
+	_, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(aa24Tick+11))
+	aa24Want(aa24Pair.aa24T, "worker dequeue", aa24Err, ErrAA24Expired)
+	if aa24OK {
+		aa24Pair.aa24T.Fatal("an expired command was admitted")
+	}
+}
+
+// Catches a lingering list that evicts its oldest identity when commands expire at
+// worker dequeue without completions: the unread completion of the first command
+// would be consumed as stale.
+func TestAA24LingeringKeepsQueuedCompletionBesideSilentExpiries(aa24T *aa24testing.T) {
+	aa24Pair := aa24LingerPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24LingerCommand(1, 10)
+	aa24Pair.aa24LingerExpiring(2, 20)
+	aa24Pair.aa24LingerExpiring(3, 40)
+	aa24Want(aa24T, "no room to retire the third", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 4), nil, aa24At(60)), ErrAA24Capacity)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(61)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("queued completion: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "send after the data tail passed", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 4), nil, aa24At(62)), nil)
+}
+
+// Catches a poll that reads another control record while the early-control list is
+// full and older data is visible: acknowledgements that overtake the data one at a
+// time would breach the reorder bound and fence a valid stream.
+func TestAA24PollDrainsVisibleDataBeforeTheEarlyControlListOverflows(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Refs := []AA24PlanRef{aa24Pair.aa24Publish(1, 10), aa24Pair.aa24Publish(2, 10), aa24Pair.aa24Publish(3, 10), aa24Pair.aa24Publish(4, 10)}
+	for _, aa24Ref := range aa24Refs {
+		aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(11)), nil)
+		aa24Want(aa24T, "worker poll", aa24Pair.aa24Worker.AA24PollControl(aa24At(11)), nil)
+	}
+	if _, aa24Err := aa24Pair.aa24Worker.AA24ObserveRaw(aa24FixtureRaw(1), aa24At(12)); aa24Err != nil {
+		aa24T.Fatal(aa24Err)
+	}
+	for aa24Index, aa24Ref := range aa24Refs {
+		aa24Want(aa24T, "ack", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(13)), nil)
+		aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(14)
+		if aa24Index == 3 {
+			if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordRaw {
+				aa24T.Fatalf("older raw drained first: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+			}
+			aa24Delivery, aa24OK, aa24Err = aa24Pair.aa24Poll(14)
+		}
+		if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordAcknowledge {
+			aa24T.Fatalf("ack %d: %+v %v %v", aa24Index, aa24Delivery, aa24OK, aa24Err)
+		}
+	}
+	if !aa24Pair.aa24Host.AA24OutputOpen() || aa24Pair.aa24Host.aa24NextCapture != 6 {
+		aa24T.Fatalf("valid stream fenced: %+v next %d", aa24Pair.aa24Host.AA24Fence(), aa24Pair.aa24Host.aa24NextCapture)
+	}
+}
+
+// Catches a worker successor whose floors regress below identities the host already
+// assigned but the worker never drained.
+func TestAA24WorkerResyncKeepsHostAssignedFloors(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
+	aa24Want(aa24T, "send", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 7), nil, aa24At(11)), nil)
+	aa24Want(aa24T, "publish second", aa24Pair.aa24Host.AA24PublishPlan(aa24FixtureRef(2), aa24Pair.aa24Host.aa24Lanes[0].aa24ArenaLayout.AA24ArenaOffset+aa24BuildBytes+8, 8, aa24At(11)), nil)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(12)), nil)
+	aa24Want(aa24T, "worker reads stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(13)), nil)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Poll(14); aa24Err != nil || !aa24OK {
+		aa24T.Fatalf("host reads gap: %v %v", aa24OK, aa24Err)
+	}
+	aa24Next := aa24FixtureStream + 1
+	aa24HostNext, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24Next)
+	if aa24Err != nil {
+		aa24T.Fatal(aa24Err)
+	}
+	aa24WorkerNext, aa24Err := aa24Pair.aa24Worker.AA24ResyncExpected(aa24Next, aa24Pair.aa24Host.aa24PlanFloor, aa24Pair.aa24Host.aa24TokenFloor)
+	if aa24Err != nil {
+		aa24T.Fatal(aa24Err)
+	}
+	if aa24HostNext.AA24PlanFloor != 2 || aa24HostNext.AA24TokenFloor != 7 || aa24WorkerNext.AA24PlanFloor != aa24HostNext.AA24PlanFloor ||
+		aa24WorkerNext.AA24TokenFloor != aa24HostNext.AA24TokenFloor {
+		aa24T.Fatalf("floors: host %+v worker %+v", aa24HostNext, aa24WorkerNext)
 	}
 }
