@@ -2091,3 +2091,49 @@ func TestAA23WorkerAdoptsInThePublishingClockDomain(aa23T *aa23testing.T) {
 	_, _, aa23Err := aa23F.aa23View.AA23AdoptPlan(aa23Notice, aa23F.aa23Now())
 	aa23WantOK(aa23T, "adopt", aa23Err)
 }
+
+func TestAA23OverlapSortMatchesPairwiseOracle(aa23T *aa23testing.T) {
+	aa23Sources := []AA23SourceConstraint{{AA23Any: true}, {AA23Source: 0x10}, {AA23Source: 0x30}}
+	aa23Requests := [][]byte{nil, {0x01}, {0x02}}
+	var aa23All []AA23PlanEntry
+	for _, aa23PB := range []byte{0xB5, 0xB6} {
+		for _, aa23SB := range []byte{0x04, 0x05} {
+			for _, aa23Req := range aa23Requests {
+				for _, aa23Src := range aa23Sources {
+					aa23All = append(aa23All, AA23PlanEntry{AA23PB: aa23PB, AA23SB: aa23SB, AA23Request: aa23Req, AA23Source: aa23Src})
+				}
+			}
+		}
+	}
+	aa23Scratch := make([]int, 3)
+	for aa23I := range aa23All {
+		for aa23J := range aa23All {
+			if aa23I == aa23J {
+				continue
+			}
+			// A third, non-overlapping entry exercises neighbour ordering.
+			aa23Other := AA23PlanEntry{AA23PB: 0x01, AA23SB: 0x01, AA23Source: AA23SourceConstraint{AA23Source: 0x10}}
+			aa23Pair := []AA23PlanEntry{aa23All[aa23I], aa23Other, aa23All[aa23J]}
+			aa23Got := aa23PlanOverlaps(aa23Pair, aa23Scratch)
+			if aa23Want := aa23EntriesOverlap(&aa23All[aa23I], &aa23All[aa23J]); aa23Got != aa23Want {
+				aa23T.Fatalf("entries %d,%d: sorted %v oracle %v", aa23I, aa23J, aa23Got, aa23Want)
+			}
+		}
+	}
+}
+
+func TestAA23OverlapSortLargePlan(aa23T *aa23testing.T) {
+	const aa23Count = 50000
+	aa23Entries := make([]AA23PlanEntry, aa23Count+1)
+	for aa23N := 0; aa23N < aa23Count; aa23N++ {
+		aa23Entries[aa23N] = AA23PlanEntry{AA23PB: byte(aa23N >> 8), AA23SB: byte(aa23N), AA23Source: AA23SourceConstraint{AA23Any: true}}
+	}
+	aa23Scratch := make([]int, len(aa23Entries))
+	if aa23PlanOverlaps(aa23Entries[:aa23Count], aa23Scratch) {
+		aa23T.Fatal("distinct entries reported overlap")
+	}
+	aa23Entries[aa23Count] = AA23PlanEntry{AA23PB: 0, AA23SB: 7, AA23Source: AA23SourceConstraint{AA23Source: 0x10}}
+	if !aa23PlanOverlaps(aa23Entries, aa23Scratch) {
+		aa23T.Fatal("late overlap with an any-source entry missed")
+	}
+}

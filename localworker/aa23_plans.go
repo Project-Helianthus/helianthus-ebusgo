@@ -21,6 +21,7 @@
 package localworker
 
 import (
+	aa23bytes "bytes"
 	aa23errors "errors"
 	aa23math "math"
 )
@@ -707,6 +708,8 @@ type AA23Registry struct {
 	aa23Stream        AA23StreamGeneration
 	aa23WorkerTop     AA23WorkerID
 	aa23PlanTop       AA23PlanGeneration
+	// aa23OverlapScratch is the preallocated index space for overlap sorting.
+	aa23OverlapScratch []int
 }
 
 // AA23NewRegistry validates limits before any effect. aa23SubscriberFloor is the
@@ -716,11 +719,12 @@ func AA23NewRegistry(aa23Limits AA23Limits, aa23SubscriberFloor AA23SubscriberID
 		return nil, aa23Err
 	}
 	return &AA23Registry{
-		aa23Limits:        aa23Limits,
-		aa23Pool:          aa23NewPool(aa23Limits),
-		aa23SubscriberTop: aa23SubscriberFloor,
-		aa23Subscribers:   make([]aa23SubscriberRecord, aa23Limits.AA23MaxSubscribers),
-		aa23Records:       make([]aa23RegistrationRecord, aa23Limits.AA23MaxRegistrations),
+		aa23Limits:         aa23Limits,
+		aa23Pool:           aa23NewPool(aa23Limits),
+		aa23SubscriberTop:  aa23SubscriberFloor,
+		aa23Subscribers:    make([]aa23SubscriberRecord, aa23Limits.AA23MaxSubscribers),
+		aa23Records:        make([]aa23RegistrationRecord, aa23Limits.AA23MaxRegistrations),
+		aa23OverlapScratch: make([]int, aa23Limits.AA23MaxEntriesPerPlan),
 	}, nil
 }
 
@@ -1229,11 +1233,9 @@ func (aa23Registry *AA23Registry) aa23ValidateCandidate(aa23Candidate *AA23PlanC
 		if aa23Total > uint64(aa23Limits.AA23MaxPlanBytes) {
 			return ErrAA23Oversize
 		}
-		for aa23Prior := 0; aa23Prior < aa23Index; aa23Prior++ {
-			if aa23EntriesOverlap(&aa23Candidate.AA23Entries[aa23Prior], aa23Entry) {
-				return ErrAA23AmbiguousPlan
-			}
-		}
+	}
+	if aa23PlanOverlaps(aa23Candidate.AA23Entries, aa23Registry.aa23OverlapScratch) {
+		return ErrAA23AmbiguousPlan
 	}
 	return nil
 }
@@ -1269,6 +1271,72 @@ func (aa23Registry *AA23Registry) aa23ValidateEntry(aa23Entry *AA23PlanEntry, aa
 		return ErrAA23Oversize
 	}
 	return aa23ValidateEncodedResponse(aa23Entry.AA23EncodedResponse)
+}
+
+// aa23OverlapLess orders entries by PB, SB, request bytes, then source with the
+// any-source constraint first, so entries that could overlap are adjacent.
+func aa23OverlapLess(aa23First *AA23PlanEntry, aa23Second *AA23PlanEntry) bool {
+	if aa23First.AA23PB != aa23Second.AA23PB {
+		return aa23First.AA23PB < aa23Second.AA23PB
+	}
+	if aa23First.AA23SB != aa23Second.AA23SB {
+		return aa23First.AA23SB < aa23Second.AA23SB
+	}
+	if aa23Order := aa23bytes.Compare(aa23First.AA23Request, aa23Second.AA23Request); aa23Order != 0 {
+		return aa23Order < 0
+	}
+	if aa23First.AA23Source.AA23Any != aa23Second.AA23Source.AA23Any {
+		return aa23First.AA23Source.AA23Any
+	}
+	return aa23First.AA23Source.AA23Source < aa23Second.AA23Source.AA23Source
+}
+
+// aa23SiftDown restores the max-heap property below aa23Root within aa23Order[:aa23End].
+func aa23SiftDown(aa23Entries []AA23PlanEntry, aa23Order []int, aa23Root int, aa23End int) {
+	for {
+		aa23Child := 2*aa23Root + 1
+		if aa23Child >= aa23End {
+			return
+		}
+		if aa23Child+1 < aa23End && aa23OverlapLess(&aa23Entries[aa23Order[aa23Child]], &aa23Entries[aa23Order[aa23Child+1]]) {
+			aa23Child++
+		}
+		if !aa23OverlapLess(&aa23Entries[aa23Order[aa23Root]], &aa23Entries[aa23Order[aa23Child]]) {
+			return
+		}
+		aa23Order[aa23Root], aa23Order[aa23Child] = aa23Order[aa23Child], aa23Order[aa23Root]
+		aa23Root = aa23Child
+	}
+}
+
+// aa23PlanOverlaps reports whether any two entries could select the same
+// request. It sorts a caller-provided index scratch (heapsort, no allocation)
+// and compares neighbours, so the cost is n log n rather than all pairs.
+func aa23PlanOverlaps(aa23Entries []AA23PlanEntry, aa23Order []int) bool {
+	aa23Order = aa23Order[:len(aa23Entries)]
+	for aa23Index := range aa23Order {
+		aa23Order[aa23Index] = aa23Index
+	}
+	for aa23Start := len(aa23Order)/2 - 1; aa23Start >= 0; aa23Start-- {
+		aa23SiftDown(aa23Entries, aa23Order, aa23Start, len(aa23Order))
+	}
+	for aa23End := len(aa23Order) - 1; aa23End > 0; aa23End-- {
+		aa23Order[0], aa23Order[aa23End] = aa23Order[aa23End], aa23Order[0]
+		aa23SiftDown(aa23Entries, aa23Order, 0, aa23End)
+	}
+	for aa23Index := 1; aa23Index < len(aa23Order); aa23Index++ {
+		aa23Prior := &aa23Entries[aa23Order[aa23Index-1]]
+		aa23Next := &aa23Entries[aa23Order[aa23Index]]
+		if aa23Prior.AA23PB != aa23Next.AA23PB || aa23Prior.AA23SB != aa23Next.AA23SB ||
+			!aa23bytes.Equal(aa23Prior.AA23Request, aa23Next.AA23Request) {
+			continue
+		}
+		// Same key: any-source sorts first, so it overlaps every later neighbour.
+		if aa23Prior.AA23Source.AA23Any || aa23Prior.AA23Source.AA23Source == aa23Next.AA23Source.AA23Source {
+			return true
+		}
+	}
+	return false
 }
 
 // aa23EntriesOverlap reports whether one request could select both entries.
