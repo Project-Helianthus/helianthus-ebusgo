@@ -912,6 +912,12 @@ func (aa25Engine *AA25Engine) aa25StepHousekeeping(aa25Now uint64) {
 	aa25Engine.aa25Stats.AA25ControlsApplied++
 	switch aa25Item.aa25Kind {
 	case aa25ControlOffer:
+		// Admission stays disabled while a refused event is unreported; the
+		// generation is not consumed, so the same offer may be repeated once the
+		// loss marker has been accepted.
+		if aa25Engine.aa25LossPending {
+			return
+		}
 		if aa25Item.aa25Prepared.AA25Generation <= aa25Engine.aa25LastGeneration {
 			aa25Engine.aa25PublishFault(AA25FaultStaleGeneration, aa25Now)
 			return

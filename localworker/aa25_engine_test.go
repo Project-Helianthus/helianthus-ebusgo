@@ -1466,6 +1466,37 @@ func TestAA25SinkLossInvalidatesWithoutRetryLoop(aa25T *aa25testing.T) {
 	}
 }
 
+func TestAA25ReofferDuringPersistentSinkLossStaysSilent(aa25T *aa25testing.T) {
+	aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+	aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0x05)
+	aa25Request := aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, 0x01)
+	aa25End := aa25Self.aa25SendRequest(aa25Request)
+	aa25Self.aa25RunUntilEvent(AA25EventProvisional, aa25TickAfter(aa25End, 0, aa25Self))
+	aa25Self.aa25SinkLimited = true
+	aa25Self.aa25SinkFree = 0
+	aa25Self.aa25Run(aa25TickAfter(aa25End, 500, aa25Self))
+	// A newer generation is offered while the sink is still refusing events.
+	aa25Self.aa25Offer(2, aa25TestPB, aa25TestSB, 1, 0x06)
+	aa25Self.aa25Run(aa25Self.aa25Now + 200*aa25Ceil(aa25Self.aa25SamplePeriod()))
+	aa25End = aa25Self.aa25Send(aa25Self.aa25Idle(aa25Self.aa25Now), 0xAA)
+	aa25End = aa25Self.aa25Send(aa25End, aa25Request...)
+	aa25Self.aa25Run(aa25TickAfter(aa25End, 500, aa25Self))
+	if len(aa25Self.aa25Writes) != 0 {
+		aa25T.Fatalf("aa25 responded during persistent loss: %v", aa25Self.aa25Writes)
+	}
+	// Control: once the sink recovers, the repeated offer is admitted.
+	aa25Self.aa25SinkLimited = false
+	aa25Self.aa25Run(aa25Self.aa25Now + 200*aa25Ceil(aa25Self.aa25SamplePeriod()))
+	aa25Self.aa25Offer(2, aa25TestPB, aa25TestSB, 1, 0x06)
+	aa25Self.aa25Run(aa25Self.aa25Now + 200*aa25Ceil(aa25Self.aa25SamplePeriod()))
+	aa25End = aa25Self.aa25Send(aa25Self.aa25Idle(aa25Self.aa25Now), 0xAA)
+	aa25End = aa25Self.aa25Send(aa25End, aa25Request...)
+	aa25Self.aa25Run(aa25TickAfter(aa25End, 500, aa25Self))
+	if len(aa25Self.aa25Select(AA25EventTXComplete)) != 1 {
+		aa25T.Fatalf("aa25 recovered offer not admitted: faults %v", aa25Self.aa25Faults())
+	}
+}
+
 func TestAA25TickRegressionFailsClosed(aa25T *aa25testing.T) {
 	aa25Self := aa25NewBench(aa25T, aa25TestConfig())
 	aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0x05)
