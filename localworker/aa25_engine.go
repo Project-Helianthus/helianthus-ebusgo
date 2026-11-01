@@ -35,12 +35,15 @@ const (
 	aa25MaxPreparedWire    = 1 + 2*(1+aa25MaxPreparedPayload+1)
 	aa25ControlCapacity    = 4
 
-	aa25SymbolEscape  byte = 0xA9
-	aa25SymbolSyn     byte = 0xAA
-	aa25EscapedEscape byte = 0x00
-	aa25EscapedSyn    byte = 0x01
-	aa25SymbolAck     byte = 0x00
-	aa25CRCPolynomial byte = 0x9B
+	aa25SymbolEscape byte = 0xA9
+	aa25SymbolSyn    byte = 0xAA
+
+	// aa25AddressBroadcast has no ACK or target-response phase.
+	aa25AddressBroadcast byte = 0xFE
+	aa25EscapedEscape    byte = 0x00
+	aa25EscapedSyn       byte = 0x01
+	aa25SymbolAck        byte = 0x00
+	aa25CRCPolynomial    byte = 0x9B
 )
 
 // AA25Level is a digital bus level. The idle (recessive) level is high.
@@ -327,6 +330,7 @@ type AA25Engine struct {
 	aa25FramePhase    aa25FramePhase
 	aa25EscapePending bool
 	aa25FrameCRC      byte
+	aa25FrameSource   byte
 	aa25FramePB       byte
 	aa25FrameSB       byte
 	aa25FrameNN       byte
@@ -360,7 +364,8 @@ func AA25NewEngine(aa25Config AA25Config, aa25Ports AA25Ports) (*AA25Engine, err
 	}
 	if aa25Config.AA25TickHz < AA25NominalSampleRate ||
 		aa25Config.AA25ResponderAddress == aa25SymbolEscape ||
-		aa25Config.AA25ResponderAddress == aa25SymbolSyn {
+		aa25Config.AA25ResponderAddress == aa25SymbolSyn ||
+		aa25Config.AA25ResponderAddress == aa25AddressBroadcast {
 		return nil, AA25ErrInvalidConfig
 	}
 	aa25BitWhole, _ := aa25RationalAt(1, aa25Config.AA25TickHz, AA25NominalBaud)
@@ -707,6 +712,7 @@ func (aa25Engine *AA25Engine) aa25DeliverLogical(aa25Logical byte, aa25WasEscape
 			aa25Engine.aa25DropFrame()
 			return
 		}
+		aa25Engine.aa25FrameSource = aa25Logical
 		aa25Engine.aa25FramePhase = aa25FrameTarget
 	case aa25FrameTarget:
 		if aa25WasEscaped {
@@ -715,6 +721,13 @@ func (aa25Engine *AA25Engine) aa25DeliverLogical(aa25Logical byte, aa25WasEscape
 			return
 		}
 		aa25Engine.aa25FramePhase = aa25FramePB
+		if aa25Logical == aa25Engine.aa25Config.AA25ResponderAddress &&
+			!aa25InitiatorAddress(aa25Engine.aa25FrameSource) {
+			// Only an initiator addresses a responder: any other source class never pins.
+			aa25Engine.aa25PublishFault(AA25FaultAddressInvalid, aa25Now)
+			aa25Engine.aa25DropFrame()
+			return
+		}
 		if aa25Logical == aa25Engine.aa25Config.AA25ResponderAddress && aa25Engine.aa25SlotValid {
 			// Destination time reserves the generation and nothing else: no
 			// edge can be scheduled before framing and CRC validate.
@@ -969,4 +982,14 @@ func (aa25Engine *AA25Engine) aa25ApplyLoss(aa25Now uint64) {
 		aa25Engine.aa25LossPending = false
 		aa25Engine.aa25LossApplied = false
 	}
+}
+
+// aa25InitiatorAddress reports whether both address nibbles are initiator
+// parts (0, 1, 3, 7 or F), the only class that may open a request.
+func aa25InitiatorAddress(aa25Address byte) bool {
+	return aa25InitiatorNibble(aa25Address&0x0F) && aa25InitiatorNibble(aa25Address>>4)
+}
+
+func aa25InitiatorNibble(aa25Nibble byte) bool {
+	return aa25Nibble == 0x0 || aa25Nibble == 0x1 || aa25Nibble == 0x3 || aa25Nibble == 0x7 || aa25Nibble == 0xF
 }

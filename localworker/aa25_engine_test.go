@@ -815,10 +815,10 @@ func TestAA25TXEdgesKeepTheirOwnGrid(aa25T *aa25testing.T) {
 func TestAA25RawEscapePrefixPrecedesSuffixAndContinuity(aa25T *aa25testing.T) {
 	// Literal wire of the public vector: logical A9 and AA inside the data, CRC
 	// over the expanded form. The responder address is the vector's destination.
-	aa25Wire := []byte{0x10, 0xFE, 0xB5, 0x05, 0x04, 0x27, 0xA9, 0x00, 0x15, 0xA9, 0x01, 0x77}
-	aa25Logical := []byte{0x10, 0xFE, 0xB5, 0x05, 0x04, 0x27, 0xA9, 0x15, 0xAA, 0x77}
+	aa25Wire := aa25TestRequest(aa25TestResponder, 0xB5, 0x05, 0x27, 0xA9, 0x15, 0xAA)
+	aa25Logical := []byte{aa25TestSource, aa25TestResponder, 0xB5, 0x05, 0x04, 0x27, 0xA9, 0x15, 0xAA}
+	aa25Logical = append(aa25Logical, aa25TestCRC(aa25Logical))
 	aa25Config := aa25TestConfig()
-	aa25Config.AA25ResponderAddress = 0xFE
 	aa25Self := aa25NewBench(aa25T, aa25Config)
 	aa25Self.aa25Offer(1, 0xB5, 0x05, 4, 0x33)
 	aa25End := aa25Self.aa25SendRequest(aa25Wire)
@@ -905,6 +905,38 @@ func TestAA25EscapedCRCAnchorsOnSuffix(aa25T *aa25testing.T) {
 				aa25T.Fatalf("aa25 wire % X; want % X", aa25Wire, aa25Want)
 			}
 		}
+	}
+}
+
+func TestAA25NonInitiatorSourceNeverPins(aa25T *aa25testing.T) {
+	// Each source is paired with the responder as destination and a matching
+	// PB/SB/NN shape, so only the source class differs from the valid control.
+	for _, aa25Case := range []struct {
+		aa25Name   string
+		aa25Source byte
+		aa25Admit  bool
+	}{
+		{"initiator-source-control", aa25TestSource, true},
+		{"responder-source", 0x08, false},
+		{"responder-source-high", 0xF5, false},
+		{"responder-source-peer", 0x04, false},
+	} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+			aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0x11)
+			aa25Logical := []byte{aa25Case.aa25Source, aa25TestResponder, aa25TestPB, aa25TestSB, 1, 0x01}
+			aa25Logical = append(aa25Logical, aa25TestCRC(aa25Logical))
+			aa25End := aa25Self.aa25SendRequest(aa25TestExpand(aa25Logical))
+			aa25Self.aa25Run(aa25TickAfter(aa25End, 500, aa25Self))
+			aa25Done := len(aa25Self.aa25Select(AA25EventTXComplete)) == 1
+			if aa25Done != aa25Case.aa25Admit {
+				aa25T.Fatalf("aa25 admit %v want %v: faults %v", aa25Done, aa25Case.aa25Admit, aa25Self.aa25Faults())
+			}
+			if !aa25Case.aa25Admit && (len(aa25Self.aa25Writes) != 0 ||
+				len(aa25Self.aa25Select(AA25EventProvisional)) != 0 || !aa25Self.aa25HasFault(AA25FaultAddressInvalid)) {
+				aa25T.Fatalf("aa25 non-initiator source drove the bus: writes %v faults %v", aa25Self.aa25Writes, aa25Self.aa25Faults())
+			}
+		})
 	}
 }
 
@@ -1538,6 +1570,7 @@ func TestAA25ConfigAndPreparedValidation(aa25T *aa25testing.T) {
 		func(aa25Config *AA25Config) { aa25Config.AA25TickHz = 23999 },
 		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0xA9 },
 		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0xAA },
+		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0xFE },
 		func(aa25Config *AA25Config) { aa25Config.AA25TXLateToleranceTicks = aa25BitTicks },
 		func(aa25Config *AA25Config) { aa25Config.AA25EchoAllowanceTicks = aa25CharacterTicks },
 	} {
