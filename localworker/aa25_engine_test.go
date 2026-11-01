@@ -1562,6 +1562,106 @@ func TestAA25TickRegressionFailsClosed(aa25T *aa25testing.T) {
 	}
 }
 
+func TestAA25ConfigScheduleOverflow(aa25T *aa25testing.T) {
+	aa25Bench := &aa25Bench{aa25Now: aa25TestAnchor}
+	aa25Ports := AA25Ports{AA25Levels: aa25Bench, AA25Edges: aa25Bench, AA25Ticks: aa25Bench, AA25Sink: aa25Bench}
+	aa25Config := aa25TestConfig()
+	aa25Config.AA25TickHz = ^uint64(0)
+	aa25Config.AA25TurnaroundTicks = aa25Config.AA25TickHz
+	if _, aa25Err := AA25NewEngine(aa25Config, aa25Ports); aa25Err != AA25ErrInvalidConfig {
+		aa25T.Fatalf("aa25 overflowing turnaround accepted: %v", aa25Err)
+	}
+	// Compute the inclusive response horizon independently with arbitrary precision.
+	aa25Horizon := new(aa25big.Int).SetUint64(aa25Config.AA25TickHz)
+	aa25Horizon.Mul(aa25Horizon, aa25big.NewInt(380))
+	aa25Horizon.Add(aa25Horizon, aa25big.NewInt(2399))
+	aa25Horizon.Quo(aa25Horizon, aa25big.NewInt(2400))
+	aa25Config.AA25EchoAllowanceTicks = 1
+	aa25Config.AA25TXLateToleranceTicks = 1
+	aa25Config.AA25TurnaroundTicks = ^uint64(0) - aa25TestAnchor - aa25Horizon.Uint64() - 2
+	if _, aa25Err := AA25NewEngine(aa25Config, aa25Ports); aa25Err != nil {
+		aa25T.Fatalf("aa25 representable boundary rejected: %v", aa25Err)
+	}
+	for _, aa25Case := range []struct {
+		aa25Name   string
+		aa25Mutate func(*AA25Config)
+	}{
+		{"aa25Turnaround", func(aa25Value *AA25Config) { aa25Value.AA25TurnaroundTicks++ }},
+		{"aa25EchoAllowance", func(aa25Value *AA25Config) { aa25Value.AA25EchoAllowanceTicks++ }},
+		{"aa25LateTolerance", func(aa25Value *AA25Config) { aa25Value.AA25TXLateToleranceTicks++ }},
+		{"aa25Anchor", func(aa25Value *AA25Config) { aa25Bench.aa25Now++ }},
+	} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			aa25Bench.aa25Now = aa25TestAnchor
+			aa25Value := aa25Config
+			aa25Case.aa25Mutate(&aa25Value)
+			if _, aa25Err := AA25NewEngine(aa25Value, aa25Ports); aa25Err != AA25ErrInvalidConfig {
+				aa25T.Fatalf("aa25 overflowing schedule accepted: %v", aa25Err)
+			}
+		})
+	}
+	// A reserve sum that wraps the 64-bit counter would look small; each addition
+	// must report its own carry, not only the first one.
+	aa25Wrap := aa25Config
+	aa25Wrap.AA25EchoAllowanceTicks = 1
+	aa25Wrap.AA25TXLateToleranceTicks = 0
+	aa25Wrap.AA25TurnaroundTicks = ^uint64(0) - aa25Horizon.Uint64()
+	aa25Bench.aa25Now = aa25TestAnchor
+	if _, aa25Err := AA25NewEngine(aa25Wrap, aa25Ports); aa25Err != AA25ErrInvalidConfig {
+		aa25T.Fatalf("aa25 echo allowance wrap accepted: %v", aa25Err)
+	}
+	aa25Wrap.AA25TXLateToleranceTicks = 1
+	aa25Wrap.AA25TurnaroundTicks--
+	if _, aa25Err := AA25NewEngine(aa25Wrap, aa25Ports); aa25Err != AA25ErrInvalidConfig {
+		aa25T.Fatalf("aa25 late tolerance wrap accepted: %v", aa25Err)
+	}
+}
+
+func TestAA25ResponseAnchorOverflow(aa25T *aa25testing.T) {
+	for _, aa25Retry := range []bool{false, true} {
+		for _, aa25Overflow := range []bool{false, true} {
+			aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+			aa25Prepared, aa25Err := AA25PrepareResponse(1, aa25TestPB, aa25TestSB, 0, nil)
+			if aa25Err != nil {
+				aa25T.Fatal(aa25Err)
+			}
+			aa25Engine := aa25Self.aa25Engine
+			aa25Engine.aa25Pinned = aa25Prepared
+			aa25Engine.aa25PinnedValid = true
+			aa25Engine.aa25FramePB = aa25TestPB
+			aa25Engine.aa25FrameSB = aa25TestSB
+			// At the nominal test rate the maximum horizon is ceil(380e9/2400).
+			aa25Engine.aa25CharStartTick = ^uint64(0) - 158_333_334
+			if aa25Overflow {
+				aa25Engine.aa25CharStartTick++
+			}
+			aa25Now := aa25Engine.aa25CharStartTick
+			if aa25Retry {
+				aa25Engine.aa25TXState = aa25TXAwaitAck
+				aa25Engine.aa25AckSince = aa25Now - aa25TestHz/5 + 1
+				aa25Engine.aa25HandleFinalAck(aa25SymbolNack, aa25Now)
+			} else {
+				aa25Engine.aa25AdmitResponse(aa25Now)
+			}
+			if aa25Overflow {
+				if aa25Engine.aa25TXState != aa25TXIdle || aa25Engine.aa25PinnedValid ||
+					len(aa25Self.aa25Select(AA25EventAdmitted)) != 0 {
+					aa25T.Fatalf("aa25 overflow admitted, retry %v", aa25Retry)
+				}
+				aa25Faults := aa25Self.aa25Faults()
+				if len(aa25Faults) != 1 || aa25Faults[0] != AA25FaultTXLate {
+					aa25T.Fatalf("aa25 overflow faults %v, retry %v", aa25Faults, aa25Retry)
+				}
+			} else if aa25Engine.aa25TXState != aa25TXWaiting || !aa25Engine.aa25PinnedValid {
+				aa25T.Fatalf("aa25 representable anchor rejected, retry %v", aa25Retry)
+			}
+			if len(aa25Self.aa25Writes) != 0 {
+				aa25T.Fatal("aa25 admission drove an edge")
+			}
+		}
+	}
+}
+
 func TestAA25ConfigAndPreparedValidation(aa25T *aa25testing.T) {
 	aa25Bench := &aa25Bench{aa25Now: aa25TestAnchor}
 	aa25Ports := AA25Ports{AA25Levels: aa25Bench, AA25Edges: aa25Bench, AA25Ticks: aa25Bench, AA25Sink: aa25Bench}

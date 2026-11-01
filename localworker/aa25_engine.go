@@ -315,6 +315,9 @@ type AA25Engine struct {
 	aa25Ports  AA25Ports
 	aa25Stats  AA25Stats
 
+	// aa25ReserveTicks is the construction-time response schedule reserve.
+	aa25ReserveTicks uint64
+
 	aa25SampleAnchor   uint64
 	aa25NextSample     uint64
 	aa25NextDeadline   uint64
@@ -386,10 +389,15 @@ func AA25NewEngine(aa25Config AA25Config, aa25Ports AA25Ports) (*AA25Engine, err
 	if aa25Config.AA25TXLateToleranceTicks >= aa25BitWhole || aa25Config.AA25EchoAllowanceTicks >= aa25CharWhole {
 		return nil, AA25ErrInvalidConfig
 	}
+	aa25Reserve, aa25Representable := aa25ScheduleReserve(aa25Config)
 	aa25Now := aa25Ports.AA25Ticks.AA25NowTicks()
+	if !aa25Representable || !aa25ScheduleFits(aa25Reserve, aa25Now) {
+		return nil, AA25ErrInvalidConfig
+	}
 	return &AA25Engine{
 		aa25Config:        aa25Config,
 		aa25Ports:         aa25Ports,
+		aa25ReserveTicks:  aa25Reserve,
 		aa25SampleAnchor:  aa25Now,
 		aa25NextDeadline:  aa25Now,
 		aa25LastNow:       aa25Now,
@@ -397,6 +405,25 @@ func AA25NewEngine(aa25Config AA25Config, aa25Ports AA25Ports) (*AA25Engine, err
 		aa25CharLevel:     AA25LevelHigh,
 		aa25TXLevel:       AA25LevelHigh,
 	}, nil
+}
+
+// aa25ScheduleReserve sums, once at construction, the ticks past a response
+// anchor that the longest response may reach: the response horizon including the
+// final receive character, then the turnaround, echo allowance and late
+// tolerance. False means that sum does not fit the 64-bit tick counter.
+func aa25ScheduleReserve(aa25Config AA25Config) (uint64, bool) {
+	aa25Horizon := aa25RationalDeadline(0, (1+aa25MaxPreparedWire)*aa25BitsPerCharacter,
+		aa25Config.AA25TickHz, AA25NominalBaud)
+	aa25Sum, aa25CarryTurnaround := aa25bits.Add64(aa25Horizon, aa25Config.AA25TurnaroundTicks, 0)
+	aa25Sum, aa25CarryEcho := aa25bits.Add64(aa25Sum, aa25Config.AA25EchoAllowanceTicks, 0)
+	aa25Sum, aa25CarryLate := aa25bits.Add64(aa25Sum, aa25Config.AA25TXLateToleranceTicks, 0)
+	return aa25Sum, (aa25CarryTurnaround | aa25CarryEcho | aa25CarryLate) == 0
+}
+
+// aa25ScheduleFits reports whether a response anchored at aa25Anchor can reserve
+// aa25Reserve ticks without wrapping absolute ticks. It is a single comparison.
+func aa25ScheduleFits(aa25Reserve, aa25Anchor uint64) bool {
+	return aa25Anchor <= ^uint64(0)-aa25Reserve
 }
 
 // AA25Stats returns a snapshot of the bounded counters.
@@ -821,6 +848,11 @@ func (aa25Engine *AA25Engine) aa25AdmitResponse(aa25Now uint64) {
 		aa25Engine.aa25PinnedValid = false
 		return
 	}
+	if !aa25ScheduleFits(aa25Engine.aa25ReserveTicks, aa25Engine.aa25CharStartTick) {
+		aa25Engine.aa25PinnedValid = false
+		aa25Engine.aa25PublishFault(AA25FaultTXLate, aa25Now)
+		return
+	}
 	aa25Engine.aa25TXState = aa25TXWaiting
 	aa25Engine.aa25TXAnchor = aa25Engine.aa25CharStartTick
 	aa25Engine.aa25TXBit = 0
@@ -935,6 +967,10 @@ func (aa25Engine *AA25Engine) aa25HandleFinalAck(aa25Symbol byte, aa25Now uint64
 	}
 	if aa25Engine.aa25TXRetried {
 		aa25Engine.aa25PublishFault(AA25FaultNackExhausted, aa25Now)
+		return
+	}
+	if !aa25ScheduleFits(aa25Engine.aa25ReserveTicks, aa25Engine.aa25CharStartTick) {
+		aa25Engine.aa25PublishFault(AA25FaultTXLate, aa25Now)
 		return
 	}
 	aa25Engine.aa25TXRetried = true
