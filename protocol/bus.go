@@ -1088,6 +1088,9 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 	written, err := b.transport.Write([]byte{raw})
 	if err != nil {
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
+		if busOutcomeFromError(err) == BusOutcomeEchoMismatch {
+			err = &echoMismatchEmittedError{err: err}
+		}
 		return err
 	}
 	if written != 1 {
@@ -1151,6 +1154,7 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
 			Byte:           echo,
+			ByteKnown:      true,
 			EchoWasEscaped: echoWasEscaped,
 		})
 		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
@@ -1179,6 +1183,7 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
 			Byte:           echo,
+			ByteKnown:      true,
 			EchoWasEscaped: echoWasEscaped,
 		})
 		err := fmt.Errorf("unexpected syn while waiting for echo: %w", ebuserrors.ErrBusCollision)
@@ -1206,6 +1211,7 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
 			Byte:           echo,
+			ByteKnown:      true,
 			EchoWasEscaped: echoWasEscaped, // 2026-05-17 batch-23: split P10 pre_echo_syn (escape-decoded data byte vs raw SYN)
 		})
 		err := fmt.Errorf("echo expected real wire SYN (0x%02X) but received escape-decoded payload 0xAA: %w", raw, ebuserrors.ErrBusCollision)
@@ -1339,6 +1345,7 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 				Kind:           BusEventEchoMismatch,
 				Outcome:        BusOutcomeEchoMismatch,
 				Byte:           echo,
+				ByteKnown:      true,
 				EchoWasEscaped: echoWasEscaped,
 			})
 			err := fmt.Errorf("echo for payload 0xAA expected escape-decoded WasEscaped=true but received real wire SYN: %w", ebuserrors.ErrBusCollision)
@@ -1413,9 +1420,10 @@ func (b *Bus) sendRawWithEcho(runCtx, reqCtx context.Context, raw byte, expectRa
 			Kind:           BusEventEchoMismatch,
 			Outcome:        BusOutcomeEchoMismatch,
 			Byte:           echo,
+			ByteKnown:      true,
 			EchoWasEscaped: echoWasEscaped, // 2026-05-17 batch-23: split P10 pre_echo_syn (escape-decoded data byte vs raw SYN)
 		})
-		err := fmt.Errorf("echo mismatch (sent 0x%02x, got 0x%02x): %w", raw, echo, ebuserrors.ErrBusCollision)
+		err := &echoMismatchEmittedError{err: fmt.Errorf("echo mismatch (sent 0x%02x, got 0x%02x): %w", raw, echo, ebuserrors.ErrBusCollision)}
 		b.emitOutcomeEvent(Frame{}, FrameTypeUnknown, 0, err)
 		return err
 	}
@@ -1705,7 +1713,25 @@ func (b *Bus) emitRetryEvent(request Frame, frameType FrameType, attempt, timeou
 	})
 }
 
+// echoMismatchEmittedError marks an error whose echo-mismatch observation
+// already produced a bus event, so outcome emission does not repeat it.
+type echoMismatchEmittedError struct {
+	err error
+}
+
+func (e *echoMismatchEmittedError) Error() string { return e.err.Error() }
+
+func (e *echoMismatchEmittedError) Unwrap() error { return e.err }
+
+func echoMismatchAlreadyEmitted(err error) bool {
+	var marker *echoMismatchEmittedError
+	return errors.As(err, &marker)
+}
+
 func (b *Bus) emitOutcomeEvent(request Frame, frameType FrameType, attempt uint16, err error) {
+	if echoMismatchAlreadyEmitted(err) && busOutcomeFromError(err) == BusOutcomeEchoMismatch {
+		return
+	}
 	switch busOutcomeFromError(err) {
 	case BusOutcomeTimeout:
 		b.emitObserverEvent(BusEvent{

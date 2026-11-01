@@ -71,6 +71,11 @@ type BusEvent struct {
 	Initiator byte
 	Byte      byte
 
+	// ByteKnown is true only when Byte carries a byte actually observed on
+	// the wire. Events without an observed byte leave it false, so a
+	// consumer can tell a missing byte from a real 0x00.
+	ByteKnown bool
+
 	// EchoWasEscaped is set on BusEventEchoMismatch events emitted at
 	// the sendSymbolWithEcho echo-value check (bus.go ~1054). It
 	// records whether the offending echo byte arrived through the
