@@ -1625,6 +1625,13 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	if aa24Host.aa24Fence.AA24Reason == AA24FenceNone || aa24Reason == AA24FenceWorkerGap {
 		aa24Host.aa24Fence = AA24FenceState{AA24Reason: aa24Reason, AA24Sequence: aa24Sequence, AA24CaptureTime: aa24Tick}
 	}
+	// A completion queued before the fence may still wait in the data lane, so each
+	// cancelled identity stays matchable until the data tail passes the head seen now.
+	if !aa24Host.aa24Detached {
+		for _, aa24Identity := range aa24Host.aa24Outstanding {
+			aa24Host.aa24Linger(aa24Identity, true)
+		}
+	}
 	aa24Host.aa24Cancelled = append(aa24Host.aa24Cancelled, aa24Host.aa24Outstanding...)
 	aa24Host.aa24Outstanding = aa24Host.aa24Outstanding[:0]
 }
@@ -1735,6 +1742,9 @@ func (aa24Host *AA24Host) AA24RevokePlan(aa24Ref AA24PlanRef, aa24Now AA23ClockR
 type aa24Lingered struct {
 	aa24Identity AA24CommandIdentity
 	aa24Horizon  uint64
+	// aa24Strict marks a fence-cancelled identity: only a record queued before the
+	// horizon is evidence, a completion posted after the fence stays stale.
+	aa24Strict bool
 }
 
 // aa24Linger keeps an identity that no longer occupies outstanding capacity, since
@@ -1744,7 +1754,7 @@ type aa24Lingered struct {
 // A full list first drops entries whose horizon the data tail has passed; it never
 // evicts an entry that may still have a queued completion. Without room it reports
 // false and the caller keeps the identity outstanding.
-func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity) bool {
+func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Strict bool) bool {
 	if cap(aa24Host.aa24Lingering) == 0 {
 		return false
 	}
@@ -1762,7 +1772,7 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity) bool {
 		}
 	}
 	aa24Horizon := aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
-	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Lingered{aa24Identity: aa24Identity, aa24Horizon: aa24Horizon})
+	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Lingered{aa24Identity: aa24Identity, aa24Horizon: aa24Horizon, aa24Strict: aa24Strict})
 	return true
 }
 
@@ -1772,7 +1782,7 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity) bool {
 func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24Linger(aa24Identity) {
+		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24Linger(aa24Identity, false) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}
@@ -1967,7 +1977,7 @@ func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23
 	aa24Retired := aa24Record.aa24Ref()
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24Linger(aa24Identity) {
+		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24Linger(aa24Identity, false) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}
@@ -1999,7 +2009,9 @@ func (aa24Host *AA24Host) aa24HandleData(aa24Record *AA24Record, aa24Now AA23Tic
 			}
 		}
 		for aa24Index := range aa24Host.aa24Lingering {
-			if aa24Host.aa24Lingering[aa24Index].aa24Identity.aa24Matches(aa24Identity) {
+			aa24Held := &aa24Host.aa24Lingering[aa24Index]
+			// The record was just read, so its data index is one below the consumer.
+			if aa24Held.aa24Identity.aa24Matches(aa24Identity) && (!aa24Held.aa24Strict || aa24Data.aa24LocalConsumer <= aa24Held.aa24Horizon) {
 				aa24Host.aa24Lingering = append(aa24Host.aa24Lingering[:aa24Index], aa24Host.aa24Lingering[aa24Index+1:]...)
 				return aa24Delivery, true, nil
 			}

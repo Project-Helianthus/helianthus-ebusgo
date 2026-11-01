@@ -2283,3 +2283,21 @@ func TestAA24WorkerResyncKeepsHostAssignedFloors(aa24T *aa24testing.T) {
 		aa24T.Fatalf("floors: host %+v worker %+v", aa24HostNext, aa24WorkerNext)
 	}
 }
+
+// Catches a gap fence that drops outstanding identities: a completion queued before
+// the gap would drain as stale and its retained evidence would be discarded.
+func TestAA24GapFenceKeepsEarlierQueuedCompletion(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Identity := aa24Pair.aa24Admit(1, 1, 10)
+	aa24Want(aa24T, "complete", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(11)), nil)
+	aa24Pair.aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
+	aa24Gap, aa24OK, aa24Err := aa24Pair.aa24Poll(12)
+	if aa24Err != nil || !aa24OK || aa24Gap.AA24Record.AA24Kind != AA24RecordGap {
+		aa24T.Fatalf("gap first: %+v %v %v", aa24Gap, aa24OK, aa24Err)
+	}
+	aa24Done, aa24OK, aa24Err := aa24Pair.aa24Poll(13)
+	if aa24Err != nil || !aa24OK || aa24Done.AA24Record.AA24Kind != AA24RecordCompletion || aa24Done.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("queued completion after the gap: %+v %v %v", aa24Done, aa24OK, aa24Err)
+	}
+}
