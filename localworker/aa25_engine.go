@@ -35,6 +35,9 @@ const (
 	aa25MaxPreparedWire    = 1 + 2*(1+aa25MaxPreparedPayload+1)
 	aa25ControlCapacity    = 4
 
+	// aa25MaxRequestNN is the protocol maximum request data length.
+	aa25MaxRequestNN byte = 16
+
 	aa25SymbolEscape byte = 0xA9
 	aa25SymbolSyn    byte = 0xAA
 
@@ -43,6 +46,7 @@ const (
 	aa25EscapedEscape    byte = 0x00
 	aa25EscapedSyn       byte = 0x01
 	aa25SymbolAck        byte = 0x00
+	aa25SymbolNack       byte = 0xFF
 	aa25CRCPolynomial    byte = 0x9B
 )
 
@@ -128,6 +132,8 @@ const (
 	AA25FaultEchoMissing
 	AA25FaultEchoUnsolicited
 	AA25FaultTXLate
+	AA25FaultLengthInvalid
+	AA25FaultNackExhausted
 )
 
 // AA25Event is a value record for the injected sink. AA25Tick is the actual
@@ -287,6 +293,7 @@ const (
 	aa25TXIdle aa25TXState = iota
 	aa25TXWaiting
 	aa25TXActive
+	aa25TXAwaitAck
 )
 
 type aa25ControlKind uint8
@@ -345,6 +352,8 @@ type AA25Engine struct {
 	aa25TXState     aa25TXState
 	aa25TXAnchor    uint64
 	aa25TXBit       uint64
+	aa25TXBase      uint64
+	aa25TXRetried   bool
 	aa25TXLevel     AA25Level
 	aa25EchoIndex   uint64
 	aa25LossPending bool
@@ -365,7 +374,8 @@ func AA25NewEngine(aa25Config AA25Config, aa25Ports AA25Ports) (*AA25Engine, err
 	if aa25Config.AA25TickHz < AA25NominalSampleRate ||
 		aa25Config.AA25ResponderAddress == aa25SymbolEscape ||
 		aa25Config.AA25ResponderAddress == aa25SymbolSyn ||
-		aa25Config.AA25ResponderAddress == aa25AddressBroadcast {
+		aa25Config.AA25ResponderAddress == aa25AddressBroadcast ||
+		aa25InitiatorAddress(aa25Config.AA25ResponderAddress) {
 		return nil, AA25ErrInvalidConfig
 	}
 	aa25BitWhole, _ := aa25RationalAt(1, aa25Config.AA25TickHz, AA25NominalBaud)
@@ -416,7 +426,7 @@ func (aa25Engine *AA25Engine) aa25PushControl(aa25Item aa25Control) bool {
 // echo deadline for a caller that polls toward it.
 func (aa25Engine *AA25Engine) AA25NextDeadlineTick() uint64 {
 	aa25Next := aa25Engine.aa25NextDeadline
-	if aa25Engine.aa25TXState == aa25TXIdle {
+	if aa25Engine.aa25TXState == aa25TXIdle || aa25Engine.aa25TXState == aa25TXAwaitAck {
 		return aa25Next
 	}
 	aa25Length := uint64(aa25Engine.aa25Pinned.aa25WireLen)
@@ -626,6 +636,9 @@ func (aa25Engine *AA25Engine) aa25CompleteSymbol(aa25Index, aa25Now uint64) {
 		AA25Dissent:     aa25Engine.aa25CharDissent,
 		AA25EdgePhase:   aa25Engine.aa25CharEdgePhase,
 	})
+	if aa25Engine.aa25TXState == aa25TXAwaitAck {
+		aa25Engine.aa25HandleFinalAck(aa25Symbol, aa25Now)
+	}
 	aa25Engine.aa25FeedFrame(aa25Symbol, aa25Now)
 }
 
@@ -746,6 +759,11 @@ func (aa25Engine *AA25Engine) aa25DeliverLogical(aa25Logical byte, aa25WasEscape
 		aa25Engine.aa25FrameSB = aa25Logical
 		aa25Engine.aa25FramePhase = aa25FrameNN
 	case aa25FrameNN:
+		if aa25Logical > aa25MaxRequestNN {
+			aa25Engine.aa25PublishFault(AA25FaultLengthInvalid, aa25Now)
+			aa25Engine.aa25DropFrame()
+			return
+		}
 		aa25Engine.aa25FrameNN = aa25Logical
 		aa25Engine.aa25FrameLeft = aa25Logical
 		aa25Engine.aa25FramePhase = aa25FrameData
@@ -786,6 +804,8 @@ func (aa25Engine *AA25Engine) aa25AdmitResponse(aa25Now uint64) {
 	aa25Engine.aa25TXState = aa25TXWaiting
 	aa25Engine.aa25TXAnchor = aa25Engine.aa25CharStartTick
 	aa25Engine.aa25TXBit = 0
+	aa25Engine.aa25TXBase = 0
+	aa25Engine.aa25TXRetried = false
 	aa25Engine.aa25EchoIndex = 0
 	aa25Engine.aa25Publish(AA25Event{
 		AA25Kind:       AA25EventAdmitted,
@@ -799,7 +819,7 @@ func (aa25Engine *AA25Engine) aa25AdmitResponse(aa25Now uint64) {
 // from the end of the request's final character plus the turnaround.
 func (aa25Engine *AA25Engine) aa25TXDeadline(aa25Bit uint64) uint64 {
 	return aa25RationalDeadline(aa25Engine.aa25TXAnchor+aa25Engine.aa25Config.AA25TurnaroundTicks,
-		aa25BitsPerCharacter+aa25Bit, aa25Engine.aa25Config.AA25TickHz, AA25NominalBaud)
+		aa25BitsPerCharacter+aa25Bit-aa25Engine.aa25TXBase, aa25Engine.aa25Config.AA25TickHz, AA25NominalBaud)
 }
 
 func (aa25Engine *AA25Engine) aa25EchoDeadline() uint64 {
@@ -820,10 +840,10 @@ func (aa25Engine *AA25Engine) aa25TXBitLevel(aa25Bit uint64) AA25Level {
 
 func (aa25Engine *AA25Engine) aa25StepTX(aa25Now uint64) {
 	switch aa25Engine.aa25TXState {
-	case aa25TXIdle:
+	case aa25TXIdle, aa25TXAwaitAck:
 		return
 	case aa25TXWaiting:
-		if !aa25Engine.aa25FinalComplete || aa25Now < aa25Engine.aa25TXDeadline(0) {
+		if !aa25Engine.aa25FinalComplete || aa25Now < aa25Engine.aa25TXDeadline(aa25Engine.aa25TXBase) {
 			return
 		}
 		aa25Engine.aa25TXState = aa25TXActive
@@ -856,9 +876,32 @@ func (aa25Engine *AA25Engine) aa25StepTX(aa25Now uint64) {
 			AA25Tick:       aa25Now,
 			AA25Generation: aa25Engine.aa25Pinned.AA25Generation,
 		})
-		aa25Engine.aa25TXState = aa25TXIdle
-		aa25Engine.aa25PinnedValid = false
+		// The pin stays until the initiator's final symbol: a NACK there
+		// retransmits the response portion once.
+		aa25Engine.aa25TXState = aa25TXAwaitAck
 	}
+}
+
+// aa25HandleFinalAck consumes the initiator's symbol after the response. One
+// NACK resends the response portion on a fresh absolute schedule anchored to
+// that symbol; anything else ends the exchange. Never a retry loop.
+func (aa25Engine *AA25Engine) aa25HandleFinalAck(aa25Symbol byte, aa25Now uint64) {
+	aa25Engine.aa25TXState = aa25TXIdle
+	aa25Engine.aa25PinnedValid = false
+	if aa25Symbol != aa25SymbolNack {
+		return
+	}
+	if aa25Engine.aa25TXRetried {
+		aa25Engine.aa25PublishFault(AA25FaultNackExhausted, aa25Now)
+		return
+	}
+	aa25Engine.aa25TXRetried = true
+	aa25Engine.aa25PinnedValid = true
+	aa25Engine.aa25TXState = aa25TXWaiting
+	aa25Engine.aa25TXAnchor = aa25Engine.aa25CharStartTick
+	aa25Engine.aa25TXBase = aa25BitsPerCharacter
+	aa25Engine.aa25TXBit = aa25BitsPerCharacter
+	aa25Engine.aa25EchoIndex = 1
 }
 
 func (aa25Engine *AA25Engine) aa25DriveEdge(aa25Level AA25Level, aa25Deadline, aa25Now uint64) {

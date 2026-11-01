@@ -471,10 +471,15 @@ func TestAA25LateObservationKeepsActualTimestampAndAbsoluteSchedule(aa25T *aa25t
 
 func TestAA25DecodesEverySymbolAtBitCentres(aa25T *aa25testing.T) {
 	aa25Self := aa25NewBench(aa25T, aa25TestConfig())
-	aa25Symbols := make([]byte, 256)
-	for aa25Index := range aa25Symbols {
-		aa25Symbols[aa25Index] = byte(aa25Index)
+	// SYN goes last: a leading SYN would turn the remaining bytes into a frame
+	// whose length byte exceeds the protocol maximum.
+	aa25Symbols := make([]byte, 0, 256)
+	for aa25Value := 0; aa25Value < 256; aa25Value++ {
+		if byte(aa25Value) != 0xAA {
+			aa25Symbols = append(aa25Symbols, byte(aa25Value))
+		}
 	}
+	aa25Symbols = append(aa25Symbols, 0xAA)
 	aa25End := aa25Self.aa25Send(aa25Self.aa25GridTime(120), aa25Symbols...)
 	aa25Self.aa25Run(aa25TickAfter(aa25End, 5, aa25Self))
 	if aa25Got := aa25Self.aa25RawSymbols(false); !aa25EqualBytes(aa25Got, aa25Symbols) {
@@ -1571,6 +1576,8 @@ func TestAA25ConfigAndPreparedValidation(aa25T *aa25testing.T) {
 		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0xA9 },
 		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0xAA },
 		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0xFE },
+		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0x31 },
+		func(aa25Config *AA25Config) { aa25Config.AA25ResponderAddress = 0x10 },
 		func(aa25Config *AA25Config) { aa25Config.AA25TXLateToleranceTicks = aa25BitTicks },
 		func(aa25Config *AA25Config) { aa25Config.AA25EchoAllowanceTicks = aa25CharacterTicks },
 	} {
@@ -1727,6 +1734,110 @@ func TestAA25EveryDeclaredIdentifierIsPrefixed(aa25T *aa25testing.T) {
 				}
 			}
 			return true
+		})
+	}
+}
+
+// aa25RunUntilCompletes polls on the engine's own deadlines until the given
+// number of TXComplete events exists, so no later input is skipped past.
+func (aa25Self *aa25Bench) aa25RunUntilCompletes(aa25Count int, aa25Limit uint64) {
+	aa25Self.aa25T.Helper()
+	for aa25Guard := 0; aa25Guard < 1<<22; aa25Guard++ {
+		if len(aa25Self.aa25Select(AA25EventTXComplete)) >= aa25Count {
+			return
+		}
+		aa25Next := aa25Self.aa25Engine.AA25NextDeadlineTick()
+		if aa25Next > aa25Limit {
+			aa25Self.aa25T.Fatalf("aa25 completes never reached %d; faults %v", aa25Count, aa25Self.aa25Faults())
+		}
+		if aa25Next > aa25Self.aa25Now {
+			aa25Self.aa25Now = aa25Next
+		}
+		aa25Self.aa25Engine.AA25Step()
+	}
+	aa25Self.aa25T.Fatal("aa25 bench made no progress")
+}
+
+// aa25QueueFinalSymbol queues one initiator symbol a fixed gap after the
+// latest TXComplete and returns its end.
+func (aa25Self *aa25Bench) aa25QueueFinalSymbol(aa25Symbol byte, aa25Completes int) *aa25big.Rat {
+	aa25Self.aa25T.Helper()
+	aa25Complete := aa25Self.aa25Select(AA25EventTXComplete)
+	if len(aa25Complete) != aa25Completes {
+		aa25Self.aa25T.Fatalf("aa25 completes %d; want %d (faults %v)", len(aa25Complete), aa25Completes, aa25Self.aa25Faults())
+	}
+	return aa25Self.aa25Send(aa25Rat(aa25Complete[aa25Completes-1].AA25Tick+aa25Self.aa25Hz/2400*2, 1), aa25Symbol)
+}
+
+func TestAA25FinalNackRetransmitsResponseOnce(aa25T *aa25testing.T) {
+	// Each row follows an identical admitted exchange with one initiator symbol.
+	// Mutation caught: dropping the NACK pin (no retransmit), retransmitting the
+	// leading ACK too, anchoring the resend to the old request, or looping.
+	for _, aa25Case := range []struct {
+		aa25Name    string
+		aa25Symbols []byte
+		aa25Resends int
+		aa25Fault   bool
+	}{
+		{"ack-control", []byte{0x00}, 0, false},
+		{"nack-once", []byte{0xFF}, 1, false},
+		{"nack-then-ack", []byte{0xFF, 0x00}, 1, false},
+		{"nack-twice", []byte{0xFF, 0xFF}, 1, true},
+	} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+			aa25Prepared := aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0xAB)
+			aa25Wire := aa25PreparedWire(aa25Prepared)
+			aa25End := aa25Self.aa25SendRequest(aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, 0x01))
+			aa25Self.aa25RunUntilCompletes(1, aa25TickAfter(aa25End, 2000, aa25Self))
+			aa25Want := aa25Self.aa25ExpectedEdges(aa25Self.aa25FinalStart(), aa25Wire)
+			for aa25Index, aa25Symbol := range aa25Case.aa25Symbols {
+				aa25SymbolEnd := aa25Self.aa25QueueFinalSymbol(aa25Symbol, aa25Index+1)
+				if aa25Symbol == 0xFF && aa25Index < aa25Case.aa25Resends {
+					aa25Self.aa25RunUntilCompletes(aa25Index+2, aa25TickAfter(aa25SymbolEnd, 2000, aa25Self))
+					aa25Resend := aa25Self.aa25ExpectedEdges(aa25Self.aa25FinalStart(), aa25Wire[1:])
+					aa25Want = append(aa25Want, aa25Resend...)
+				} else {
+					aa25Self.aa25Run(aa25TickAfter(aa25SymbolEnd, 700, aa25Self))
+				}
+			}
+			if !aa25EqualEdges(aa25Self.aa25Writes, aa25Want) {
+				aa25T.Fatalf("aa25 edges %v; want %v (faults %v)", aa25Self.aa25Writes, aa25Want, aa25Self.aa25Faults())
+			}
+			if aa25Self.aa25HasFault(AA25FaultNackExhausted) != aa25Case.aa25Fault {
+				aa25T.Fatalf("aa25 faults %v; exhausted want %v", aa25Self.aa25Faults(), aa25Case.aa25Fault)
+			}
+			if aa25Got := len(aa25Self.aa25Select(AA25EventTXComplete)); aa25Got != 1+aa25Case.aa25Resends {
+				aa25T.Fatalf("aa25 completes %d; want %d", aa25Got, 1+aa25Case.aa25Resends)
+			}
+			if aa25Case.aa25Resends > 0 {
+				if aa25Echo := aa25Self.aa25RawSymbols(true); len(aa25Echo) != len(aa25Wire)+len(aa25Wire)-1 {
+					aa25T.Fatalf("aa25 echo % X", aa25Echo)
+				}
+			}
+		})
+	}
+}
+
+func TestAA25RejectsRequestLengthAboveProtocolMaximum(aa25T *aa25testing.T) {
+	// The prepared entry matches NN=17, so only the length limit can stop the
+	// response. Mutation caught: admitting NN above 16.
+	for _, aa25Case := range []struct {
+		aa25NN    byte
+		aa25Admit bool
+	}{{16, true}, {17, false}} {
+		aa25T.Run("nn"+string(rune('0'+aa25Case.aa25NN/10))+string(rune('0'+aa25Case.aa25NN%10)), func(aa25T *aa25testing.T) {
+			aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+			aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, aa25Case.aa25NN, 0x11)
+			aa25Data := make([]byte, aa25Case.aa25NN)
+			aa25End := aa25Self.aa25SendRequest(aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, aa25Data...))
+			aa25Self.aa25Run(aa25TickAfter(aa25End, 700, aa25Self))
+			if (len(aa25Self.aa25Writes) != 0) != aa25Case.aa25Admit {
+				aa25T.Fatalf("aa25 nn=%d writes %v faults %v", aa25Case.aa25NN, aa25Self.aa25Writes, aa25Self.aa25Faults())
+			}
+			if aa25Self.aa25HasFault(AA25FaultLengthInvalid) == aa25Case.aa25Admit {
+				aa25T.Fatalf("aa25 nn=%d faults %v", aa25Case.aa25NN, aa25Self.aa25Faults())
+			}
 		})
 	}
 }
