@@ -2301,3 +2301,55 @@ func TestAA24GapFenceKeepsEarlierQueuedCompletion(aa24T *aa24testing.T) {
 		aa24T.Fatalf("queued completion after the gap: %+v %v %v", aa24Done, aa24OK, aa24Err)
 	}
 }
+
+// Catches a fence that drops an outstanding identity when the lingering list is
+// full: the queued completion would drain as stale and be discarded.
+func TestAA24FenceKeepsIdentityWhenLingeringIsFull(aa24T *aa24testing.T) {
+	aa24Mem := aa24FixtureMemory(aa24FixtureBytes())
+	aa24Config := aa24FixtureConfig
+	aa24Config.AA24Lanes[AA24LaneWorkerData-1].AA24Capacity = 2
+	aa24Expected, _, aa24Err := AA24InitMapping(aa24Mem, aa24FixtureBinding(), aa24Config, aa24FixtureLimits)
+	if aa24Err != nil {
+		aa24T.Fatalf("init: %v", aa24Err)
+	}
+	aa24Pair := aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24Host.aa24Lingering = append(aa24Pair.aa24Host.aa24Lingering[:0], aa24Lingered{aa24Horizon: 1 << 40}, aa24Lingered{aa24Horizon: 1 << 40})
+	aa24Pair.aa24Host.aa24Lingering = aa24Pair.aa24Host.aa24Lingering[:cap(aa24Pair.aa24Host.aa24Lingering)]
+	aa24Identity := aa24Pair.aa24Admit(1, 1, 10)
+	aa24Want(aa24T, "complete", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(11)), nil)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(12)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(13)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion {
+		aa24T.Fatalf("queued completion: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
+// Catches a settlement or teardown that ignores a revocation queued behind the stop:
+// the quarantined plan would be cleared without its exact retirement acknowledgement.
+func TestAA24RevokeAfterStopMustBeReadBeforeTeardown(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24Pair.aa24Publish(1, 10)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(11)), nil)
+	aa24Want(aa24T, "worker reads publish and stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	aa24Want(aa24T, "late revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(13)), nil)
+	aa24Want(aa24T, "worker teardown", aa24Pair.aa24Worker.AA24Teardown(), ErrAA24NotAcknowledged)
+	aa24Want(aa24T, "host teardown", aa24Pair.aa24Host.AA24Teardown(), ErrAA24NotAcknowledged)
+	if _, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24FixtureStream + 1); !aa24errorstest.Is(aa24Err, ErrAA24NotAcknowledged) {
+		aa24T.Fatalf("resync: %v", aa24Err)
+	}
+	aa24Want(aa24T, "worker reads revoke", aa24Pair.aa24Worker.AA24PollControl(aa24At(14)), nil)
+	aa24Want(aa24T, "worker teardown after read", aa24Pair.aa24Worker.AA24Teardown(), nil)
+	aa24Want(aa24T, "host teardown after read", aa24Pair.aa24Host.AA24Teardown(), nil)
+}
+
+// Catches a completion with an invalid status that clears the active command first.
+func TestAA24InvalidCompletionStatusKeepsActiveCommand(aa24T *aa24testing.T) {
+	for _, aa24Status := range []AA24Status{AA24StatusPending, AA24StatusRetired + 1} {
+		aa24Pair := aa24NewPair(aa24T)
+		aa24Pair.aa24Publish(1, 10)
+		aa24Identity := aa24Pair.aa24Admit(1, 1, 10)
+		aa24Want(aa24T, "invalid status", aa24Pair.aa24Worker.AA24Complete(aa24Identity, aa24Status, aa24At(11)), ErrAA24Record)
+		aa24Want(aa24T, "valid completion", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(12)), nil)
+	}
+}

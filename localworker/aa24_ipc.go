@@ -1406,6 +1406,9 @@ func (aa24Worker *AA24Worker) AA24Complete(aa24Identity AA24CommandIdentity, aa2
 	if aa24Err := aa24Worker.aa24Tick(aa24Now); aa24Err != nil {
 		return aa24Err
 	}
+	if aa24Status == AA24StatusPending || aa24Status > AA24StatusRetired {
+		return ErrAA24Record
+	}
 	if !aa24Worker.aa24HasActive || !aa24Worker.aa24Active.aa24Matches(aa24Identity) {
 		return ErrAA24Mismatch
 	}
@@ -1479,6 +1482,11 @@ func (aa24Worker *AA24Worker) aa24PostRetired(aa24Ref AA24PlanRef, aa24Now AA23T
 // gap was consumed by the host. Resynchronization and teardown share it.
 func (aa24Worker *AA24Worker) aa24FenceAcknowledged() error {
 	if !aa24Worker.aa24StopObserved {
+		return ErrAA24NotAcknowledged
+	}
+	// Host control queued behind the stop, such as a late revocation, must be read first.
+	aa24Producer, aa24Read, aa24Err := aa24Worker.aa24Lane(AA24LaneHostControl).aa24Indices()
+	if aa24Err != nil || aa24Producer != aa24Read {
 		return ErrAA24NotAcknowledged
 	}
 	if aa24Worker.aa24GapLatched {
@@ -1627,13 +1635,30 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	}
 	// A completion queued before the fence may still wait in the data lane, so each
 	// cancelled identity stays matchable until the data tail passes the head seen now.
-	if !aa24Host.aa24Detached {
-		for _, aa24Identity := range aa24Host.aa24Outstanding {
-			aa24Host.aa24Linger(aa24Identity, true)
+	// An identity with no room to linger stays outstanding, so a completion queued
+	// before the fence still matches instead of draining as stale.
+	aa24Kept := aa24Host.aa24Outstanding[:0]
+	for _, aa24Identity := range aa24Host.aa24Outstanding {
+		if !aa24Host.aa24Cancelling(aa24Identity) {
+			aa24Host.aa24Cancelled = append(aa24Host.aa24Cancelled, aa24Identity)
+		}
+		if aa24Host.aa24Detached || !aa24Host.aa24Linger(aa24Identity, true) {
+			if !aa24Host.aa24Detached {
+				aa24Kept = append(aa24Kept, aa24Identity)
+			}
 		}
 	}
-	aa24Host.aa24Cancelled = append(aa24Host.aa24Cancelled, aa24Host.aa24Outstanding...)
-	aa24Host.aa24Outstanding = aa24Host.aa24Outstanding[:0]
+	aa24Host.aa24Outstanding = aa24Kept
+}
+
+// aa24Cancelling reports that a fence already listed the identity as cancelled.
+func (aa24Host *AA24Host) aa24Cancelling(aa24Identity AA24CommandIdentity) bool {
+	for _, aa24Held := range aa24Host.aa24Cancelled {
+		if aa24Held.aa24Matches(aa24Identity) {
+			return true
+		}
+	}
+	return false
 }
 
 func (aa24Host *AA24Host) aa24Tick(aa24Now AA23ClockReading) error {
@@ -1716,7 +1741,8 @@ func (aa24Host *AA24Host) AA24PublishPlan(aa24Ref AA24PlanRef, aa24ArenaOffset u
 }
 
 // AA24RevokePlan queues a revocation, also on a fenced stream. Saturation fences
-// the host and keeps the plan quarantined; the call may be repeated.
+// the host and keeps the plan quarantined; the call may be repeated. A revocation
+// queued after the stop must be read before either side settles or tears down.
 func (aa24Host *AA24Host) AA24RevokePlan(aa24Ref AA24PlanRef, aa24Now AA23ClockReading) error {
 	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil {
 		return aa24Err
@@ -2081,7 +2107,12 @@ func (aa24Host *AA24Host) aa24ControlSettled() bool {
 		return false
 	}
 	aa24Producer, aa24Consumer, aa24Err := aa24Host.aa24Lane(AA24LaneWorkerControl).aa24Indices()
-	return aa24Err == nil && aa24Producer == aa24Consumer
+	if aa24Err != nil || aa24Producer != aa24Consumer {
+		return false
+	}
+	// A revocation queued behind the stop must be consumed before settlement.
+	aa24Produced, aa24Read, aa24Err := aa24Host.aa24Lane(AA24LaneHostControl).aa24Indices()
+	return aa24Err == nil && aa24Produced == aa24Read
 }
 
 // AA24ResyncExpected names the successor mapping once the fence is acknowledged: the
