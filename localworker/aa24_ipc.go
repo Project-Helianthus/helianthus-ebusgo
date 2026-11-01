@@ -1575,7 +1575,7 @@ func AA24AttachHost(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Host, error
 		aa24PlanFloor:   aa24Expected.AA24PlanFloor,
 		aa24TokenFloor:  aa24Expected.AA24TokenFloor,
 		aa24Outstanding: make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
-		aa24Lingering:   make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
+		aa24Lingering:   make([]AA24CommandIdentity, 0, aa24Lanes[AA24LaneWorkerData-1].aa24Layout.aa24Capacity),
 		aa24Cancelled:   make([]AA24CommandIdentity, 0, aa24Limits.AA24MaxOutstanding),
 		aa24NextCapture: 1,
 		aa24Explained:   make([]uint64, 0, aa24Lanes[AA24LaneWorkerControl-1].aa24Layout.aa24Capacity),
@@ -1618,7 +1618,6 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	}
 	aa24Host.aa24Cancelled = append(aa24Host.aa24Cancelled, aa24Host.aa24Outstanding...)
 	aa24Host.aa24Outstanding = aa24Host.aa24Outstanding[:0]
-	aa24Host.aa24Lingering = aa24Host.aa24Lingering[:0]
 }
 
 func (aa24Host *AA24Host) aa24Tick(aa24Now AA23ClockReading) error {
@@ -1724,7 +1723,9 @@ func (aa24Host *AA24Host) AA24RevokePlan(aa24Ref AA24PlanRef, aa24Now AA23ClockR
 
 // aa24Linger keeps an identity that no longer occupies outstanding capacity, since
 // a completion queued before the worker refused or retired it may still be waiting
-// in the data lane. The list is bounded and evicts its oldest entry.
+// in the data lane. A fence keeps the list, so evidence queued earlier stays
+// matchable while old data drains. The list is bounded by the data lane capacity,
+// which also bounds the completions that can be queued, and evicts its oldest entry.
 func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity) {
 	if cap(aa24Host.aa24Lingering) == 0 {
 		return
@@ -1830,7 +1831,10 @@ func (aa24Host *AA24Host) aa24IdentityMatches(aa24Record *AA24Record) bool {
 // retained evidence without reopening anything.
 func (aa24Host *AA24Host) AA24Poll(aa24Dst []byte, aa24Now AA23ClockReading) (AA24Delivery, bool, error) {
 	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil {
-		return AA24Delivery{}, false, aa24Err
+		if aa24Err != ErrAA24Clock {
+			return AA24Delivery{}, false, aa24Err
+		}
+		return aa24Host.aa24PollFencedControl(aa24Dst)
 	}
 	aa24Data := aa24Host.aa24Lane(AA24LaneWorkerData)
 	aa24DataHead := aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
@@ -1840,7 +1844,7 @@ func (aa24Host *AA24Host) AA24Poll(aa24Dst []byte, aa24Now AA23ClockReading) (AA
 		return AA24Delivery{}, false, aa24Host.aa24ReadFailed(aa24Err)
 	}
 	if aa24OK {
-		return aa24Host.aa24HandleControl(&aa24Record, aa24Now.AA23Tick)
+		return aa24Host.aa24HandleControl(&aa24Record, aa24Now.AA23Tick, false)
 	}
 	if aa24Data.aa24LocalConsumer >= aa24DataHead {
 		if _, _, aa24Err := aa24Data.aa24Indices(); aa24Err != nil {
@@ -1858,6 +1862,27 @@ func (aa24Host *AA24Host) AA24Poll(aa24Dst []byte, aa24Now AA23ClockReading) (AA
 	return aa24Host.aa24HandleData(&aa24Record, aa24Now.AA23Tick)
 }
 
+// aa24PollFencedControl keeps draining the worker control lane after a host clock
+// fence, so a retirement acknowledgement or gap is consumed and graceful
+// resynchronization can settle. The unreliable clock is not trusted: the record's
+// dequeue time is zero, its capture time is not compared, data stays fenced and the
+// call still reports the clock refusal beside any consumed record.
+func (aa24Host *AA24Host) aa24PollFencedControl(aa24Dst []byte) (AA24Delivery, bool, error) {
+	aa24Control := aa24Host.aa24Lane(AA24LaneWorkerControl)
+	aa24Record, aa24OK, aa24Err := aa24Control.aa24Read(aa24Dst)
+	if aa24Err != nil {
+		return AA24Delivery{}, false, aa24Host.aa24ReadFailed(aa24Err)
+	}
+	if !aa24OK {
+		return AA24Delivery{}, false, ErrAA24Clock
+	}
+	aa24Delivery, aa24Handled, aa24Err := aa24Host.aa24HandleControl(&aa24Record, 0, true)
+	if aa24Err == nil {
+		aa24Err = ErrAA24Clock
+	}
+	return aa24Delivery, aa24Handled, aa24Err
+}
+
 func (aa24Host *AA24Host) aa24ReadFailed(aa24Err error) error {
 	if aa24Err != ErrAA24Buffer {
 		aa24Host.aa24Close(AA24FenceCorruption, 0, 0)
@@ -1873,13 +1898,13 @@ func (aa24Host *AA24Host) aa24CaptureRegressed(aa24Record *AA24Record, aa24Last 
 	return false
 }
 
-func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23Tick) (AA24Delivery, bool, error) {
+func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23Tick, aa24ClockFenced bool) (AA24Delivery, bool, error) {
 	aa24Control := aa24Host.aa24Lane(AA24LaneWorkerControl)
 	if !aa24Host.aa24IdentityMatches(aa24Record) {
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
 		return AA24Delivery{}, false, ErrAA24Stale
 	}
-	aa24Regressed := aa24Host.aa24CaptureRegressed(aa24Record, &aa24Host.aa24LastControlTime, aa24Now)
+	aa24Regressed := !aa24ClockFenced && aa24Host.aa24CaptureRegressed(aa24Record, &aa24Host.aa24LastControlTime, aa24Now)
 	aa24Delivery := AA24Delivery{AA24Record: *aa24Record, AA24DequeueTime: aa24Now}
 	if aa24Record.AA24Kind == AA24RecordGap {
 		aa24Host.aa24AccountSequence(aa24Record.AA24CaptureSequence, true)
@@ -2001,6 +2026,16 @@ func (aa24Host *AA24Host) aa24StopConsumed() bool {
 	return aa24Err == nil && aa24Consumer > aa24Host.aa24StopIndex
 }
 
+// aa24ControlSettled reports that the worker consumed the stop and that no worker
+// control record stays unread, so a pending gap or acknowledgement is not lost.
+func (aa24Host *AA24Host) aa24ControlSettled() bool {
+	if !aa24Host.aa24StopConsumed() {
+		return false
+	}
+	aa24Producer, aa24Consumer, aa24Err := aa24Host.aa24Lane(AA24LaneWorkerControl).aa24Indices()
+	return aa24Err == nil && aa24Producer == aa24Consumer
+}
+
 // AA24ResyncExpected names the successor mapping once the fence is acknowledged: the
 // worker consumed the stop and no worker control record stays unread.
 func (aa24Host *AA24Host) AA24ResyncExpected(aa24Next AA23StreamGeneration) (AA24Expected, error) {
@@ -2010,11 +2045,7 @@ func (aa24Host *AA24Host) AA24ResyncExpected(aa24Next AA23StreamGeneration) (AA2
 	if aa24Host.aa24Fence.AA24Reason == AA24FenceNone {
 		return AA24Expected{}, ErrAA24NotFenced
 	}
-	if !aa24Host.aa24StopConsumed() {
-		return AA24Expected{}, ErrAA24NotAcknowledged
-	}
-	aa24Producer, aa24Consumer, aa24Err := aa24Host.aa24Lane(AA24LaneWorkerControl).aa24Indices()
-	if aa24Err != nil || aa24Producer != aa24Consumer {
+	if !aa24Host.aa24ControlSettled() {
 		return AA24Expected{}, ErrAA24NotAcknowledged
 	}
 	if aa24Next <= aa24Host.aa24Expected.AA24Binding.AA24Stream {
@@ -2055,13 +2086,16 @@ func (aa24Host *AA24Host) AA24RestartExpected(aa24NextWorker AA23WorkerID, aa24N
 	return aa24Host.aa24Successor(aa24NextWorker, aa24NextStream), nil
 }
 
-// AA24Teardown releases the mapping once the worker consumed the stop or is proven
-// terminated. It never drains a lane, so a saturated data lane cannot hold shutdown.
+// AA24Teardown releases the mapping once the worker consumed the stop and the host
+// read every worker control record (the worker's own teardown needs a raised gap
+// consumed), or the worker is proven terminated. Stop consumption alone does not
+// prove the worker ceased touching the mapping; that proof stays with the
+// supervisor through AA24ObserveWorkerTerminated. It never drains a lane, so a saturated data lane cannot hold shutdown.
 func (aa24Host *AA24Host) AA24Teardown() error {
 	if aa24Host.aa24Detached {
 		return nil
 	}
-	if !aa24Host.aa24Terminated && !aa24Host.aa24StopConsumed() {
+	if !aa24Host.aa24Terminated && !aa24Host.aa24ControlSettled() {
 		return ErrAA24NotAcknowledged
 	}
 	aa24Host.aa24Detached = true

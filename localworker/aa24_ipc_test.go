@@ -2100,3 +2100,96 @@ func TestAA24WorkerTeardownRequiresTheStopHandshake(aa24T *aa24testing.T) {
 	}
 	aa24Want(aa24T, "acknowledged", aa24Pair.aa24Worker.AA24Teardown(), nil)
 }
+
+// aa24LingerPair builds a pair whose outstanding capacity is one, so expiry of each
+// command moves its identity into the lingering list.
+func aa24LingerPair(aa24T *aa24testing.T) *aa24Pair {
+	aa24T.Helper()
+	aa24Mem := aa24FixtureMemory(aa24FixtureBytes())
+	aa24Limits := aa24FixtureLimits
+	aa24Limits.AA24MaxOutstanding = 1
+	aa24Expected, _, aa24Err := AA24InitMapping(aa24Mem, aa24FixtureBinding(), aa24FixtureConfig, aa24Limits)
+	if aa24Err != nil {
+		aa24T.Fatalf("init: %v", aa24Err)
+	}
+	return aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+}
+
+// aa24LingerCommand sends and completes one command; its request deadline is tick+10.
+func (aa24Pair *aa24Pair) aa24LingerCommand(aa24Token AA24OwnerToken, aa24Tick AA23Tick) {
+	aa24Pair.aa24T.Helper()
+	aa24Identity := aa24FixtureCommand(1, aa24Token)
+	aa24Identity.AA24RequestDeadline = aa24Tick + 10
+	aa24Want(aa24Pair.aa24T, "send", aa24Pair.aa24Host.AA24SendCommand(aa24Identity, nil, aa24At(aa24Tick)), nil)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(aa24Tick)); aa24Err != nil || !aa24OK {
+		aa24Pair.aa24T.Fatalf("next: %v %v", aa24OK, aa24Err)
+	}
+	aa24Want(aa24Pair.aa24T, "complete", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(aa24Tick+1)), nil)
+}
+
+// Catches an expiry list bounded by outstanding capacity: the second expiry would
+// evict the first identity while its completion is still queued.
+func TestAA24LingeringIdentitiesSurviveUnpolledExpiries(aa24T *aa24testing.T) {
+	aa24Pair := aa24LingerPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24LingerCommand(1, 10)
+	aa24Pair.aa24LingerCommand(2, 20)
+	aa24Want(aa24T, "third send expires the second", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 3), nil, aa24At(30)), nil)
+	for _, aa24Token := range []AA24OwnerToken{1, 2} {
+		aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(31)
+		if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion || aa24Delivery.AA24Record.AA24OwnerToken != aa24Token {
+			aa24T.Fatalf("token %d: %+v %v %v", aa24Token, aa24Delivery, aa24OK, aa24Err)
+		}
+	}
+}
+
+// Catches a fence that clears the lingering list: the queued completion of an
+// expired command must stay matchable while old data drains.
+func TestAA24FenceKeepsQueuedCompletionIdentities(aa24T *aa24testing.T) {
+	aa24Pair := aa24LingerPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24LingerCommand(1, 10)
+	aa24Want(aa24T, "second send expires the first", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 2), nil, aa24At(20)), nil)
+	aa24Want(aa24T, "fence", aa24Pair.aa24Host.AA24RequestStop(aa24At(22)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(23)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("expired completion after the fence: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
+// Catches teardown on stop consumption alone: the worker's gap stays unread, so the
+// worker could never settle its own teardown.
+func TestAA24HostTeardownWaitsForTheWorkerGapToBeRead(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(11)), nil)
+	aa24Want(aa24T, "worker reads stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	aa24Want(aa24T, "gap unread", aa24Pair.aa24Host.AA24Teardown(), ErrAA24NotAcknowledged)
+	aa24Want(aa24T, "worker teardown blocked", aa24Pair.aa24Worker.AA24Teardown(), ErrAA24NotAcknowledged)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(13)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordGap {
+		aa24T.Fatalf("gap: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "worker teardown", aa24Pair.aa24Worker.AA24Teardown(), nil)
+	aa24Want(aa24T, "host teardown", aa24Pair.aa24Host.AA24Teardown(), nil)
+}
+
+// Catches a poll that returns on the clock fence without draining control: the
+// worker's gap would stay unread and graceful resynchronization could not settle.
+func TestAA24ClockFencedPollDrainsControl(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	if _, _, aa24Err := aa24Pair.aa24Poll(30); aa24Err != nil {
+		aa24T.Fatal(aa24Err)
+	}
+	aa24Pair.aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(29)
+	aa24Want(aa24T, "regressed host clock", aa24Err, ErrAA24Clock)
+	if !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordGap || aa24Delivery.AA24DequeueTime != 0 {
+		aa24T.Fatalf("gap drained on the fenced clock: %+v %v", aa24Delivery, aa24OK)
+	}
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(29)), nil)
+	aa24Want(aa24T, "worker reads stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(40)), nil)
+	if _, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24FixtureStream + 1); aa24Err != nil {
+		aa24T.Fatalf("resync after the fenced drain: %v", aa24Err)
+	}
+}
