@@ -1122,7 +1122,12 @@ func (aa24Worker *AA24Worker) aa24Service(aa24Now AA23ClockReading) error {
 		if aa24Err == ErrAA24Clock {
 			// The latched clock fence still lets a stop through, so the host can
 			// acknowledge the gap; nothing here makes an output decision.
-			aa24Worker.aa24DrainControl(aa24Now.AA23Tick, true)
+			// Records emitted here carry the last trusted tick, never the regressed one.
+			aa24Trusted := aa24Worker.aa24TrustedTick()
+			if aa24Worker.aa24LastCapture > aa24Trusted {
+				aa24Trusted = aa24Worker.aa24LastCapture
+			}
+			aa24Worker.aa24DrainControl(aa24Trusted, true)
 		}
 		return aa24Err
 	}
@@ -1847,11 +1852,21 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Stric
 func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24Linger(aa24Identity, false, nil) {
+		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24LingerMoved(aa24Identity) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}
 	aa24Host.aa24Outstanding = aa24Kept
+}
+
+// aa24LingerMoved moves an outstanding identity to lingering and keeps the strict
+// horizon a fence already set for retained identities.
+func (aa24Host *AA24Host) aa24LingerMoved(aa24Identity AA24CommandIdentity) bool {
+	if aa24Host.aa24RetainedStrict {
+		aa24Horizon := aa24Host.aa24RetainedHorizon
+		return aa24Host.aa24Linger(aa24Identity, true, &aa24Horizon)
+	}
+	return aa24Host.aa24Linger(aa24Identity, false, nil)
 }
 
 // AA24SendCommand queues one command. A full data lane refuses it without any
@@ -2042,7 +2057,7 @@ func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23
 	aa24Retired := aa24Record.aa24Ref()
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24Linger(aa24Identity, false, nil) {
+		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24LingerMoved(aa24Identity) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}

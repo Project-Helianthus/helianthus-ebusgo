@@ -2449,3 +2449,63 @@ func TestAA24InvalidCompletionStatusKeepsActiveCommand(aa24T *aa24testing.T) {
 		aa24Want(aa24T, "valid completion", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(12)), nil)
 	}
 }
+
+// Catches a clock-fenced drain that stamps a refused plan's retirement with the
+// regressed tick: the host would reject it as a clock regression after the worker
+// dequeued the revoke, leaving the plan quarantined.
+func TestAA24FencedDrainStampsRetirementWithTrustedTick(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Refused := aa24FixtureRef(2)
+	aa24ArenaStart := aa24Pair.aa24Host.aa24Lanes[0].aa24ArenaLayout.AA24ArenaOffset + aa24BuildBytes
+	aa24Want(aa24T, "publish refused", aa24Pair.aa24Host.AA24PublishPlan(aa24Refused, aa24ArenaStart, 8, aa24At(11)), nil)
+	aa24Pair.aa24Worker.aa24RefusedRefs = append(aa24Pair.aa24Worker.aa24RefusedRefs, aa24Refused)
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Refused, aa24At(12)), nil)
+	aa24Want(aa24T, "regressed worker clock", aa24Pair.aa24Worker.AA24PollControl(aa24At(5)), ErrAA24Clock)
+	for aa24Tick := AA23Tick(20); aa24Tick < 24; aa24Tick++ {
+		if _, _, aa24Err := aa24Pair.aa24Poll(aa24Tick); aa24Err != nil {
+			aa24T.Fatalf("host poll %d: %v", aa24Tick, aa24Err)
+		}
+	}
+	for _, aa24Held := range aa24Pair.aa24Host.AA24QuarantinedPlans(nil) {
+		if aa24Held.aa24Matches(aa24Refused) {
+			aa24T.Fatal("refused plan stayed quarantined")
+		}
+	}
+}
+
+// Catches a retirement acknowledgement that moves a retained fence-cancelled identity
+// to lingering with a fresh non-strict horizon: its post-fence completion would be
+// accepted.
+func TestAA24RetirementKeepsRetainedFenceHorizon(aa24T *aa24testing.T) {
+	aa24Mem := aa24FixtureMemory(aa24FixtureBytes())
+	aa24Config := aa24FixtureConfig
+	aa24Config.AA24Lanes[AA24LaneWorkerData-1].AA24Capacity = 2
+	aa24Expected, _, aa24Err := AA24InitMapping(aa24Mem, aa24FixtureBinding(), aa24Config, aa24FixtureLimits)
+	if aa24Err != nil {
+		aa24T.Fatalf("init: %v", aa24Err)
+	}
+	aa24Pair := aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+	aa24Ref := aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24Host.aa24Lingering = append(aa24Pair.aa24Host.aa24Lingering[:0], aa24Lingered{aa24Horizon: 1}, aa24Lingered{aa24Horizon: 1})
+	aa24Pair.aa24Host.aa24Lingering = aa24Pair.aa24Host.aa24Lingering[:cap(aa24Pair.aa24Host.aa24Lingering)]
+	aa24Early := aa24Pair.aa24Admit(1, 1, 10)
+	aa24Want(aa24T, "early complete", aa24Pair.aa24Worker.AA24Complete(aa24Early, AA24StatusAccepted, aa24At(10)), nil)
+	aa24Identity := aa24Pair.aa24Admit(1, 2, 10)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(11)), nil)
+	aa24Want(aa24T, "complete after fence", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(12)), nil)
+	// The older evidence drains first, so the retirement finds lingering room.
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(13)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("older evidence: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(14)), nil)
+	aa24Want(aa24T, "worker reads stop and revoke", aa24Pair.aa24Worker.AA24PollControl(aa24At(15)), nil)
+	aa24Want(aa24T, "ack", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(16)), nil)
+	for aa24Tick := AA23Tick(17); aa24Tick < 24; aa24Tick++ {
+		aa24Delivery, aa24OK, aa24Err = aa24Pair.aa24Poll(aa24Tick)
+		if aa24OK && aa24Delivery.AA24Record.AA24Kind == AA24RecordCompletion && aa24Delivery.AA24Record.AA24OwnerToken == 2 {
+			aa24T.Fatalf("post-fence completion accepted: %+v %v", aa24Delivery, aa24Err)
+		}
+	}
+}
