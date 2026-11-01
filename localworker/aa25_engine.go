@@ -549,7 +549,8 @@ func (aa25Engine *AA25Engine) aa25BeginCharacter(aa25Index, aa25Now uint64) {
 	// A start seen once every response symbol has echoed is the awaited final
 	// symbol, not an extra echo: complete the response before judging it.
 	if aa25Engine.aa25TXState == aa25TXActive && aa25Engine.aa25TXBit == uint64(aa25Engine.aa25Pinned.aa25WireLen)*aa25BitsPerCharacter &&
-		aa25Engine.aa25EchoIndex == uint64(aa25Engine.aa25Pinned.aa25WireLen) {
+		aa25Engine.aa25EchoIndex == uint64(aa25Engine.aa25Pinned.aa25WireLen) &&
+		aa25Now >= aa25Engine.aa25TXDeadline(aa25Engine.aa25TXBit) {
 		aa25Engine.aa25CompleteTX(aa25Now)
 	}
 	aa25Engine.aa25CharEcho = aa25Engine.aa25TXState == aa25TXActive

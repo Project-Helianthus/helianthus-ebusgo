@@ -1935,6 +1935,45 @@ func TestAA25FinalSymbolAtResponseBoundaryIsNotUnsolicitedEcho(aa25T *aa25testin
 	}
 }
 
+func TestAA25StartBeforeResponseEndIsUnsolicited(aa25T *aa25testing.T) {
+	// The initiator's start is observed 0, 1 or 3 samples relative to the end of
+	// the response's last character. Mutation caught: completing the response
+	// from the start shortcut without requiring the completion deadline, which
+	// publishes TXComplete early and accepts the early symbol as a final ACK.
+	for _, aa25Case := range []struct {
+		aa25Name     string
+		aa25EarlyBy  uint64
+		aa25Unsolict bool
+	}{{"control-at-boundary", 0, false}, {"one-sample-early", 1, true}, {"three-samples-early", 3, true}} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			aa25Config := aa25TestConfig()
+			aa25Config.AA25TickHz = 24_000_000
+			aa25Self := aa25NewBench(aa25T, aa25Config)
+			aa25Prepared := aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0xAB)
+			aa25Wire := aa25PreparedWire(aa25Prepared)
+			aa25End := aa25Self.aa25SendRequest(aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, 0x01))
+			aa25Self.aa25RunUntilEvent(AA25EventAdmitted, aa25TickAfter(aa25End, 2000, aa25Self))
+			aa25Start := aa25Self.aa25FinalStart()
+			aa25Boundary := aa25Rat(aa25Start+aa25Self.aa25Config.AA25TurnaroundTicks, 1)
+			aa25Span := aa25Rat(10+10*uint64(len(aa25Wire)), 1)
+			aa25Boundary.Add(aa25Boundary, aa25Span.Mul(aa25Span, aa25Rat(aa25Self.aa25Hz, 2400)))
+			aa25Boundary.Sub(aa25Boundary, aa25Rat(aa25Case.aa25EarlyBy*(aa25Self.aa25Hz/24000), 1))
+			aa25SymbolEnd := aa25Self.aa25Send(aa25Boundary, 0xFF)
+			aa25Self.aa25Run(aa25TickAfter(aa25SymbolEnd, 2000, aa25Self))
+			if aa25Got := aa25Self.aa25HasFault(AA25FaultEchoUnsolicited); aa25Got != aa25Case.aa25Unsolict {
+				aa25T.Fatalf("aa25 unsolicited fault %v want %v (faults %v)", aa25Got, aa25Case.aa25Unsolict, aa25Self.aa25Faults())
+			}
+			aa25Completes := len(aa25Self.aa25Select(AA25EventTXComplete))
+			if aa25Case.aa25Unsolict && aa25Completes != 0 {
+				aa25T.Fatalf("aa25 completes %d before the response end", aa25Completes)
+			}
+			if !aa25Case.aa25Unsolict && aa25Completes != 2 {
+				aa25T.Fatalf("aa25 completes %d; want 2 (response then NACK resend)", aa25Completes)
+			}
+		})
+	}
+}
+
 func TestAA25WithdrawalDuringTransmitCancelsNackRetransmit(aa25T *aa25testing.T) {
 	// Withdrawal arrives while the response is on the wire; the response still
 	// finishes. Mutation caught: letting completion enter the final-ACK wait
