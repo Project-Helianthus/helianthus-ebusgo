@@ -2565,3 +2565,88 @@ func TestAA24ControlDeadlineStartsWithBacklogAfterIdle(aa24T *aa24testing.T) {
 		})
 	}
 }
+
+// Catches an ordinal accounting that appends an early control ordinal again: two
+// retirement acknowledgements carrying the same ordinal would both be accepted.
+func TestAA24DuplicateEarlyControlOrdinalIsRejected(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Host := aa24Pair.aa24Host
+	if !aa24Host.aa24AccountSequence(2, true) {
+		aa24T.Fatal("first early control ordinal must be explained")
+	}
+	if aa24Host.aa24AccountSequence(2, true) {
+		aa24T.Fatal("a repeated early control ordinal was accepted")
+	}
+	if len(aa24Host.aa24Explained) != 1 {
+		aa24T.Fatalf("explained list holds %d entries, want 1", len(aa24Host.aa24Explained))
+	}
+	if !aa24Host.aa24AccountSequence(1, false) || aa24Host.aa24NextCapture != 3 {
+		aa24T.Fatalf("positive control: next capture %d, want 3", aa24Host.aa24NextCapture)
+	}
+}
+
+// Catches a completion that skips the deadline check: with equality meaning expired,
+// completing exactly at the owner or request deadline without a prior admitted output
+// must be refused before a sequence is allocated and must clear the active command.
+func TestAA24CompleteAtDeadlineIsRefused(aa24T *aa24testing.T) {
+	for _, aa24Case := range []struct {
+		aa24Name   string
+		aa24Mutate func(*AA24CommandIdentity)
+	}{
+		{"request deadline", func(aa24Identity *AA24CommandIdentity) { aa24Identity.AA24RequestDeadline = 100 }},
+		{"owner expiry", func(aa24Identity *AA24CommandIdentity) { aa24Identity.AA24OwnerExpiry = 100 }},
+	} {
+		aa24T.Run(aa24Case.aa24Name, func(aa24T *aa24testing.T) {
+			aa24Pair := aa24NewPair(aa24T)
+			aa24Pair.aa24Publish(1, 10)
+			aa24Identity := aa24FixtureCommand(1, 1)
+			aa24Case.aa24Mutate(&aa24Identity)
+			aa24Want(aa24T, "send", aa24Pair.aa24Host.AA24SendCommand(aa24Identity, []byte{1}, aa24At(11)), nil)
+			if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(12)); aa24Err != nil || !aa24OK {
+				aa24T.Fatalf("next command: %v %v", aa24OK, aa24Err)
+			}
+			aa24Next := aa24Pair.aa24Worker.aa24NextSequence
+			aa24Want(aa24T, "complete at the deadline", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusRetired, aa24At(100)), ErrAA24Expired)
+			if aa24Pair.aa24Worker.aa24NextSequence != aa24Next || aa24Pair.aa24Worker.aa24HasActive {
+				aa24T.Fatalf("sequence %d (want %d) active %v", aa24Pair.aa24Worker.aa24NextSequence, aa24Next, aa24Pair.aa24Worker.aa24HasActive)
+			}
+		})
+	}
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Identity := aa24Pair.aa24Admit(1, 1, 11)
+	aa24Want(aa24T, "positive control: complete before the deadline", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusRetired, aa24At(12)), nil)
+}
+
+// Catches a latched clock-fence service branch that skips the retirement retry: the
+// queued exact retirement of a refused publication must be emitted once the worker
+// control lane drains, even while the regressed clock stays latched.
+func TestAA24ClockFenceStillRetriesRetirement(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Worker := aa24Pair.aa24Worker
+	for aa24Plan := AA23PlanGeneration(1); aa24Plan <= 2; aa24Plan++ {
+		aa24Tick := AA23Tick(10 * aa24Plan)
+		aa24Ref := aa24Pair.aa24Publish(aa24Plan, aa24Tick)
+		aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(aa24Tick+1)), nil)
+		aa24Want(aa24T, "worker poll", aa24Worker.AA24PollControl(aa24At(aa24Tick+1)), nil)
+		aa24Want(aa24T, "ack", aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(aa24Tick+2)), nil)
+	}
+	aa24Refused := aa24FixtureRef(3)
+	aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs, aa24Refused)
+	aa24Record := AA24Record{AA24Kind: AA24RecordRevoke}
+	aa24Record.aa24ApplyRef(aa24Refused)
+	aa24Want(aa24T, "revoke of the refused plan", aa24Pair.aa24Host.aa24WriteControl(&aa24Record), nil)
+	aa24Want(aa24T, "worker poll on saturated control", aa24Worker.AA24PollControl(aa24At(23)), nil)
+	if len(aa24Worker.aa24RetireRetry) != 1 {
+		aa24T.Fatalf("retry queue %d, want 1", len(aa24Worker.aa24RetireRetry))
+	}
+	for aa24Tick := AA23Tick(24); aa24Tick < 27; aa24Tick++ {
+		if _, aa24OK, aa24Err := aa24Pair.aa24Poll(aa24Tick); !aa24OK || aa24Err != nil {
+			aa24T.Fatalf("host poll: %v %v", aa24OK, aa24Err)
+		}
+	}
+	aa24Want(aa24T, "regressed worker clock", aa24Worker.AA24PollControl(aa24At(5)), ErrAA24Clock)
+	if len(aa24Worker.aa24RetireRetry) != 0 || len(aa24Worker.aa24RefusedRefs) != 0 {
+		aa24T.Fatalf("retirement not emitted under the latched fence: retry %d refused %d", len(aa24Worker.aa24RetireRetry), len(aa24Worker.aa24RefusedRefs))
+	}
+}

@@ -1134,6 +1134,7 @@ func (aa24Worker *AA24Worker) aa24Service(aa24Now AA23ClockReading) error {
 				aa24Trusted = aa24Worker.aa24LastCapture
 			}
 			aa24Worker.aa24DrainControl(aa24Trusted, true)
+			aa24Worker.aa24RetryRetired(aa24Trusted)
 		}
 		return aa24Err
 	}
@@ -1422,6 +1423,10 @@ func (aa24Worker *AA24Worker) AA24Complete(aa24Identity AA24CommandIdentity, aa2
 	}
 	if !aa24Worker.aa24HasActive || !aa24Worker.aa24Active.aa24Matches(aa24Identity) {
 		return ErrAA24Mismatch
+	}
+	if !aa24Identity.aa24Live(aa24Now.AA23Tick) {
+		aa24Worker.aa24HasActive = false
+		return ErrAA24Expired
 	}
 	aa24Sequence, aa24Err := aa24Worker.aa24AllocateSequence(aa24Now.AA23Tick)
 	if aa24Err != nil {
@@ -1922,6 +1927,11 @@ func (aa24Host *AA24Host) aa24AccountSequence(aa24Sequence uint64, aa24Control b
 	if aa24Sequence > aa24Host.aa24NextCapture {
 		if !aa24Control || len(aa24Host.aa24Explained) == cap(aa24Host.aa24Explained) {
 			return false
+		}
+		for _, aa24Held := range aa24Host.aa24Explained {
+			if aa24Held == aa24Sequence {
+				return false
+			}
 		}
 		aa24Host.aa24Explained = append(aa24Host.aa24Explained, aa24Sequence)
 		return true
