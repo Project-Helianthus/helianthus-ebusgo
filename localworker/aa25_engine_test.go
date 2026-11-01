@@ -2007,3 +2007,17 @@ func TestAA25WithdrawalDuringTransmitCancelsNackRetransmit(aa25T *aa25testing.T)
 		})
 	}
 }
+
+func TestAA25OfferRejectsUnpreparedResponse(aa25T *aa25testing.T) {
+	aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+	if aa25Self.aa25Engine.AA25OfferPrepared(AA25Prepared{AA25Generation: 1, AA25MatchPB: aa25TestPB, AA25MatchSB: aa25TestSB, AA25MatchNN: 1}) {
+		aa25T.Fatal("aa25 hand-built prepared value was queued")
+	}
+	if aa25Self.aa25Engine.AA25OfferPrepared(AA25Prepared{}) {
+		aa25T.Fatal("aa25 zero prepared value was queued")
+	}
+	aa25Valid, aa25Err := AA25PrepareResponse(1, aa25TestPB, aa25TestSB, 1, []byte{0xAB})
+	if aa25Err != nil || !aa25Self.aa25Engine.AA25OfferPrepared(aa25Valid) {
+		aa25T.Fatalf("aa25 prepared value rejected: %v", aa25Err)
+	}
+}

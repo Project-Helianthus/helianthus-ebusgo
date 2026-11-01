@@ -404,8 +404,12 @@ func (aa25Engine *AA25Engine) AA25Stats() AA25Stats {
 }
 
 // AA25OfferPrepared queues a prepared response for bounded housekeeping. False
-// means the fixed queue is full; the offer is not retained.
+// means the fixed queue is full or the value was not produced by
+// AA25PrepareResponse; the offer is not retained.
 func (aa25Engine *AA25Engine) AA25OfferPrepared(aa25Prepared AA25Prepared) bool {
+	if aa25Prepared.AA25Generation == 0 || aa25Prepared.aa25WireLen == 0 {
+		return false
+	}
 	return aa25Engine.aa25PushControl(aa25Control{aa25Kind: aa25ControlOffer, aa25Prepared: aa25Prepared})
 }
 
