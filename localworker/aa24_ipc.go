@@ -860,6 +860,9 @@ func (aa24Lane *aa24Lane) aa24Read(aa24Dst []byte) (AA24Record, bool, error) {
 	if aa24PayloadBytes > aa24Lane.aa24Layout.aa24SlotBytes-aa24EnvelopeBytes {
 		return AA24Record{}, false, ErrAA24Truncated
 	}
+	if aa24PayloadBytes != 0 && (aa24Lane.aa24Layout.aa24Kind == AA24LaneHostControl || aa24Lane.aa24Layout.aa24Kind == AA24LaneWorkerControl) {
+		return AA24Record{}, false, ErrAA24Record
+	}
 	if aa24PayloadBytes > aa24Lane.aa24PayloadCap {
 		return AA24Record{}, false, ErrAA24Oversize
 	}
@@ -1346,7 +1349,10 @@ func (aa24Worker *AA24Worker) AA24NextCommand(aa24Dst []byte, aa24Now AA23ClockR
 		return AA24Delivery{}, false, ErrAA24OutputFenced
 	}
 	if aa24Worker.aa24HasActive {
-		return AA24Delivery{}, false, nil
+		if aa24Worker.aa24Active.aa24Live(aa24Now.AA23Tick) {
+			return AA24Delivery{}, false, nil
+		}
+		aa24Worker.aa24HasActive = false
 	}
 	aa24Data := aa24Worker.aa24Lane(AA24LaneHostData)
 	aa24Record, aa24OK, aa24Err := aa24Data.aa24Read(aa24Dst)

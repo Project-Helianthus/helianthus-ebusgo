@@ -2650,3 +2650,38 @@ func TestAA24ClockFenceStillRetriesRetirement(aa24T *aa24testing.T) {
 		aa24T.Fatalf("retirement not emitted under the latched fence: retry %d refused %d", len(aa24Worker.aa24RetireRetry), len(aa24Worker.aa24RefusedRefs))
 	}
 }
+
+// Catches: leaving an expired active command in place so AA24NextCommand never
+// dequeues later work.
+func TestAA24NextCommandRetiresExpiredActiveCommand(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Short := aa24FixtureCommand(1, 1)
+	aa24Short.AA24RequestDeadline = 50
+	aa24Want(aa24T, "send short", aa24Pair.aa24Host.AA24SendCommand(aa24Short, []byte{1}, aa24At(10)), nil)
+	aa24Want(aa24T, "send next", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 2), []byte{2}, aa24At(10)), nil)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(11)); !aa24OK || aa24Err != nil {
+		aa24T.Fatalf("first: %v %v", aa24OK, aa24Err)
+	}
+	if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(49)); aa24OK || aa24Err != nil {
+		aa24T.Fatalf("still active: %v %v", aa24OK, aa24Err)
+	}
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(50))
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24OwnerToken != 2 {
+		aa24T.Fatalf("after expiry: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
+// Catches: reporting a buffer shortfall before refusing a payload on a
+// payload-free control record, which leaves the corrupt slot retryable.
+func TestAA24ControlRecordPayloadFencesWithZeroCapacityDestination(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
+	aa24Lane := aa24Pair.aa24Host.aa24Lane(AA24LaneWorkerControl)
+	aa24binarytest.LittleEndian.PutUint32(aa24Lane.aa24Slot(0)[4:], 4)
+	_, aa24OK, aa24Err := aa24Pair.aa24Host.AA24Poll(nil, aa24At(11))
+	aa24Want(aa24T, "payload on control", aa24Err, ErrAA24Record)
+	if aa24OK || aa24Pair.aa24Host.AA24Fence().AA24Reason != AA24FenceCorruption {
+		aa24T.Fatalf("fence %+v", aa24Pair.aa24Host.AA24Fence())
+	}
+}
