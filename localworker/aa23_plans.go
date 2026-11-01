@@ -54,7 +54,7 @@ var (
 	ErrAA23UnknownSubscriber    = aa23errors.New("localworker: subscriber is not open")
 	ErrAA23Capacity             = aa23errors.New("localworker: bounded capacity exhausted")
 	ErrAA23PhysicalConflict     = aa23errors.New("localworker: known physical address conflict")
-	ErrAA23MasterConflict       = aa23errors.New("localworker: master identity held by another subscriber")
+	ErrAA23MasterConflict       = aa23errors.New("localworker: initiator identity held by another subscriber")
 	ErrAA23ClockClosed          = aa23errors.New("localworker: clock regression or incomparable domain closed admission")
 	ErrAA23Expired              = aa23errors.New("localworker: lease or plan expired")
 	ErrAA23LeaseTooLong         = aa23errors.New("localworker: lease exceeds the configured bound")
@@ -193,7 +193,7 @@ func (aa23Policy AA23FailurePolicy) aa23Validate() error {
 }
 
 // AA23Registration is the detached content of one registration. It grants a
-// target address only: no master identity, arbitration or general transmit right.
+// target address only: no initiator identity, arbitration or general transmit right.
 type AA23Registration struct {
 	AA23Key               AA23RegistrationKey
 	AA23LeaseExpiry       AA23Tick
@@ -683,7 +683,7 @@ type aa23SubscriberRecord struct {
 	aa23Registrations uint32
 }
 
-// AA23Registry is the host side: registrations, master identities, known
+// AA23Registry is the host side: registrations, initiator identities, known
 // conflicts and the plan publisher. Every table is sized at construction.
 type AA23Registry struct {
 	aa23Limits        AA23Limits
@@ -970,7 +970,7 @@ func (aa23Registry *AA23Registry) AA23Unregister(aa23Key AA23RegistrationKey) AA
 	return aa23Registry.AA23Registration(aa23Key).AA23State
 }
 
-// AA23DisconnectSubscriber retires every registration and master identity of a
+// AA23DisconnectSubscriber retires every registration and initiator identity of a
 // subscriber incarnation. The identity is closed for good; repeating is harmless.
 func (aa23Registry *AA23Registry) AA23DisconnectSubscriber(aa23ID AA23SubscriberID) {
 	aa23Subscriber := aa23Registry.aa23FindSubscriber(aa23ID)
@@ -991,7 +991,7 @@ func (aa23Registry *AA23Registry) AA23DisconnectSubscriber(aa23ID AA23Subscriber
 	}
 }
 
-// AA23Reset retires every registration and master identity. Subscribers stay
+// AA23Reset retires every registration and initiator identity. Subscribers stay
 // open, and every high-water mark survives so no identity can be reused.
 func (aa23Registry *AA23Registry) AA23Reset() {
 	aa23Registry.aa23ReleaseMastersWhere(0)
@@ -1012,7 +1012,7 @@ func (aa23Registry *AA23Registry) aa23ReleaseMastersWhere(aa23ID AA23SubscriberI
 	}
 }
 
-// AA23BindMaster records a local master identity. It is kept apart from target
+// AA23BindMaster records a local initiator identity. It is kept apart from target
 // registration: neither grants, releases or implies the other, and this table
 // performs no arbitration. A repeat by the same owner is harmless.
 func (aa23Registry *AA23Registry) AA23BindMaster(aa23ID AA23SubscriberID, aa23Address byte) error {
@@ -1040,7 +1040,7 @@ func (aa23Registry *AA23Registry) AA23BindMaster(aa23ID AA23SubscriberID, aa23Ad
 	return nil
 }
 
-// AA23ReleaseMaster drops a master identity held by exactly this owner.
+// AA23ReleaseMaster drops a initiator identity held by exactly this owner.
 func (aa23Registry *AA23Registry) AA23ReleaseMaster(aa23ID AA23SubscriberID, aa23Address byte) {
 	if aa23ID != 0 && aa23Registry.aa23Masters[aa23Address] == aa23ID {
 		aa23Registry.aa23Masters[aa23Address] = 0
@@ -1048,7 +1048,7 @@ func (aa23Registry *AA23Registry) AA23ReleaseMaster(aa23ID AA23SubscriberID, aa2
 	}
 }
 
-// AA23MasterOwner reports the subscriber holding a master identity, zero if none.
+// AA23MasterOwner reports the subscriber holding a initiator identity, zero if none.
 func (aa23Registry *AA23Registry) AA23MasterOwner(aa23Address byte) AA23SubscriberID {
 	return aa23Registry.aa23Masters[aa23Address]
 }
@@ -1410,6 +1410,15 @@ func (aa23Registry *AA23Registry) AA23PublishPrepared(aa23Ref AA23SlotRef, aa23N
 		return AA23PublishNotice{}, aa23Err
 	}
 	if aa23Record.aa23Published >= 0 {
+		// Prepared out of order: a later generation is already current, so this
+		// older one can never become current. It was never visible, so it is
+		// returned like any other stale candidate.
+		if aa23Current.aa23Identity.AA23Plan <= aa23Registry.aa23Pool.aa23Slots[aa23Record.aa23Published].aa23Identity.AA23Plan {
+			if aa23Current.aa23Release() != nil {
+				aa23Current.aa23State = AA23SlotReclaimable
+			}
+			return AA23PublishNotice{}, ErrAA23StaleGeneration
+		}
 		aa23Registry.aa23RetireSlot(&aa23Registry.aa23Pool.aa23Slots[aa23Record.aa23Published], AA23RetireSuperseded)
 	}
 	aa23Current.aa23State = AA23SlotPublished

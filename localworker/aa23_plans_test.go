@@ -524,10 +524,10 @@ func TestAA23AddressHeldUntilPredecessorAuthoritySettled(aa23T *aa23testing.T) {
 func TestAA23DisconnectRetiresOnlyThatSubscriber(aa23T *aa23testing.T) {
 	aa23F := aa23NewFixture(aa23T)
 	aa23F.aa23Install(1, 0xA1)
-	aa23WantOK(aa23T, "master", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator))
+	aa23WantOK(aa23T, "initiator", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator))
 	aa23Other, aa23Err := aa23F.aa23Registry.AA23OpenSubscriber()
 	aa23WantOK(aa23T, "open", aa23Err)
-	aa23WantOK(aa23T, "other master", aa23F.aa23Registry.AA23BindMaster(aa23Other, aa23FixtureOtherSource))
+	aa23WantOK(aa23T, "other initiator", aa23F.aa23Registry.AA23BindMaster(aa23Other, aa23FixtureOtherSource))
 	aa23OtherKey := AA23RegistrationKey{AA23Subscriber: aa23Other, AA23Address: aa23FixtureOtherAddress, AA23Epoch: 1}
 	aa23F.aa23MustRegister(aa23F.aa23Registration(aa23OtherKey))
 
@@ -539,10 +539,10 @@ func TestAA23DisconnectRetiresOnlyThatSubscriber(aa23T *aa23testing.T) {
 		aa23T.Fatal("unrelated registration retired")
 	}
 	if aa23F.aa23Registry.AA23MasterOwner(aa23FixtureInitiator) != 0 {
-		aa23T.Fatal("own master identity survived disconnect")
+		aa23T.Fatal("own initiator identity survived disconnect")
 	}
 	if aa23F.aa23Registry.AA23MasterOwner(aa23FixtureOtherSource) != aa23Other {
-		aa23T.Fatal("unrelated master identity released")
+		aa23T.Fatal("unrelated initiator identity released")
 	}
 	aa23Row := aa23F.aa23Registry.aa23FindSubscriber(aa23F.aa23Subscriber)
 	if aa23Row == nil {
@@ -563,13 +563,13 @@ func TestAA23DisconnectRetiresOnlyThatSubscriber(aa23T *aa23testing.T) {
 func TestAA23ResetRetiresAllAndKeepsHighWaterMarks(aa23T *aa23testing.T) {
 	aa23F := aa23NewFixture(aa23T)
 	aa23F.aa23Install(1, 0xA1)
-	aa23WantOK(aa23T, "master", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator))
+	aa23WantOK(aa23T, "initiator", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator))
 	aa23F.aa23Registry.AA23Reset()
 	if aa23F.aa23Registry.AA23Registration(aa23F.aa23Key).AA23State != AA23RegistrationRetiring {
 		aa23T.Fatal("reset did not retire")
 	}
 	if aa23F.aa23Registry.AA23MasterOwner(aa23FixtureInitiator) != 0 {
-		aa23T.Fatal("reset kept a master identity")
+		aa23T.Fatal("reset kept a initiator identity")
 	}
 	aa23F.aa23Settle()
 	_, aa23Err := aa23F.aa23Registry.AA23Register(aa23F.aa23Registration(aa23F.aa23Key), aa23F.aa23Now())
@@ -587,9 +587,9 @@ func TestAA23ResetRetiresAllAndKeepsHighWaterMarks(aa23T *aa23testing.T) {
 func TestAA23MasterIdentityIsSeparateFromTargetRegistration(aa23T *aa23testing.T) {
 	aa23F := aa23NewFixture(aa23T)
 	if aa23F.aa23Registry.AA23MasterOwner(aa23FixtureInitiator) != 0 {
-		aa23T.Fatal("registration implied a master identity")
+		aa23T.Fatal("registration implied a initiator identity")
 	}
-	aa23WantErr(aa23T, "target as master", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureAddress), ErrAA23InvalidAddress)
+	aa23WantErr(aa23T, "target as initiator", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureAddress), ErrAA23InvalidAddress)
 	aa23WantErr(aa23T, "unknown owner", aa23F.aa23Registry.AA23BindMaster(99, aa23FixtureInitiator), ErrAA23UnknownSubscriber)
 	aa23WantOK(aa23T, "bind", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator))
 	aa23WantOK(aa23T, "repeat", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator))
@@ -602,17 +602,17 @@ func TestAA23MasterIdentityIsSeparateFromTargetRegistration(aa23T *aa23testing.T
 
 	aa23F.aa23Registry.AA23Unregister(aa23F.aa23Key)
 	if aa23F.aa23Registry.AA23MasterOwner(aa23FixtureInitiator) != aa23F.aa23Subscriber {
-		aa23T.Fatal("unregistering a target released the master identity")
+		aa23T.Fatal("unregistering a target released the initiator identity")
 	}
 	aa23F.aa23Registry.AA23ReleaseMaster(aa23Other, aa23FixtureInitiator)
 	if aa23F.aa23Registry.AA23MasterOwner(aa23FixtureInitiator) != aa23F.aa23Subscriber {
-		aa23T.Fatal("another owner released the master identity")
+		aa23T.Fatal("another owner released the initiator identity")
 	}
 	aa23Next := AA23RegistrationKey{AA23Subscriber: aa23F.aa23Subscriber, AA23Address: aa23FixtureAddress, AA23Epoch: 2}
 	aa23F.aa23MustRegister(aa23F.aa23Registration(aa23Next))
 	aa23F.aa23Registry.AA23ReleaseMaster(aa23F.aa23Subscriber, aa23FixtureInitiator)
 	if aa23F.aa23Registry.AA23Registration(aa23Next).AA23State != AA23RegistrationActive {
-		aa23T.Fatal("releasing a master identity retired a target registration")
+		aa23T.Fatal("releasing a initiator identity retired a target registration")
 	}
 	aa23WantOK(aa23T, "first", aa23F.aa23Registry.AA23BindMaster(aa23Other, 0x01))
 	aa23WantOK(aa23T, "second", aa23F.aa23Registry.AA23BindMaster(aa23Other, 0x03))
@@ -643,7 +643,7 @@ func TestAA23KnownPhysicalConflictInhibitsAndClearRevivesNothing(aa23T *aa23test
 	_, aa23Err = aa23F.aa23Registry.AA23Register(aa23Other, aa23F.aa23Now())
 	aa23WantErr(aa23T, "register under conflict", aa23Err, ErrAA23PhysicalConflict)
 	aa23F.aa23Registry.AA23MarkPhysicalConflict(aa23FixtureInitiator)
-	aa23WantErr(aa23T, "master under conflict", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator), ErrAA23PhysicalConflict)
+	aa23WantErr(aa23T, "initiator under conflict", aa23F.aa23Registry.AA23BindMaster(aa23F.aa23Subscriber, aa23FixtureInitiator), ErrAA23PhysicalConflict)
 	aa23F.aa23Registry.AA23ClearPhysicalConflict(aa23FixtureOtherAddress)
 	aa23F.aa23MustRegister(aa23Other)
 }
@@ -1996,5 +1996,34 @@ func TestAA23ExportedAPIIsFrozen(aa23T *aa23testing.T) {
 		if !aa23reflect.DeepEqual(aa23Got, aa23Expected) {
 			aa23T.Fatalf("%s methods changed: %v", aa23Type, aa23Got)
 		}
+	}
+}
+
+// Catches a publication that does not compare against the registration's current
+// generation: publishing 1 after 2 would retire 2 and strand the worker.
+func TestAA23OutOfOrderPublicationIsRefused(aa23T *aa23testing.T) {
+	aa23F := aa23NewFixture(aa23T)
+	aa23Older, aa23Err := aa23F.aa23Registry.AA23PreparePlan(aa23F.aa23Candidate(1, 0xB1), aa23F.aa23Now())
+	aa23WantOK(aa23T, "prepare 1", aa23Err)
+	aa23Newer, aa23Err := aa23F.aa23Registry.AA23PreparePlan(aa23F.aa23Candidate(2, 0xB2), aa23F.aa23Now())
+	aa23WantOK(aa23T, "prepare 2", aa23Err)
+	aa23Notice, aa23Err := aa23F.aa23Registry.AA23PublishPrepared(aa23Newer, aa23F.aa23Now())
+	aa23WantOK(aa23T, "publish 2", aa23Err)
+	aa23Ack, aa23Ready, aa23Err := aa23F.aa23View.AA23AdoptPlan(aa23Notice, aa23F.aa23Now())
+	aa23WantOK(aa23T, "adopt 2", aa23Err)
+	if aa23Ready {
+		aa23WantOK(aa23T, "ack 2", aa23F.aa23Registry.AA23ObserveAcknowledgement(aa23Ack))
+	}
+	_, aa23Err = aa23F.aa23Registry.AA23PublishPrepared(aa23Older, aa23F.aa23Now())
+	aa23WantErr(aa23T, "publish 1 after 2", aa23Err, ErrAA23StaleGeneration)
+	aa23Pool := aa23F.aa23Registry.AA23Pool()
+	if aa23Pool.AA23SlotState(aa23Newer.AA23Index) != AA23SlotPublished {
+		aa23T.Fatal("stale publication retired the current generation")
+	}
+	if aa23Pool.AA23SlotState(aa23Older.AA23Index) != AA23SlotFree {
+		aa23T.Fatal("stale candidate slot not returned")
+	}
+	if aa23Pin := aa23F.aa23MustSelect(); aa23Pin.AA23Key().AA23Identity.AA23Plan != 2 {
+		aa23T.Fatalf("selected %+v", aa23Pin.AA23Key())
 	}
 }
