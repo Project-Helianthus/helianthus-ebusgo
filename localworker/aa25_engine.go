@@ -354,6 +354,7 @@ type AA25Engine struct {
 	aa25TXBit       uint64
 	aa25TXBase      uint64
 	aa25TXRetried   bool
+	aa25AckSince    uint64
 	aa25TXLevel     AA25Level
 	aa25EchoIndex   uint64
 	aa25LossPending bool
@@ -426,7 +427,13 @@ func (aa25Engine *AA25Engine) aa25PushControl(aa25Item aa25Control) bool {
 // echo deadline for a caller that polls toward it.
 func (aa25Engine *AA25Engine) AA25NextDeadlineTick() uint64 {
 	aa25Next := aa25Engine.aa25NextDeadline
-	if aa25Engine.aa25TXState == aa25TXIdle || aa25Engine.aa25TXState == aa25TXAwaitAck {
+	if aa25Engine.aa25TXState == aa25TXIdle {
+		return aa25Next
+	}
+	if aa25Engine.aa25TXState == aa25TXAwaitAck {
+		if aa25Candidate := aa25Engine.aa25AckDeadline(); aa25Candidate < aa25Next {
+			aa25Next = aa25Candidate
+		}
 		return aa25Next
 	}
 	aa25Length := uint64(aa25Engine.aa25Pinned.aa25WireLen)
@@ -840,7 +847,13 @@ func (aa25Engine *AA25Engine) aa25TXBitLevel(aa25Bit uint64) AA25Level {
 
 func (aa25Engine *AA25Engine) aa25StepTX(aa25Now uint64) {
 	switch aa25Engine.aa25TXState {
-	case aa25TXIdle, aa25TXAwaitAck:
+	case aa25TXIdle:
+		return
+	case aa25TXAwaitAck:
+		// The final-ACK wait is bounded; a late symbol is not this exchange's NACK.
+		if aa25Now >= aa25Engine.aa25AckDeadline() {
+			aa25Engine.aa25AbortTX(aa25Now)
+		}
 		return
 	case aa25TXWaiting:
 		if !aa25Engine.aa25FinalComplete || aa25Now < aa25Engine.aa25TXDeadline(aa25Engine.aa25TXBase) {
@@ -879,16 +892,23 @@ func (aa25Engine *AA25Engine) aa25StepTX(aa25Now uint64) {
 		// The pin stays until the initiator's final symbol: a NACK there
 		// retransmits the response portion once.
 		aa25Engine.aa25TXState = aa25TXAwaitAck
+		aa25Engine.aa25AckSince = aa25Now
 	}
+}
+
+// aa25AckDeadline is the end of the final-ACK wait: 200 ms of injected ticks.
+func (aa25Engine *AA25Engine) aa25AckDeadline() uint64 {
+	return aa25Engine.aa25AckSince + aa25Engine.aa25Config.AA25TickHz/5
 }
 
 // aa25HandleFinalAck consumes the initiator's symbol after the response. One
 // NACK resends the response portion on a fresh absolute schedule anchored to
 // that symbol; anything else ends the exchange. Never a retry loop.
 func (aa25Engine *AA25Engine) aa25HandleFinalAck(aa25Symbol byte, aa25Now uint64) {
+	aa25Expired := aa25Now >= aa25Engine.aa25AckDeadline()
 	aa25Engine.aa25TXState = aa25TXIdle
 	aa25Engine.aa25PinnedValid = false
-	if aa25Symbol != aa25SymbolNack {
+	if aa25Symbol != aa25SymbolNack || aa25Expired {
 		return
 	}
 	if aa25Engine.aa25TXRetried {
@@ -986,7 +1006,7 @@ func (aa25Engine *AA25Engine) aa25StepHousekeeping(aa25Now uint64) {
 		aa25Engine.aa25Stats.AA25Withdrawals++
 		// A response already on the wire keeps its pinned generation and finishes;
 		// anything not yet on the wire loses admission here.
-		if aa25Engine.aa25TXState == aa25TXWaiting {
+		if aa25Engine.aa25TXState == aa25TXWaiting || aa25Engine.aa25TXState == aa25TXAwaitAck {
 			aa25Engine.aa25AbortTX(aa25Now)
 		}
 		if aa25Engine.aa25TXState == aa25TXIdle {

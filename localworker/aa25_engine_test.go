@@ -1841,3 +1841,51 @@ func TestAA25RejectsRequestLengthAboveProtocolMaximum(aa25T *aa25testing.T) {
 		})
 	}
 }
+
+func TestAA25WithdrawalAfterCompleteDropsNackRetransmit(aa25T *aa25testing.T) {
+	// Mutation caught: leaving the final-ACK wait active across a withdrawal, so
+	// a later NACK resends a response whose admission was withdrawn.
+	aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+	aa25Prepared := aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0xAB)
+	aa25Wire := aa25PreparedWire(aa25Prepared)
+	aa25End := aa25Self.aa25SendRequest(aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, 0x01))
+	aa25Self.aa25RunUntilCompletes(1, aa25TickAfter(aa25End, 2000, aa25Self))
+	aa25Want := aa25Self.aa25ExpectedEdges(aa25Self.aa25FinalStart(), aa25Wire)
+	if !aa25Self.aa25Engine.AA25OfferWithdraw() {
+		aa25T.Fatal("aa25 withdraw refused")
+	}
+	aa25Self.aa25Step(aa25Self.aa25Now + 1)
+	aa25SymbolEnd := aa25Self.aa25QueueFinalSymbol(0xFF, 1)
+	aa25Self.aa25Run(aa25TickAfter(aa25SymbolEnd, 2000, aa25Self))
+	if !aa25EqualEdges(aa25Self.aa25Writes, aa25Want) {
+		aa25T.Fatalf("aa25 edges %v; want %v", aa25Self.aa25Writes, aa25Want)
+	}
+	if len(aa25Self.aa25Select(AA25EventTXComplete)) != 1 {
+		aa25T.Fatalf("aa25 completes %d; want 1", len(aa25Self.aa25Select(AA25EventTXComplete)))
+	}
+}
+
+func TestAA25FinalAckWaitExpiresBeforeLateNack(aa25T *aa25testing.T) {
+	// Each row sends a NACK after the same completed response. Mutation caught:
+	// an unbounded final-ACK wait that treats a stray 0xFF as a NACK.
+	for _, aa25Case := range []struct {
+		aa25Name   string
+		aa25Delay  uint64
+		aa25Resend bool
+	}{{"within-budget", 1000, true}, {"after-budget", 300_000_000, false}} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			aa25Self := aa25NewBench(aa25T, aa25TestConfig())
+			aa25Self.aa25Offer(1, aa25TestPB, aa25TestSB, 1, 0xAB)
+			aa25End := aa25Self.aa25SendRequest(aa25TestRequest(aa25TestResponder, aa25TestPB, aa25TestSB, 0x01))
+			aa25Self.aa25RunUntilCompletes(1, aa25TickAfter(aa25End, 2000, aa25Self))
+			aa25Done := aa25Self.aa25Select(AA25EventTXComplete)[0].AA25Tick
+			aa25Writes := len(aa25Self.aa25Writes)
+			aa25Self.aa25Run(aa25Done + aa25Case.aa25Delay)
+			aa25Symbol := aa25Self.aa25Send(aa25Rat(aa25Self.aa25Now, 1), 0xFF)
+			aa25Self.aa25Run(aa25TickAfter(aa25Symbol, 2000, aa25Self))
+			if aa25Resent := len(aa25Self.aa25Writes) > aa25Writes; aa25Resent != aa25Case.aa25Resend {
+				aa25T.Fatalf("aa25 resent %v want %v (faults %v)", aa25Resent, aa25Case.aa25Resend, aa25Self.aa25Faults())
+			}
+		})
+	}
+}
