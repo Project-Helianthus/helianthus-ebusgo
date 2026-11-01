@@ -2509,3 +2509,59 @@ func TestAA24RetirementKeepsRetainedFenceHorizon(aa24T *aa24testing.T) {
 		}
 	}
 }
+
+// Catches an idle service tick reused for a new backlog, and a timer reset by
+// another enqueue while the first acknowledgement remains unread.
+func TestAA24ControlDeadlineStartsWithBacklogAfterIdle(aa24T *aa24testing.T) {
+	for _, aa24Case := range []struct {
+		aa24Name    string
+		aa24Consume bool
+		aa24Append  bool
+	}{
+		{aa24Name: "host consumes acknowledgement", aa24Consume: true},
+		{aa24Name: "unread acknowledgement expires"},
+		{aa24Name: "another acknowledgement preserves deadline", aa24Append: true},
+	} {
+		aa24T.Run(aa24Case.aa24Name, func(aa24T *aa24testing.T) {
+			aa24Pair := aa24NewPair(aa24T)
+			aa24ArenaStart := aa24Pair.aa24Host.aa24Lanes[0].aa24ArenaLayout.AA24ArenaOffset + aa24BuildBytes
+			aa24Refs := []AA24PlanRef{aa24FixtureRef(1), aa24FixtureRef(2)}
+			for aa24Index := range aa24Refs {
+				aa24Refs[aa24Index].AA24PlanExpiry = 12
+				aa24Want(aa24T, "publish", aa24Pair.aa24Host.AA24PublishPlan(aa24Refs[aa24Index], aa24ArenaStart, 8, aa24At(10)), nil)
+			}
+			aa24Want(aa24T, "refuse expired plans", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+			if aa24Pair.aa24Worker.AA24PublishRefused() != 2 || len(aa24Pair.aa24Worker.aa24Adopted) != 0 {
+				aa24T.Fatal("positive control: both plans must be refused")
+			}
+			aa24Want(aa24T, "empty service", aa24Pair.aa24Worker.AA24PollControl(aa24At(20)), nil)
+			aa24Want(aa24T, "revoke after idle", aa24Pair.aa24Host.AA24RevokePlan(aa24Refs[0], aa24At(200)), nil)
+			aa24Want(aa24T, "enqueue retirement during service", aa24Pair.aa24Worker.AA24PollControl(aa24At(200)), nil)
+			if !aa24Pair.aa24Worker.AA24OutputOpen() {
+				aa24T.Fatalf("new backlog inherited idle time: %+v", aa24Pair.aa24Worker.AA24Fence())
+			}
+			if aa24Case.aa24Consume {
+				aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(201)
+				if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordAcknowledge || aa24Delivery.AA24Record.AA24Plan != aa24Refs[0].AA24Plan {
+					aa24T.Fatalf("retirement: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+				}
+			}
+			if aa24Case.aa24Append {
+				aa24Want(aa24T, "second revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Refs[1], aa24At(250)), nil)
+				aa24Want(aa24T, "second retirement", aa24Pair.aa24Worker.AA24PollControl(aa24At(250)), nil)
+			}
+			aa24Want(aa24T, "before deadline", aa24Pair.aa24Worker.AA24PollControl(aa24At(299)), nil)
+			if !aa24Pair.aa24Worker.AA24OutputOpen() {
+				aa24T.Fatalf("closed before full budget: %+v", aa24Pair.aa24Worker.AA24Fence())
+			}
+			aa24Want(aa24T, "at deadline", aa24Pair.aa24Worker.AA24PollControl(aa24At(300)), nil)
+			if aa24Case.aa24Consume {
+				if !aa24Pair.aa24Worker.AA24OutputOpen() {
+					aa24T.Fatalf("consumed backlog expired: %+v", aa24Pair.aa24Worker.AA24Fence())
+				}
+			} else if aa24Pair.aa24Worker.AA24Fence().AA24Reason != AA24FenceControlDeadline {
+				aa24T.Fatalf("unread backlog did not expire: %+v", aa24Pair.aa24Worker.AA24Fence())
+			}
+		})
+	}
+}

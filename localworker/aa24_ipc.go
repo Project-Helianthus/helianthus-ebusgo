@@ -829,6 +829,12 @@ func (aa24Lane *aa24Lane) aa24Write(aa24Record *AA24Record, aa24Reserve uint64) 
 	aa24Record.aa24Encode(aa24Lane.aa24Slot(aa24Producer))
 	aa24StoreRelease(aa24Lane.aa24Mem, aa24Lane.aa24Layout.aa24ProducerOffset, aa24Producer+1)
 	aa24Lane.aa24LocalProducer = aa24Producer + 1
+	if aa24Lane.aa24Layout.aa24Kind == AA24LaneWorkerControl && aa24Producer == aa24Lane.aa24LocalConsumer {
+		// An empty lane has no deadline. Start the new backlog's budget at
+		// this control record's trusted emission tick, not an idle service tick.
+		aa24Lane.aa24ProgressConsumer = aa24Lane.aa24LocalConsumer
+		aa24Lane.aa24ProgressTick = aa24Record.AA24CaptureTime
+	}
 	aa24Lane.aa24Bump(&aa24Lane.aa24Stats.AA24Enqueued)
 	if aa24Occupancy := aa24Producer + 1 - aa24Lane.aa24LocalConsumer; aa24Occupancy > aa24Lane.aa24Stats.AA24HighWater {
 		aa24Lane.aa24Stats.AA24HighWater = aa24Occupancy
