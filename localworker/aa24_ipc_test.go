@@ -2346,6 +2346,51 @@ func TestAA24FenceKeepsIdentityWhenLingeringIsFull(aa24T *aa24testing.T) {
 	}
 }
 
+// Catches a retained outstanding identity that skips the fence horizon: a completion
+// posted after the fence, reported as cancelled, would be accepted.
+func TestAA24FenceRetainedOutstandingRejectsPostFenceCompletion(aa24T *aa24testing.T) {
+	aa24Mem := aa24FixtureMemory(aa24FixtureBytes())
+	aa24Config := aa24FixtureConfig
+	aa24Config.AA24Lanes[AA24LaneWorkerData-1].AA24Capacity = 2
+	aa24Expected, _, aa24Err := AA24InitMapping(aa24Mem, aa24FixtureBinding(), aa24Config, aa24FixtureLimits)
+	if aa24Err != nil {
+		aa24T.Fatalf("init: %v", aa24Err)
+	}
+	aa24Pair := aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Pair.aa24Host.aa24Lingering = append(aa24Pair.aa24Host.aa24Lingering[:0], aa24Lingered{aa24Horizon: 1 << 40}, aa24Lingered{aa24Horizon: 1 << 40})
+	aa24Pair.aa24Host.aa24Lingering = aa24Pair.aa24Host.aa24Lingering[:cap(aa24Pair.aa24Host.aa24Lingering)]
+	aa24Early := aa24Pair.aa24Admit(1, 1, 10)
+	aa24Want(aa24T, "early complete", aa24Pair.aa24Worker.AA24Complete(aa24Early, AA24StatusAccepted, aa24At(10)), nil)
+	aa24Identity := aa24Pair.aa24Admit(1, 2, 10)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(11)), nil)
+	if len(aa24Pair.aa24Host.aa24Outstanding) != 2 {
+		aa24T.Fatalf("identities not retained: %+v", aa24Pair.aa24Host.aa24Outstanding)
+	}
+	aa24Want(aa24T, "complete after fence", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(12)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(13)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("pre-fence completion: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	aa24Delivery, aa24OK, aa24Err = aa24Pair.aa24Poll(14)
+	if aa24OK || !aa24errorstest.Is(aa24Err, ErrAA24Stale) {
+		aa24T.Fatalf("post-fence completion accepted: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
+// Catches a delayed termination notice after a graceful teardown that reads the
+// cleared lane mapping and panics.
+func TestAA24ObserveWorkerTerminatedAfterTeardownIsSafe(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(11)), nil)
+	aa24Want(aa24T, "worker reads stop", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	aa24Want(aa24T, "host teardown", aa24Pair.aa24Host.AA24Teardown(), nil)
+	aa24Pair.aa24Host.AA24ObserveWorkerTerminated()
+	if aa24Pair.aa24Host.AA24OutputOpen() {
+		aa24T.Fatal("detached host reports open output")
+	}
+}
+
 // Catches a settlement or teardown that ignores a revocation queued behind the stop:
 // the quarantined plan would be cleared without its exact retirement acknowledgement.
 func TestAA24RevokeAfterStopMustBeReadBeforeTeardown(aa24T *aa24testing.T) {

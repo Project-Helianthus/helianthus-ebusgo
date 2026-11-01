@@ -1575,6 +1575,10 @@ type AA24Host struct {
 	aa24LastControlTime AA23Tick
 	aa24LastDataCapture AA23Tick
 	aa24Detached        bool
+	// aa24RetainedStrict marks outstanding identities kept through a fence; they match
+	// a completion only while the data consumer has not passed aa24RetainedHorizon.
+	aa24RetainedStrict  bool
+	aa24RetainedHorizon uint64
 }
 
 // AA24AttachHost validates a fresh mapping before any lane becomes reachable.
@@ -1639,7 +1643,9 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	// before the fence still matches instead of draining as stale.
 	// An entry already lingering from expiry cleanup is tightened to the same horizon,
 	// so a completion posted after the fence is stale there too.
-	if aa24FenceHorizon := aa24LoadAcquire(aa24Host.aa24Lane(AA24LaneWorkerData).aa24Mem, aa24Host.aa24Lane(AA24LaneWorkerData).aa24Layout.aa24ProducerOffset); !aa24Host.aa24Detached {
+	if !aa24Host.aa24Detached {
+		aa24FenceData := aa24Host.aa24Lane(AA24LaneWorkerData)
+		aa24FenceHorizon := aa24LoadAcquire(aa24FenceData.aa24Mem, aa24FenceData.aa24Layout.aa24ProducerOffset)
 		for aa24Index := range aa24Host.aa24Lingering {
 			aa24Held := &aa24Host.aa24Lingering[aa24Index]
 			if !aa24Held.aa24Strict {
@@ -1662,6 +1668,16 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 		}
 	}
 	aa24Host.aa24Outstanding = aa24Kept
+	// Identities that found no lingering room stay outstanding but share the fence
+	// horizon, so a completion posted after the fence is stale for them too.
+	if len(aa24Kept) > 0 && !aa24Host.aa24Detached {
+		aa24FenceData := aa24Host.aa24Lane(AA24LaneWorkerData)
+		aa24FenceHorizon := aa24LoadAcquire(aa24FenceData.aa24Mem, aa24FenceData.aa24Layout.aa24ProducerOffset)
+		if !aa24Host.aa24RetainedStrict || aa24Host.aa24RetainedHorizon > aa24FenceHorizon {
+			aa24Host.aa24RetainedHorizon = aa24FenceHorizon
+		}
+		aa24Host.aa24RetainedStrict = true
+	}
 }
 
 // aa24Cancelling reports that a fence already listed the identity as cancelled.
@@ -2042,7 +2058,7 @@ func (aa24Host *AA24Host) aa24HandleData(aa24Record *AA24Record, aa24Now AA23Tic
 	if aa24Record.AA24Kind == AA24RecordCompletion {
 		aa24Identity := aa24Record.aa24Identity()
 		for aa24Index := range aa24Host.aa24Outstanding {
-			if aa24Host.aa24Outstanding[aa24Index].aa24Matches(aa24Identity) {
+			if aa24Host.aa24Outstanding[aa24Index].aa24Matches(aa24Identity) && (!aa24Host.aa24RetainedStrict || aa24Data.aa24LocalConsumer <= aa24Host.aa24RetainedHorizon) {
 				aa24Host.aa24Outstanding = append(aa24Host.aa24Outstanding[:aa24Index], aa24Host.aa24Outstanding[aa24Index+1:]...)
 				return aa24Delivery, true, nil
 			}
