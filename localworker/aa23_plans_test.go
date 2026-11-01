@@ -2027,3 +2027,67 @@ func TestAA23OutOfOrderPublicationIsRefused(aa23T *aa23testing.T) {
 		aa23T.Fatalf("selected %+v", aa23Pin.AA23Key())
 	}
 }
+
+// Catches a publication check that forgets the highest published generation once
+// the current one is retired: generation 1 must not publish after 2 expired.
+func TestAA23PublicationHighWaterSurvivesRetirement(aa23T *aa23testing.T) {
+	aa23F := aa23NewFixture(aa23T)
+	aa23Older, aa23Err := aa23F.aa23Registry.AA23PreparePlan(aa23F.aa23Candidate(1, 0xC1), aa23F.aa23Now())
+	aa23WantOK(aa23T, "prepare 1", aa23Err)
+	aa23Short := aa23F.aa23Candidate(2, 0xC2)
+	aa23Short.AA23PlanExpiry = 200
+	aa23Notice := aa23F.aa23Publish(aa23Short)
+	aa23Ack, aa23Ready, aa23Err := aa23F.aa23View.AA23AdoptPlan(aa23Notice, aa23F.aa23Now())
+	aa23WantOK(aa23T, "adopt 2", aa23Err)
+	if aa23Ready {
+		aa23WantOK(aa23T, "ack 2", aa23F.aa23Registry.AA23ObserveAcknowledgement(aa23Ack))
+	}
+	aa23F.aa23Tick = 200
+	aa23WantOK(aa23T, "expire", aa23F.aa23Registry.AA23ExpireDue(aa23F.aa23Now()))
+	_, aa23Err = aa23F.aa23Registry.AA23PublishPrepared(aa23Older, aa23F.aa23Now())
+	aa23WantErr(aa23T, "publish 1 after 2 retired", aa23Err, ErrAA23StaleGeneration)
+	if aa23F.aa23Registry.AA23Pool().AA23SlotState(aa23Older.AA23Index) != AA23SlotFree {
+		aa23T.Fatal("stale candidate slot not returned")
+	}
+}
+
+// Catches publication that checks the renewed registry deadline instead of the
+// deadline frozen at preparation.
+func TestAA23PublishUsesFrozenRegistrationDeadline(aa23T *aa23testing.T) {
+	const aa23Deadline = AA23Tick(3000)
+	aa23F := aa23NewFixture(aa23T)
+	aa23F.aa23Registry.AA23Unregister(aa23F.aa23Key)
+	aa23F.aa23Key.AA23Epoch = 2
+	aa23Registration := aa23F.aa23Registration(aa23F.aa23Key)
+	aa23Registration.AA23LeaseExpiry = aa23Deadline
+	aa23F.aa23MustRegister(aa23Registration)
+	aa23Ref, aa23Err := aa23F.aa23Registry.AA23PreparePlan(aa23F.aa23Candidate(1, 0xD1), aa23F.aa23Now())
+	aa23WantOK(aa23T, "prepare", aa23Err)
+	aa23WantOK(aa23T, "renew", aa23F.aa23Registry.AA23RenewRegistration(aa23F.aa23Key, aa23FixtureFarExpiry, aa23F.aa23Now()))
+	aa23F.aa23Tick = aa23Deadline
+	_, aa23Err = aa23F.aa23Registry.AA23PublishPrepared(aa23Ref, aa23F.aa23Now())
+	aa23WantErr(aa23T, "publish at frozen deadline", aa23Err, ErrAA23Expired)
+	if aa23F.aa23Registry.AA23Pool().AA23SlotState(aa23Ref.AA23Index) != AA23SlotFree {
+		aa23T.Fatal("expired candidate slot not returned")
+	}
+}
+
+// Catches a worker that compares host-domain deadlines against its own readings
+// from a different clock domain.
+func TestAA23WorkerRejectsAnotherClockDomain(aa23T *aa23testing.T) {
+	aa23F := aa23NewFixture(aa23T)
+	aa23Notice := aa23F.aa23Publish(aa23F.aa23Candidate(1, 0xE1))
+	aa23Other := AA23ClockReading{AA23Domain: aa23FixtureDomain + 1, AA23Tick: aa23FixtureStart}
+	_, _, aa23Err := aa23F.aa23View.AA23AdoptPlan(aa23Notice, aa23Other)
+	aa23WantErr(aa23T, "adopt from another domain", aa23Err, ErrAA23ClockClosed)
+	_, _, aa23Err = aa23F.aa23View.AA23AdoptPlan(aa23Notice, aa23F.aa23Now())
+	aa23WantErr(aa23T, "worker stays closed", aa23Err, ErrAA23ClockClosed)
+}
+
+// Positive control: a worker reading the publishing domain still adopts.
+func TestAA23WorkerAdoptsInThePublishingClockDomain(aa23T *aa23testing.T) {
+	aa23F := aa23NewFixture(aa23T)
+	aa23Notice := aa23F.aa23Publish(aa23F.aa23Candidate(1, 0xE2))
+	_, _, aa23Err := aa23F.aa23View.AA23AdoptPlan(aa23Notice, aa23F.aa23Now())
+	aa23WantOK(aa23T, "adopt", aa23Err)
+}

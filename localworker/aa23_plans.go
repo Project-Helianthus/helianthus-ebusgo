@@ -309,6 +309,7 @@ type AA23PlanCandidate struct {
 // AA23PlanValidity holds the exclusive deadlines frozen into a published plan.
 // A later renewal never extends them; it needs a fresh plan generation.
 type AA23PlanValidity struct {
+	AA23Domain             uint64
 	AA23PlanExpiry         AA23Tick
 	AA23RegistrationExpiry AA23Tick
 	AA23SourceLeaseExpiry  AA23Tick
@@ -316,6 +317,10 @@ type AA23PlanValidity struct {
 
 // aa23Check admits only strictly before each deadline: equality is expired.
 func (aa23Validity AA23PlanValidity) aa23Check(aa23Now AA23ClockReading) error {
+	if aa23Now.AA23Domain != aa23Validity.AA23Domain {
+		// Deadlines of another clock domain are incomparable with this reading.
+		return ErrAA23ClockClosed
+	}
 	if aa23Now.AA23Tick >= aa23Validity.AA23PlanExpiry {
 		return ErrAA23Expired
 	}
@@ -674,6 +679,7 @@ type aa23RegistrationRecord struct {
 	aa23Source      AA23SourceGeneration
 	aa23SourceLease AA23Tick
 	aa23Published   int32
+	aa23PublishTop  AA23PlanGeneration
 }
 
 type aa23SubscriberRecord struct {
@@ -1155,6 +1161,9 @@ func (aa23Registry *AA23Registry) AA23BindWorker(aa23Worker AA23WorkerID, aa23St
 	aa23Registry.aa23RetireWhere(AA23RetireRevoked, func(*aa23Slot) bool { return true })
 	if aa23NewWorker {
 		aa23Registry.aa23PlanTop = 0
+		for aa23Index := range aa23Registry.aa23Records {
+			aa23Registry.aa23Records[aa23Index].aa23PublishTop = 0
+		}
 	}
 	aa23Registry.aa23WorkerBound = true
 	aa23Registry.aa23Worker = aa23Worker
@@ -1297,6 +1306,7 @@ func (aa23Registry *AA23Registry) aa23CheckPublishable(aa23Identity AA23PlanIden
 		return nil, ErrAA23PhysicalConflict
 	}
 	aa23Validity := AA23PlanValidity{
+		AA23Domain:             aa23Registry.aa23Clock.aa23Domain,
 		AA23PlanExpiry:         aa23PlanExpiry,
 		AA23RegistrationExpiry: aa23Record.aa23LeaseExpiry,
 		AA23SourceLeaseExpiry:  aa23Record.aa23SourceLease,
@@ -1340,6 +1350,7 @@ func (aa23Registry *AA23Registry) AA23PreparePlan(aa23Candidate AA23PlanCandidat
 		aa23Current.aa23State = AA23SlotWriting
 		aa23Current.aa23Identity = aa23Candidate.AA23Identity
 		aa23Current.aa23Validity = AA23PlanValidity{
+			AA23Domain:             aa23Registry.aa23Clock.aa23Domain,
 			AA23PlanExpiry:         aa23Candidate.AA23PlanExpiry,
 			AA23RegistrationExpiry: aa23Record.aa23LeaseExpiry,
 			AA23SourceLeaseExpiry:  aa23Record.aa23SourceLease,
@@ -1409,6 +1420,20 @@ func (aa23Registry *AA23Registry) AA23PublishPrepared(aa23Ref AA23SlotRef, aa23N
 		}
 		return AA23PublishNotice{}, aa23Err
 	}
+	if aa23Err := aa23Current.aa23Validity.aa23Check(aa23Now); aa23Err != nil {
+		// The frozen deadlines govern, not a lease renewed after preparation.
+		if aa23Current.aa23Release() != nil {
+			aa23Current.aa23State = AA23SlotReclaimable
+		}
+		return AA23PublishNotice{}, aa23Err
+	}
+	if aa23Current.aa23Identity.AA23Plan <= aa23Record.aa23PublishTop {
+		// The high-water mark survives retirement of the current generation.
+		if aa23Current.aa23Release() != nil {
+			aa23Current.aa23State = AA23SlotReclaimable
+		}
+		return AA23PublishNotice{}, ErrAA23StaleGeneration
+	}
 	if aa23Record.aa23Published >= 0 {
 		// Prepared out of order: a later generation is already current, so this
 		// older one can never become current. It was never visible, so it is
@@ -1423,6 +1448,7 @@ func (aa23Registry *AA23Registry) AA23PublishPrepared(aa23Ref AA23SlotRef, aa23N
 	}
 	aa23Current.aa23State = AA23SlotPublished
 	aa23Record.aa23Published = int32(aa23Ref.AA23Index)
+	aa23Record.aa23PublishTop = aa23Current.aa23Identity.AA23Plan
 	return AA23PublishNotice{AA23Slot: aa23Ref, AA23Identity: aa23Current.aa23Identity}, nil
 }
 
