@@ -1637,6 +1637,19 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 	// cancelled identity stays matchable until the data tail passes the head seen now.
 	// An identity with no room to linger stays outstanding, so a completion queued
 	// before the fence still matches instead of draining as stale.
+	// An entry already lingering from expiry cleanup is tightened to the same horizon,
+	// so a completion posted after the fence is stale there too.
+	if aa24FenceHorizon := aa24LoadAcquire(aa24Host.aa24Lane(AA24LaneWorkerData).aa24Mem, aa24Host.aa24Lane(AA24LaneWorkerData).aa24Layout.aa24ProducerOffset); !aa24Host.aa24Detached {
+		for aa24Index := range aa24Host.aa24Lingering {
+			aa24Held := &aa24Host.aa24Lingering[aa24Index]
+			if !aa24Held.aa24Strict {
+				aa24Held.aa24Strict = true
+				if aa24Held.aa24Horizon > aa24FenceHorizon {
+					aa24Held.aa24Horizon = aa24FenceHorizon
+				}
+			}
+		}
+	}
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
 		if !aa24Host.aa24Cancelling(aa24Identity) {
