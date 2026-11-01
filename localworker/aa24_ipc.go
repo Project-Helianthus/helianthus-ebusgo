@@ -970,6 +970,7 @@ type AA24Worker struct {
 	aa24GapRecord    AA24Record
 	aa24StopObserved bool
 	aa24Adopted      []aa24AdoptedPlan
+	aa24RefusedRefs  []AA24PlanRef
 	aa24Scratch      []byte
 	aa24PlanFloor    AA23PlanGeneration
 	aa24TokenFloor   AA24OwnerToken
@@ -991,6 +992,7 @@ func AA24AttachWorker(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Worker, e
 		aa24Lanes:        aa24AttachLanes(aa24Mem, &aa24Layout, aa24Expected.AA24Limits, true),
 		aa24NextSequence: 1,
 		aa24Adopted:      make([]aa24AdoptedPlan, 0, aa24Expected.AA24Limits.AA24MaxPlans),
+		aa24RefusedRefs:  make([]AA24PlanRef, 0, aa24Expected.AA24Limits.AA24MaxPlans),
 		aa24Scratch:      make([]byte, 0, aa24Expected.AA24Limits.AA24MaxPayloadBytes),
 		aa24PlanFloor:    aa24Expected.AA24PlanFloor,
 		aa24TokenFloor:   aa24Expected.AA24TokenFloor,
@@ -1169,11 +1171,25 @@ func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now 
 				return
 			}
 		}
+		// A refused publication was never adopted, so nothing here refers to it and
+		// its exact retirement is acknowledged at once.
+		for aa24Index := range aa24Worker.aa24RefusedRefs {
+			if aa24Worker.aa24RefusedRefs[aa24Index].aa24Matches(aa24Ref) {
+				aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs[:aa24Index], aa24Worker.aa24RefusedRefs[aa24Index+1:]...)
+				_ = aa24Worker.aa24PostRetired(aa24Ref, aa24Now)
+				return
+			}
+		}
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
 	case AA24RecordPublish:
 		if aa24Record.AA24Plan <= aa24Worker.aa24PlanFloor || aa24Now >= aa24Record.AA24PlanExpiry ||
 			len(aa24Worker.aa24Adopted) == cap(aa24Worker.aa24Adopted) {
 			aa24Worker.aa24Refused++
+			if len(aa24Worker.aa24RefusedRefs) < cap(aa24Worker.aa24RefusedRefs) {
+				aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs, aa24Record.aa24Ref())
+			} else {
+				aa24Worker.aa24RaiseLocalGap(AA24FenceControlSaturated)
+			}
 			return
 		}
 		aa24Worker.aa24PlanFloor = aa24Record.AA24Plan
@@ -1377,6 +1393,16 @@ func (aa24Worker *AA24Worker) AA24AcknowledgeRevocation(aa24Ref AA24PlanRef, aa2
 	if aa24Found < 0 {
 		return ErrAA24Stale
 	}
+	if aa24Err := aa24Worker.aa24PostRetired(aa24Ref, aa24Now.AA23Tick); aa24Err != nil {
+		return aa24Err
+	}
+	aa24Worker.aa24Adopted = append(aa24Worker.aa24Adopted[:aa24Found], aa24Worker.aa24Adopted[aa24Found+1:]...)
+	return nil
+}
+
+// aa24PostRetired writes the exact retirement acknowledgement on the worker control
+// lane without taking the slot reserved for the gap.
+func (aa24Worker *AA24Worker) aa24PostRetired(aa24Ref AA24PlanRef, aa24Now AA23Tick) error {
 	aa24Control := aa24Worker.aa24Lane(AA24LaneWorkerControl)
 	aa24HasRoom, aa24Err := aa24Control.aa24HasRoom(aa24ReservedSlots)
 	if aa24Err != nil {
@@ -1387,20 +1413,19 @@ func (aa24Worker *AA24Worker) AA24AcknowledgeRevocation(aa24Ref AA24PlanRef, aa2
 		aa24Worker.aa24RaiseLocalGap(AA24FenceControlSaturated)
 		return ErrAA24ControlFull
 	}
-	aa24Sequence, aa24Err := aa24Worker.aa24AllocateSequence(aa24Now.AA23Tick)
+	aa24Sequence, aa24Err := aa24Worker.aa24AllocateSequence(aa24Now)
 	if aa24Err != nil {
 		return aa24Err
 	}
 	aa24Record := AA24Record{AA24Kind: AA24RecordAcknowledge, AA24Status: AA24StatusRetired}
 	aa24Record.aa24ApplyRef(aa24Ref)
 	aa24Record.AA24CaptureSequence = aa24Sequence
-	aa24Record.AA24CaptureTime = aa24Now.AA23Tick
+	aa24Record.AA24CaptureTime = aa24Now
 	if aa24Err := aa24Control.aa24Write(&aa24Record, aa24ReservedSlots); aa24Err != nil {
 		aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
 		return aa24Err
 	}
-	aa24Worker.aa24LastCapture = aa24Now.AA23Tick
-	aa24Worker.aa24Adopted = append(aa24Worker.aa24Adopted[:aa24Found], aa24Worker.aa24Adopted[aa24Found+1:]...)
+	aa24Worker.aa24LastCapture = aa24Now
 	return nil
 }
 
@@ -1445,6 +1470,7 @@ func (aa24Worker *AA24Worker) AA24Teardown() error {
 	aa24Worker.aa24Detached = true
 	aa24Worker.aa24Lanes = [aa24LaneCount]aa24Lane{}
 	aa24Worker.aa24Adopted = nil
+	aa24Worker.aa24RefusedRefs = nil
 	return nil
 }
 
@@ -1637,6 +1663,18 @@ func (aa24Host *AA24Host) AA24RevokePlan(aa24Ref AA24PlanRef, aa24Now AA23ClockR
 	return nil
 }
 
+// aa24RetireExpired drops outstanding commands whose deadline has passed: the
+// worker refuses them without a completion, so they can never be answered.
+func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
+	aa24Kept := aa24Host.aa24Outstanding[:0]
+	for _, aa24Identity := range aa24Host.aa24Outstanding {
+		if aa24Identity.aa24Live(aa24Now) {
+			aa24Kept = append(aa24Kept, aa24Identity)
+		}
+	}
+	aa24Host.aa24Outstanding = aa24Kept
+}
+
 // AA24SendCommand queues one command. A full data lane refuses it without any
 // other effect, and control lanes stay usable.
 func (aa24Host *AA24Host) AA24SendCommand(aa24Identity AA24CommandIdentity, aa24Payload []byte, aa24Now AA23ClockReading) error {
@@ -1656,6 +1694,7 @@ func (aa24Host *AA24Host) AA24SendCommand(aa24Identity AA24CommandIdentity, aa24
 	if !aa24Identity.aa24Live(aa24Now.AA23Tick) {
 		return ErrAA24Expired
 	}
+	aa24Host.aa24RetireExpired(aa24Now.AA23Tick)
 	if len(aa24Host.aa24Outstanding) == cap(aa24Host.aa24Outstanding) {
 		return ErrAA24Capacity
 	}

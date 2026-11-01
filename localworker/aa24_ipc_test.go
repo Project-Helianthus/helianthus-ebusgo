@@ -1576,7 +1576,9 @@ func TestAA24PublicationOutputDecisions(aa24T *aa24testing.T) {
 	aa24T.Run("outstanding commands are bounded", func(aa24T *aa24testing.T) {
 		aa24Pair := aa24NewPair(aa24T)
 		aa24Pair.aa24Publish(1, 10)
-		aa24Pair.aa24Host.aa24Outstanding = aa24Pair.aa24Host.aa24Outstanding[:cap(aa24Pair.aa24Host.aa24Outstanding)]
+		for len(aa24Pair.aa24Host.aa24Outstanding) < cap(aa24Pair.aa24Host.aa24Outstanding) {
+			aa24Pair.aa24Host.aa24Outstanding = append(aa24Pair.aa24Host.aa24Outstanding, aa24FixtureCommand(1, 1))
+		}
 		aa24Want(aa24T, "table full", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 1), nil, aa24At(10)), ErrAA24Capacity)
 	})
 }
@@ -1900,4 +1902,42 @@ func TestAA24TeardownDoesNotDrainSaturatedData(aa24T *aa24testing.T) {
 		aa24Pair.aa24Host.AA24ObserveWorkerTerminated()
 		aa24Want(aa24T, "host teardown", aa24Pair.aa24Host.AA24Teardown(), nil)
 	})
+}
+
+func TestAA24ExpiredOutstandingCommandsAreRetired(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Want(aa24T, "poll", aa24Pair.aa24Worker.AA24PollControl(aa24At(10)), nil)
+	aa24Max := cap(aa24Pair.aa24Host.aa24Outstanding)
+	for aa24Index := 0; aa24Index < aa24Max; aa24Index++ {
+		aa24Identity := aa24FixtureCommand(1, AA24OwnerToken(aa24Index+1))
+		aa24Identity.AA24RequestDeadline = 12
+		aa24Pair.aa24Host.aa24Outstanding = append(aa24Pair.aa24Host.aa24Outstanding, aa24Identity)
+	}
+	aa24Want(aa24T, "full while live", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, AA24OwnerToken(aa24Max+1)), nil, aa24At(11)), ErrAA24Capacity)
+	aa24Want(aa24T, "expired retired", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, AA24OwnerToken(aa24Max+1)), nil, aa24At(12)), nil)
+	if aa24Len := len(aa24Pair.aa24Host.aa24Outstanding); aa24Len != 1 {
+		aa24T.Fatalf("outstanding %d", aa24Len)
+	}
+}
+
+func TestAA24RefusedPublicationIsRetiredByRevocation(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24FixtureRef(1)
+	aa24Ref.AA24PlanExpiry = 12
+	aa24ArenaStart := aa24Pair.aa24Host.aa24Lanes[0].aa24ArenaLayout.AA24ArenaOffset + aa24BuildBytes
+	aa24Want(aa24T, "publish", aa24Pair.aa24Host.AA24PublishPlan(aa24Ref, aa24ArenaStart, 8, aa24At(10)), nil)
+	aa24Want(aa24T, "worker sees it expired", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	if aa24Pair.aa24Worker.AA24PublishRefused() != 1 || len(aa24Pair.aa24Worker.aa24Adopted) != 0 {
+		aa24T.Fatalf("refused %d", aa24Pair.aa24Worker.AA24PublishRefused())
+	}
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(12)), nil)
+	aa24Want(aa24T, "worker poll", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(13)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordAcknowledge {
+		aa24T.Fatalf("retirement: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	if aa24Plans := aa24Pair.aa24Host.AA24QuarantinedPlans(nil); len(aa24Plans) != 0 {
+		aa24T.Fatalf("refused plan stayed quarantined: %+v", aa24Plans)
+	}
 }
