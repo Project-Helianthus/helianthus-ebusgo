@@ -2131,3 +2131,29 @@ func TestAA25OfferRejectsUnpreparedResponse(aa25T *aa25testing.T) {
 		aa25T.Fatalf("aa25 prepared value rejected: %v", aa25Err)
 	}
 }
+
+func TestAA25AckDeadlineSaturatesNearMaxTick(aa25T *aa25testing.T) {
+	// Each row pins the ACK wait start near the top of the tick range at 1 GHz
+	// (200 ms = 200_000_000 ticks). Mutation caught: an unchecked
+	// AckSince+allowance that wraps and expires the wait immediately.
+	const aa25Max = ^uint64(0)
+	for _, aa25Case := range []struct {
+		aa25Name  string
+		aa25Since uint64
+		aa25Want  uint64
+	}{
+		{"wraps-by-40ms", aa25Max - 160_000_000, aa25Max},
+		{"exact-fit", aa25Max - 200_000_000, aa25Max},
+		{"ordinary", 1000, 1000 + 200_000_000},
+	} {
+		aa25T.Run(aa25Case.aa25Name, func(aa25T *aa25testing.T) {
+			aa25Engine := &AA25Engine{aa25Config: aa25TestConfig(), aa25AckSince: aa25Case.aa25Since}
+			if aa25Got := aa25Engine.aa25AckDeadline(); aa25Got != aa25Case.aa25Want {
+				aa25T.Fatalf("deadline = %d, want %d", aa25Got, aa25Case.aa25Want)
+			}
+			if aa25Case.aa25Want == aa25Max && aa25Engine.aa25AckDeadline() <= aa25Case.aa25Since {
+				aa25T.Fatalf("deadline not after wait start")
+			}
+		})
+	}
+}

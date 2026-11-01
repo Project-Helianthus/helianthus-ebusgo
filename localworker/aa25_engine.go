@@ -949,7 +949,11 @@ func (aa25Engine *AA25Engine) aa25CompleteTX(aa25Now uint64) {
 
 // aa25AckDeadline is the end of the final-ACK wait: 200 ms of injected ticks.
 func (aa25Engine *AA25Engine) aa25AckDeadline() uint64 {
-	return aa25Engine.aa25AckSince + aa25Engine.aa25Config.AA25TickHz/5
+	aa25Allowance := aa25Engine.aa25Config.AA25TickHz / 5
+	if aa25Engine.aa25AckSince > ^uint64(0)-aa25Allowance {
+		return ^uint64(0)
+	}
+	return aa25Engine.aa25AckSince + aa25Allowance
 }
 
 // aa25HandleFinalAck consumes the initiator's symbol after the response. One
