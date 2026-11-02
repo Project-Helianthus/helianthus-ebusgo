@@ -1538,3 +1538,47 @@ func TestAA26EveryDeclaredIdentifierIsPrefixed(aa26T *aa26testing.T) {
 		})
 	}
 }
+
+// TestAA26ClosedEventCarriesThePhaseActiveAtClosure closes through the same AA24
+// revocation in each phase; it catches a closure event that reports the ended
+// phase because the frame state was reset before the event was built.
+func TestAA26ClosedEventCarriesThePhaseActiveAtClosure(aa26T *aa26testing.T) {
+	for _, aa26Case := range []struct {
+		aa26Name  string
+		aa26Phase AA23Phase
+		aa26Setup func(*aa26testing.T) *aa26Fixture
+	}{
+		{"request", AA23PhaseRequest, func(aa26T *aa26testing.T) *aa26Fixture {
+			aa26Self := aa26NewFixture(aa26T, aa26DefaultOptions())
+			aa26Self.aa26Send(aa26TestFrameTick, 0xAA, aa26TestInitiator, aa26TestAddress)
+			return aa26Self
+		}},
+		{"target ack", AA23PhaseTargetACK, func(aa26T *aa26testing.T) *aa26Fixture {
+			aa26Self := aa26NewFixture(aa26T, aa26DefaultOptions())
+			aa26Self.aa26Request(aa26TestFrameTick)
+			return aa26Self
+		}},
+		{"response", AA23PhaseResponse, aa26MidResponse},
+		{"initiator ack", AA23PhaseInitiatorACK, func(aa26T *aa26testing.T) *aa26Fixture {
+			aa26Self := aa26NewFixture(aa26T, aa26DefaultOptions())
+			aa26Self.aa26Request(aa26TestFrameTick)
+			aa26Self.aa26EchoPending()
+			return aa26Self
+		}},
+	} {
+		aa26T.Run(aa26Case.aa26Name, func(aa26T *aa26testing.T) {
+			aa26Self := aa26Case.aa26Setup(aa26T)
+			if _, aa26Active := aa26Self.aa26Responder.AA26Active(); !aa26Active {
+				aa26T.Fatal("aa26 setup left no active transaction")
+			}
+			aa26Self.aa26Drain()
+			aa26WantOK(aa26T, "aa24 revoke", aa26Self.aa26Host.AA24RevokePlan(aa26Self.aa26Ref, aa26Self.aa26Now()))
+			aa26Self.aa26Responder.AA26Poll(aa26Self.aa26Tick)
+			aa26Closed := aa26LastClosed(aa26T, aa26Self.aa26Drain())
+			if aa26Closed.AA26Reason != AA26CloseRevoked || aa26Closed.AA26Phase != aa26Case.aa26Phase {
+				aa26T.Fatalf("aa26 closure reason=%d phase=%d; want revoked in phase %d", aa26Closed.AA26Reason, aa26Closed.AA26Phase, aa26Case.aa26Phase)
+			}
+			aa26Self.aa26WantClosedClean(aa26Case.aa26Name)
+		})
+	}
+}

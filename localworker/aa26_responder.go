@@ -892,6 +892,7 @@ func (aa26Responder *AA26Responder) aa26Add(aa26Base uint64, aa26Extra uint64) (
 // aa26Close releases the pin and every per-transaction field, so nothing of the
 // closed transaction can authorize a later symbol.
 func (aa26Responder *AA26Responder) aa26Close(aa26Reason AA26CloseReason, aa26Tick uint64) {
+	aa26Phase := aa26Responder.aa26Phase()
 	aa26Responder.aa26Frame = aa26FrameSkip
 	aa26Responder.aa26Escape = false
 	if aa26Reason == AA26CloseClock {
@@ -900,7 +901,6 @@ func (aa26Responder *AA26Responder) aa26Close(aa26Reason AA26CloseReason, aa26Ti
 	if !aa26Responder.aa26Active {
 		return
 	}
-	aa26Phase := aa26Responder.aa26Phase()
 	if aa26Ack, aa26Ready, aa26Err := aa26Responder.aa26Pin.AA23Release(); aa26Err == nil && aa26Ready {
 		aa26Responder.aa26Ack, aa26Responder.aa26AckReady = aa26Ack, true
 	}
