@@ -2767,3 +2767,86 @@ func TestAA24PublicationQueuedBeforeGapFenceIsRefused(aa24T *aa24testing.T) {
 		aa24T.Fatalf("plan stayed quarantined: %+v", aa24Left)
 	}
 }
+
+// TestAA24ObserveRawRefusesBeforeSideEffects pins the selected-observation ingress:
+// each refusal leaves the sequence, capture time, fence and loss counter untouched,
+// and an exact active selection is the only accepted selection.
+func TestAA24ObserveRawRefusesBeforeSideEffects(aa24T *aa24testing.T) {
+	type aa24Case struct {
+		aa24Name   string
+		aa24Active bool
+		aa24Build  func(aa24Active AA24CommandIdentity) AA24Observation
+		aa24Want   error
+	}
+	aa24Select := func(aa24Mutate func(*AA24Observation, *AA24CommandIdentity)) func(AA24CommandIdentity) AA24Observation {
+		return func(aa24Active AA24CommandIdentity) AA24Observation {
+			aa24Observation := aa24FixtureRaw(7)
+			aa24Observation.AA24Transaction = aa24Active.AA24Transaction
+			aa24Observation.AA24Selection = aa24Active
+			aa24Mutate(&aa24Observation, &aa24Observation.AA24Selection)
+			return aa24Observation
+		}
+	}
+	aa24Cases := []aa24Case{
+		{"mismatched transaction", true, aa24Select(func(aa24O *AA24Observation, _ *AA24CommandIdentity) { aa24O.AA24Transaction++ }), ErrAA24Record},
+		{"selection without active command", false, aa24Select(func(*AA24Observation, *AA24CommandIdentity) {}), ErrAA24Mismatch},
+		{"selection for a different command", true, aa24Select(func(aa24O *AA24Observation, aa24S *AA24CommandIdentity) {
+			aa24S.AA24OwnerToken++
+		}), ErrAA24Mismatch},
+		{"selection with a different plan", true, aa24Select(func(_ *AA24Observation, aa24S *AA24CommandIdentity) {
+			aa24S.AA24Ref.AA24Plan++
+		}), ErrAA24Mismatch},
+		{"selection missing owner token", true, aa24Select(func(_ *AA24Observation, aa24S *AA24CommandIdentity) {
+			aa24S.AA24OwnerToken = 0
+		}), ErrAA24Record},
+		{"zero transaction", true, aa24Select(func(aa24O *AA24Observation, _ *AA24CommandIdentity) {
+			aa24O.AA24Selection = AA24CommandIdentity{}
+			aa24O.AA24Transaction = 0
+		}), ErrAA24Record},
+		{"control direction", true, aa24Select(func(aa24O *AA24Observation, _ *AA24CommandIdentity) {
+			aa24O.AA24Selection = AA24CommandIdentity{}
+			aa24O.AA24Direction = AA24DirectionControl
+		}), ErrAA24Record},
+		{"direction out of range", true, aa24Select(func(aa24O *AA24Observation, _ *AA24CommandIdentity) {
+			aa24O.AA24Selection = AA24CommandIdentity{}
+			aa24O.AA24Direction = AA24DirectionEcho + 1
+		}), ErrAA24Record},
+		{"phase out of range", true, aa24Select(func(aa24O *AA24Observation, _ *AA24CommandIdentity) {
+			aa24O.AA24Selection = AA24CommandIdentity{}
+			aa24O.AA24Phase = aa24MaxPhase + 1
+		}), ErrAA24Record},
+	}
+	for _, aa24Case := range aa24Cases {
+		aa24T.Run(aa24Case.aa24Name, func(aa24T *aa24testing.T) {
+			aa24Pair := aa24NewPair(aa24T)
+			var aa24Active AA24CommandIdentity
+			if aa24Case.aa24Active {
+				aa24Pair.aa24Publish(1, 10)
+				aa24Active = aa24Pair.aa24Admit(1, 1, 10)
+			} else {
+				aa24Active = aa24FixtureCommand(1, 1)
+			}
+			aa24Worker := aa24Pair.aa24Worker
+			aa24Next, aa24Last, aa24Lost, aa24Fence := aa24Worker.aa24NextSequence, aa24Worker.aa24LastCapture, aa24Worker.aa24Lost, aa24Worker.aa24Fence
+			aa24Got, aa24Err := aa24Worker.AA24ObserveRaw(aa24Case.aa24Build(aa24Active), aa24At(11))
+			aa24Want(aa24T, "refusal", aa24Err, aa24Case.aa24Want)
+			if aa24Got != 0 || aa24Worker.aa24NextSequence != aa24Next || aa24Worker.aa24LastCapture != aa24Last ||
+				aa24Worker.aa24Lost != aa24Lost || aa24Worker.aa24Fence != aa24Fence || !aa24Worker.AA24OutputOpen() {
+				aa24T.Fatalf("refusal had side effects: seq=%d next=%d last=%d lost=%d fence=%+v", aa24Got, aa24Worker.aa24NextSequence, aa24Worker.aa24LastCapture, aa24Worker.aa24Lost, aa24Worker.aa24Fence)
+			}
+		})
+	}
+	aa24T.Run("exact active selection is accepted", func(aa24T *aa24testing.T) {
+		aa24Pair := aa24NewPair(aa24T)
+		aa24Pair.aa24Publish(1, 10)
+		aa24Active := aa24Pair.aa24Admit(1, 1, 10)
+		aa24Observation := aa24FixtureRaw(7)
+		aa24Observation.AA24Transaction = aa24Active.AA24Transaction
+		aa24Observation.AA24Selection = aa24Active
+		aa24Got, aa24Err := aa24Pair.aa24Worker.AA24ObserveRaw(aa24Observation, aa24At(11))
+		aa24Want(aa24T, "accepted", aa24Err, nil)
+		if aa24Got == 0 || aa24Pair.aa24Worker.aa24LastCapture != 11 {
+			aa24T.Fatalf("sequence %d capture %d", aa24Got, aa24Pair.aa24Worker.aa24LastCapture)
+		}
+	})
+}

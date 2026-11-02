@@ -958,6 +958,24 @@ type AA24Observation struct {
 	AA24Selection   AA24CommandIdentity
 }
 
+// aa24Valid checks the observation shape the raw record requires, without state.
+func (aa24Observation AA24Observation) aa24Valid() bool {
+	if aa24Observation.AA24Transaction == 0 || aa24Observation.AA24Direction == AA24DirectionControl ||
+		aa24Observation.AA24Direction > AA24DirectionEcho || aa24Observation.AA24Phase > aa24MaxPhase {
+		return false
+	}
+	aa24Selection := aa24Observation.AA24Selection
+	if aa24Selection == (AA24CommandIdentity{}) {
+		return true
+	}
+	aa24Ref := aa24Selection.AA24Ref
+	return aa24Selection.AA24Transaction == aa24Observation.AA24Transaction &&
+		aa24Ref.AA24Key.AA23Subscriber != 0 && aa23IsTargetAddress(aa24Ref.AA24Key.AA23Address) &&
+		aa24Ref.AA24Key.AA23Epoch != 0 && aa24Ref.AA24Plan != 0 && aa24Ref.AA24PlanExpiry != 0 &&
+		aa24Selection.AA24OwnerToken != 0 && aa24Selection.AA24OwnerExpiry != 0 &&
+		aa24Selection.AA24RequestDeadline != 0
+}
+
 type aa24AdoptedPlan struct {
 	aa24Ref     AA24PlanRef
 	aa24Revoked bool
@@ -1284,6 +1302,11 @@ func (aa24Worker *AA24Worker) AA24PendingRevocations(aa24Dst []AA24PlanRef) []AA
 // data lane drops the symbol and raises a gap on the separate control lane, using
 // the lost symbol's own ordinal and capture time.
 func (aa24Worker *AA24Worker) AA24ObserveRaw(aa24Observation AA24Observation, aa24Now AA23ClockReading) (uint64, error) {
+	// A malformed observation is a caller error: it is refused before the clock, the
+	// sequence or any capture state is touched, and it raises no gap.
+	if !aa24Observation.aa24Valid() {
+		return 0, ErrAA24Record
+	}
 	if aa24Err := aa24Worker.aa24Tick(aa24Now); aa24Err != nil {
 		if aa24Err != ErrAA24Detached {
 			aa24Worker.aa24CountLost()
@@ -1293,6 +1316,12 @@ func (aa24Worker *AA24Worker) AA24ObserveRaw(aa24Observation AA24Observation, aa
 	if !aa24Worker.AA24OutputOpen() {
 		aa24Worker.aa24CountLost()
 		return 0, ErrAA24OutputFenced
+	}
+	// A selection names the active command exactly; anything else would attribute a
+	// symbol to an identity the worker never admitted.
+	if aa24Observation.AA24Selection != (AA24CommandIdentity{}) &&
+		(!aa24Worker.aa24HasActive || !aa24Worker.aa24Active.aa24Matches(aa24Observation.AA24Selection)) {
+		return 0, ErrAA24Mismatch
 	}
 	aa24Record := AA24Record{
 		AA24Kind:      AA24RecordRaw,
