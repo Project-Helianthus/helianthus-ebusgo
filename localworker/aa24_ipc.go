@@ -845,6 +845,30 @@ func (aa24Lane *aa24Lane) aa24Write(aa24Record *AA24Record, aa24Reserve uint64) 
 // aa24Read acquires the producer index, validates a whole detached copy and only
 // then releases the slot. A malformed record stays unconsumed.
 func (aa24Lane *aa24Lane) aa24Read(aa24Dst []byte) (AA24Record, bool, error) {
+	aa24Record, aa24OK, aa24Err := aa24Lane.aa24Peek(aa24Dst)
+	if aa24Err != nil || !aa24OK {
+		return aa24Record, aa24OK, aa24Err
+	}
+	aa24Lane.aa24Release()
+	return aa24Record, true, nil
+}
+
+// aa24Release frees the slot of the record the last peek returned.
+func (aa24Lane *aa24Lane) aa24Release() {
+	aa24Producer, aa24Consumer, aa24Err := aa24Lane.aa24Indices()
+	if aa24Err != nil || aa24Producer == aa24Consumer {
+		return
+	}
+	aa24StoreRelease(aa24Lane.aa24Mem, aa24Lane.aa24Layout.aa24ConsumerOffset, aa24Consumer+1)
+	aa24Lane.aa24LocalConsumer = aa24Consumer + 1
+	aa24Lane.aa24Bump(&aa24Lane.aa24Stats.AA24Dequeued)
+	if aa24Occupancy := aa24Producer - aa24Consumer; aa24Occupancy > aa24Lane.aa24Stats.AA24HighWater {
+		aa24Lane.aa24Stats.AA24HighWater = aa24Occupancy
+	}
+}
+
+// aa24Peek validates a whole detached copy of the next record and leaves the slot owned.
+func (aa24Lane *aa24Lane) aa24Peek(aa24Dst []byte) (AA24Record, bool, error) {
 	if aa24Lane.aa24IsProducer {
 		return AA24Record{}, false, ErrAA24Ownership
 	}
@@ -879,12 +903,6 @@ func (aa24Lane *aa24Lane) aa24Read(aa24Dst []byte) (AA24Record, bool, error) {
 	aa24Record.AA24Payload = append(aa24Dst[:0], aa24Payload...)
 	if !aa24Record.aa24Shape(aa24Lane.aa24Layout.aa24Kind, aa24Lane.aa24ArenaLayout) {
 		return AA24Record{}, false, ErrAA24Record
-	}
-	aa24StoreRelease(aa24Lane.aa24Mem, aa24Lane.aa24Layout.aa24ConsumerOffset, aa24Consumer+1)
-	aa24Lane.aa24LocalConsumer = aa24Consumer + 1
-	aa24Lane.aa24Bump(&aa24Lane.aa24Stats.AA24Dequeued)
-	if aa24Occupancy := aa24Producer - aa24Consumer; aa24Occupancy > aa24Lane.aa24Stats.AA24HighWater {
-		aa24Lane.aa24Stats.AA24HighWater = aa24Occupancy
 	}
 	return aa24Record, true, nil
 }
@@ -1180,7 +1198,7 @@ func (aa24Worker *AA24Worker) aa24Service(aa24Now AA23ClockReading) error {
 func (aa24Worker *AA24Worker) aa24DrainControl(aa24Now AA23Tick, aa24Fenced bool) {
 	aa24Control := aa24Worker.aa24Lane(AA24LaneHostControl)
 	for aa24Budget := aa24Control.aa24Layout.aa24Capacity; aa24Budget > 0; aa24Budget-- {
-		aa24Record, aa24OK, aa24Err := aa24Control.aa24Read(aa24Worker.aa24Scratch)
+		aa24Record, aa24OK, aa24Err := aa24Control.aa24Peek(aa24Worker.aa24Scratch)
 		if aa24Err != nil {
 			aa24Worker.aa24RaiseLocalGap(AA24FenceCorruption)
 			return
@@ -1188,7 +1206,12 @@ func (aa24Worker *AA24Worker) aa24DrainControl(aa24Now AA23Tick, aa24Fenced bool
 		if !aa24OK {
 			break
 		}
-		aa24Worker.aa24HandleControl(&aa24Record, aa24Now, aa24Fenced)
+		// The slot stays owned until the record is fully handled, so an empty lane
+		// proves no handling, such as a retirement post, is still pending.
+		if !aa24Worker.aa24HandleControl(&aa24Record, aa24Now, aa24Fenced) {
+			return
+		}
+		aa24Control.aa24Release()
 	}
 }
 
@@ -1220,11 +1243,12 @@ func (aa24Worker *AA24Worker) aa24IdentityMatches(aa24Record *AA24Record) bool {
 		aa24Record.AA24Stream == aa24Worker.aa24Expected.AA24Binding.AA24Stream
 }
 
-func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23Tick, aa24Fenced bool) {
+// aa24HandleControl reports false when the record must stay queued and be handled again.
+func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23Tick, aa24Fenced bool) bool {
 	aa24Control := aa24Worker.aa24Lane(AA24LaneHostControl)
 	if !aa24Worker.aa24IdentityMatches(aa24Record) {
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
-		return
+		return true
 	}
 	switch aa24Record.AA24Kind {
 	case AA24RecordStop:
@@ -1238,21 +1262,20 @@ func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now 
 				if aa24Worker.aa24HasActive && aa24Worker.aa24Active.AA24Ref.aa24Matches(aa24Ref) {
 					aa24Worker.aa24HasActive = false
 				}
-				return
+				return true
 			}
 		}
 		// A refused publication was never adopted, so nothing here refers to it and
 		// its exact retirement is acknowledged at once.
 		for aa24Index := range aa24Worker.aa24RefusedRefs {
 			if aa24Worker.aa24RefusedRefs[aa24Index].aa24Matches(aa24Ref) {
-				// The reference leaves only after the acknowledgement is written;
-				// until then the service pass retries it.
-				if aa24Worker.aa24PostRetired(aa24Ref, aa24Now) == nil {
-					aa24Worker.aa24DropRefused(aa24Ref)
-				} else if len(aa24Worker.aa24RetireRetry) < cap(aa24Worker.aa24RetireRetry) {
-					aa24Worker.aa24RetireRetry = append(aa24Worker.aa24RetireRetry, aa24Ref)
+				// The revocation stays queued until the acknowledgement is written,
+				// so the host cannot settle past an unposted retirement.
+				if aa24Worker.aa24PostRetired(aa24Ref, aa24Now) != nil {
+					return false
 				}
-				return
+				aa24Worker.aa24DropRefused(aa24Ref)
+				return true
 			}
 		}
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
@@ -1266,7 +1289,7 @@ func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now 
 			} else {
 				aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
 			}
-			return
+			return true
 		}
 		if aa24Record.AA24Plan <= aa24Worker.aa24PlanFloor || aa24Now >= aa24Record.AA24PlanExpiry ||
 			len(aa24Worker.aa24Adopted) == cap(aa24Worker.aa24Adopted) {
@@ -1276,11 +1299,12 @@ func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now 
 			} else {
 				aa24Worker.aa24RaiseLocalGap(AA24FenceControlSaturated)
 			}
-			return
+			return true
 		}
 		aa24Worker.aa24PlanFloor = aa24Record.AA24Plan
 		aa24Worker.aa24Adopted = append(aa24Worker.aa24Adopted, aa24AdoptedPlan{aa24Ref: aa24Record.aa24Ref()})
 	}
+	return true
 }
 
 // AA24PollControl services the control lane without touching any data lane.

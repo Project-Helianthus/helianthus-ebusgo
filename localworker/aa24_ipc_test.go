@@ -1958,8 +1958,8 @@ func TestAA24RefusedRetirementSurvivesSaturatedControl(aa24T *aa24testing.T) {
 	aa24Record.aa24ApplyRef(aa24Refused)
 	aa24Want(aa24T, "revoke of the refused plan", aa24Pair.aa24Host.aa24WriteControl(&aa24Record), nil)
 	aa24Want(aa24T, "worker poll on saturated control", aa24Worker.AA24PollControl(aa24At(23)), nil)
-	if len(aa24Worker.aa24RefusedRefs) != 1 || len(aa24Worker.aa24RetireRetry) != 1 {
-		aa24T.Fatalf("reference must stay until acknowledged: refused %d retry %d", len(aa24Worker.aa24RefusedRefs), len(aa24Worker.aa24RetireRetry))
+	if len(aa24Worker.aa24RefusedRefs) != 1 || !aa24HostControlUnread(aa24T, aa24Worker) {
+		aa24T.Fatalf("reference and its revocation must stay until acknowledged: refused %d", len(aa24Worker.aa24RefusedRefs))
 	}
 	aa24Control := aa24Worker.aa24Lane(AA24LaneWorkerControl)
 	aa24Before, _, aa24Err := aa24Control.aa24Indices()
@@ -2637,8 +2637,8 @@ func TestAA24ClockFenceStillRetriesRetirement(aa24T *aa24testing.T) {
 	aa24Record.aa24ApplyRef(aa24Refused)
 	aa24Want(aa24T, "revoke of the refused plan", aa24Pair.aa24Host.aa24WriteControl(&aa24Record), nil)
 	aa24Want(aa24T, "worker poll on saturated control", aa24Worker.AA24PollControl(aa24At(23)), nil)
-	if len(aa24Worker.aa24RetireRetry) != 1 {
-		aa24T.Fatalf("retry queue %d, want 1", len(aa24Worker.aa24RetireRetry))
+	if !aa24HostControlUnread(aa24T, aa24Worker) {
+		aa24T.Fatal("revocation must stay queued while its retirement is unposted")
 	}
 	for aa24Tick := AA23Tick(24); aa24Tick < 27; aa24Tick++ {
 		if _, aa24OK, aa24Err := aa24Pair.aa24Poll(aa24Tick); !aa24OK || aa24Err != nil {
@@ -2849,4 +2849,61 @@ func TestAA24ObserveRawRefusesBeforeSideEffects(aa24T *aa24testing.T) {
 			aa24T.Fatalf("sequence %d capture %d", aa24Got, aa24Pair.aa24Worker.aa24LastCapture)
 		}
 	})
+}
+
+func aa24HostControlUnread(aa24T *aa24testing.T, aa24Worker *AA24Worker) bool {
+	aa24T.Helper()
+	aa24Produced, aa24Read, aa24Err := aa24Worker.aa24Lane(AA24LaneHostControl).aa24Indices()
+	if aa24Err != nil {
+		aa24T.Fatal(aa24Err)
+	}
+	return aa24Produced != aa24Read
+}
+
+// Catches releasing a late revocation's input slot before its retirement is posted:
+// with the worker control lane drained by the host, the host must not settle or tear
+// down while the retirement is still unwritten, and must settle once it is.
+func TestAA24SettlementWaitsForUnpostedRetirement(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Worker := aa24Pair.aa24Worker
+	for aa24Plan := AA23PlanGeneration(1); aa24Plan <= 2; aa24Plan++ {
+		aa24Tick := AA23Tick(10 * aa24Plan)
+		aa24Ref := aa24Pair.aa24Publish(aa24Plan, aa24Tick)
+		aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(aa24Tick+1)), nil)
+		aa24Want(aa24T, "worker poll", aa24Worker.AA24PollControl(aa24At(aa24Tick+1)), nil)
+		aa24Want(aa24T, "ack", aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(aa24Tick+2)), nil)
+	}
+	aa24Refused := aa24FixtureRef(3)
+	aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs, aa24Refused)
+	aa24Host := aa24Pair.aa24Host
+	aa24Want(aa24T, "stop", aa24Host.AA24RequestStop(aa24At(22)), nil)
+	aa24Record := AA24Record{AA24Kind: AA24RecordRevoke}
+	aa24Record.aa24ApplyRef(aa24Refused)
+	aa24Want(aa24T, "late revoke", aa24Host.aa24WriteControl(&aa24Record), nil)
+	aa24Want(aa24T, "worker poll", aa24Worker.AA24PollControl(aa24At(23)), nil)
+	// The host drains the worker control lane to empty; the retirement is still unposted.
+	aa24Control := aa24Worker.aa24Lane(AA24LaneWorkerControl)
+	aa24Produced, _, _ := aa24Control.aa24Indices()
+	aa24HostSide := aa24Host.aa24Lane(AA24LaneWorkerControl)
+	for {
+		_, aa24Consumer, _ := aa24HostSide.aa24Indices()
+		if aa24Consumer == aa24Produced {
+			break
+		}
+		if _, aa24OK, aa24Err := aa24Host.AA24Poll(make([]byte, 0, 16), aa24At(24)); !aa24OK || aa24Err != nil {
+			aa24T.Fatalf("host poll: %v %v", aa24OK, aa24Err)
+		}
+	}
+	if aa24Host.aa24ControlSettled() {
+		aa24T.Fatal("settled past an unposted retirement")
+	}
+	aa24Want(aa24T, "teardown refused", aa24Host.AA24Teardown(), ErrAA24NotAcknowledged)
+	aa24Want(aa24T, "worker retry", aa24Worker.AA24PollControl(aa24At(25)), nil)
+	// The injected reference is unknown to the host list, so the read is dropped as stale.
+	if _, _, aa24Err := aa24Host.AA24Poll(make([]byte, 0, 16), aa24At(26)); aa24Err != ErrAA24Stale {
+		aa24T.Fatalf("retirement not read: %v", aa24Err)
+	}
+	if !aa24Host.aa24ControlSettled() {
+		aa24T.Fatal("not settled after the retirement was read")
+	}
 }
