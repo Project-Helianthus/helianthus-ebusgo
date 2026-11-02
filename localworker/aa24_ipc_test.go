@@ -1915,6 +1915,7 @@ func TestAA24ExpiredOutstandingCommandsAreRetired(aa24T *aa24testing.T) {
 		aa24Pair.aa24Host.aa24Outstanding = append(aa24Pair.aa24Host.aa24Outstanding, aa24Identity)
 	}
 	aa24Want(aa24T, "full while live", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, AA24OwnerToken(aa24Max+1)), nil, aa24At(11)), ErrAA24Capacity)
+	aa24Pair.aa24Host.aa24LastControlTime = 12
 	aa24Want(aa24T, "expired retired", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, AA24OwnerToken(aa24Max+1)), nil, aa24At(12)), nil)
 	if aa24Len := len(aa24Pair.aa24Host.aa24Outstanding); aa24Len != 1 {
 		aa24T.Fatalf("outstanding %d", aa24Len)
@@ -3015,4 +3016,91 @@ func TestAA24SettlementWaitsForUnpostedRetirement(aa24T *aa24testing.T) {
 	if !aa24Host.aa24ControlSettled() {
 		aa24T.Fatal("not settled after the retirement was read")
 	}
+}
+
+// Catches guards seeded independently per endpoint: two endpoints handed readings
+// from different nonzero domains would both accept them and compare incomparable
+// deadlines and capture times. Each endpoint is varied alone while the other is valid.
+func TestAA24SharedClockDomainRejectsForeignReadings(aa24T *aa24testing.T) {
+	aa24Foreign := AA23ClockReading{AA23Domain: aa24FixtureDomain + 1, AA23Tick: 11}
+	aa24Fresh := func() *aa24Pair {
+		aa24Mem, aa24Expected := aa24FixtureMapping(aa24T)
+		aa24Expected.AA24ClockDomain = aa24FixtureDomain
+		return aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+	}
+	aa24Pair := aa24Fresh()
+	aa24Want(aa24T, "worker same domain", aa24Pair.aa24Worker.AA24PollControl(aa24At(10)), nil)
+	aa24Want(aa24T, "host same domain", aa24Pair.aa24Host.AA24RequestStop(aa24At(10)), nil)
+
+	aa24Pair = aa24Fresh()
+	aa24Want(aa24T, "worker foreign domain", aa24Pair.aa24Worker.AA24PollControl(aa24Foreign), ErrAA24Clock)
+	if aa24Pair.aa24Worker.AA24Fence().AA24Reason != AA24FenceClock {
+		aa24T.Fatalf("worker fence %+v", aa24Pair.aa24Worker.AA24Fence())
+	}
+	aa24Pair = aa24Fresh()
+	aa24Want(aa24T, "host foreign domain", aa24Pair.aa24Host.AA24PublishPlan(aa24FixtureRef(1), 0, 0, aa24Foreign), ErrAA24Clock)
+	if aa24Pair.aa24Host.AA24Fence().AA24Reason != AA24FenceClock {
+		aa24T.Fatalf("host fence %+v", aa24Pair.aa24Host.AA24Fence())
+	}
+}
+
+// Catches a command shape check that ignores the phase: a corrupted command slot
+// would be delivered to the output path instead of fencing the mapping.
+func TestAA24CommandWithPhaseIsFenced(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Want(aa24T, "send", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 1), nil, aa24At(11)), nil)
+	aa24Pair.aa24Host.aa24Lane(AA24LaneHostData).aa24Slot(0)[123] = 1
+	_, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(12))
+	if aa24OK || aa24Err != ErrAA24Record || aa24Pair.aa24Worker.AA24Fence().AA24Reason != AA24FenceCorruption {
+		aa24T.Fatalf("ok=%v err=%v fence=%+v", aa24OK, aa24Err, aa24Pair.aa24Worker.AA24Fence())
+	}
+}
+
+// Catches eviction on an empty data lane: with a worker paused before it publishes a
+// completion captured before the deadline, the identity must stay matchable.
+func TestAA24PausedWorkerCompletionSurvivesEvictionAttempt(aa24T *aa24testing.T) {
+	aa24Mem := aa24FixtureMemory(aa24FixtureBytes())
+	aa24Config := aa24FixtureConfig
+	aa24Config.AA24Lanes[AA24LaneWorkerData-1].AA24Capacity = 2
+	aa24Limits := aa24FixtureLimits
+	aa24Limits.AA24MaxOutstanding = 1
+	aa24Expected, _, aa24Err := AA24InitMapping(aa24Mem, aa24FixtureBinding(), aa24Config, aa24Limits)
+	if aa24Err != nil {
+		aa24T.Fatalf("init: %v", aa24Err)
+	}
+	aa24Pair := aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+	aa24Pair.aa24Publish(1, 5)
+	aa24Identity := func(aa24Token AA24OwnerToken, aa24Tick AA23Tick) AA24CommandIdentity {
+		aa24Command := aa24FixtureCommand(1, aa24Token)
+		aa24Command.AA24RequestDeadline = aa24Tick + 10
+		return aa24Command
+	}
+	aa24First := aa24Identity(1, 10)
+	aa24Want(aa24T, "send first", aa24Pair.aa24Host.AA24SendCommand(aa24First, nil, aa24At(10)), nil)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(10)); aa24Err != nil || !aa24OK {
+		aa24T.Fatalf("next: %v %v", aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "send second", aa24Pair.aa24Host.AA24SendCommand(aa24Identity(2, 30), nil, aa24At(30)), nil)
+	aa24Want(aa24T, "send third", aa24Pair.aa24Host.AA24SendCommand(aa24Identity(3, 50), nil, aa24At(50)), nil)
+	// Eviction is attempted while the data lane is still empty and the worker paused.
+	aa24Want(aa24T, "eviction refused", aa24Pair.aa24Host.AA24SendCommand(aa24Identity(4, 70), nil, aa24At(70)), ErrAA24Capacity)
+	aa24Want(aa24T, "late completion", aa24Pair.aa24Worker.AA24Complete(aa24First, AA24StatusAccepted, aa24At(15)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(71)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("late completion: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
+// Catches a teardown that clears a revoked plan before its retirement was posted,
+// which would leave the host quarantine unsettled for good.
+func TestAA24TeardownWaitsForPendingRetirement(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24Pair.aa24Publish(1, 10)
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(11)), nil)
+	aa24Want(aa24T, "stop", aa24Pair.aa24Host.AA24RequestStop(aa24At(12)), nil)
+	aa24Want(aa24T, "worker drain", aa24Pair.aa24Worker.AA24PollControl(aa24At(13)), nil)
+	aa24Want(aa24T, "teardown before retirement", aa24Pair.aa24Worker.AA24Teardown(), ErrAA24NotAcknowledged)
+	aa24Want(aa24T, "retire", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(14)), nil)
+	aa24Want(aa24T, "teardown after retirement", aa24Pair.aa24Worker.AA24Teardown(), nil)
 }

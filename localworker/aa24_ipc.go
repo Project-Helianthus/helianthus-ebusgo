@@ -199,6 +199,19 @@ type AA24Expected struct {
 	AA24Limits       AA24Limits
 	AA24PlanFloor    AA23PlanGeneration
 	AA24TokenFloor   AA24OwnerToken
+	// AA24ClockDomain is the one clock domain both endpoints share. When nonzero,
+	// each endpoint's guard is seeded with it, so a reading from any other nonzero
+	// domain latches the clock fence and is never compared with a deadline or
+	// capture time. Zero keeps the guard unseeded and takes the first reading's domain.
+	AA24ClockDomain uint64
+}
+
+// aa24SeedClock builds a guard bound to the expected clock domain.
+func aa24SeedClock(aa24Domain uint64) aa23ClockGuard {
+	if aa24Domain == 0 {
+		return aa23ClockGuard{}
+	}
+	return aa23ClockGuard{aa23Started: true, aa23Domain: aa24Domain}
 }
 
 // AA24LaneConfig sizes one lane.
@@ -655,7 +668,7 @@ func (aa24Record *AA24Record) aa24Shape(aa24Lane AA24LaneKind, aa24Layout *AA24L
 			aa24ControlPlain && aa24StatusZero && aa24NoPhase
 	case AA24RecordCommand:
 		return aa24RegistrationFull && aa24PlanFull && aa24OwnerFull && aa24CaptureZero && aa24ArenaZero &&
-			aa24ControlPlain && aa24StatusZero
+			aa24ControlPlain && aa24StatusZero && aa24NoPhase
 	case AA24RecordRaw:
 		aa24Selected := aa24RegistrationFull && aa24PlanFull && aa24OwnerFull
 		aa24Unselected := aa24RegistrationZero && aa24PlanZero && aa24TokenZero && aa24Record.AA24Transaction != 0
@@ -1040,6 +1053,7 @@ func AA24AttachWorker(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Worker, e
 	}
 	return &AA24Worker{
 		aa24Expected:     aa24Expected,
+		aa24Clock:        aa24SeedClock(aa24Expected.AA24ClockDomain),
 		aa24Lanes:        aa24AttachLanes(aa24Mem, &aa24Layout, aa24Expected.AA24Limits, true),
 		aa24NextSequence: 1,
 		aa24Adopted:      make([]aa24AdoptedPlan, 0, aa24Expected.AA24Limits.AA24MaxPlans),
@@ -1635,6 +1649,16 @@ func (aa24Worker *AA24Worker) AA24Teardown() error {
 	if aa24Worker.AA24OutputOpen() || aa24Worker.aa24FenceAcknowledged() != nil {
 		return ErrAA24NotAcknowledged
 	}
+	// A revoked plan stays until its retirement acknowledgement was posted, so the
+	// host quarantine can be released by the exact record.
+	if len(aa24Worker.aa24RetireRetry) > 0 {
+		return ErrAA24NotAcknowledged
+	}
+	for _, aa24Held := range aa24Worker.aa24Adopted {
+		if aa24Held.aa24Revoked {
+			return ErrAA24NotAcknowledged
+		}
+	}
 	aa24Worker.aa24Detached = true
 	aa24Worker.aa24Lanes = [aa24LaneCount]aa24Lane{}
 	aa24Worker.aa24Adopted = nil
@@ -1687,6 +1711,7 @@ func AA24AttachHost(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Host, error
 	aa24Lanes := aa24AttachLanes(aa24Mem, &aa24Layout, aa24Limits, false)
 	return &AA24Host{
 		aa24Expected:    aa24Expected,
+		aa24Clock:       aa24SeedClock(aa24Expected.AA24ClockDomain),
 		aa24Lanes:       aa24Lanes,
 		aa24Plans:       make([]aa24HostPlan, 0, aa24Limits.AA24MaxPlans),
 		aa24PlanFloor:   aa24Expected.AA24PlanFloor,
@@ -1764,7 +1789,7 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 		if !aa24Host.aa24Cancelling(aa24Identity) {
 			aa24Host.aa24Cancelled = append(aa24Host.aa24Cancelled, aa24Identity)
 		}
-		if aa24Host.aa24Detached || !aa24Host.aa24Linger(aa24Identity, true, &aa24LingerHorizon) {
+		if aa24Host.aa24Detached || !aa24Host.aa24Linger(aa24Identity, true, &aa24LingerHorizon, false) {
 			if !aa24Host.aa24Detached {
 				aa24Kept = append(aa24Kept, aa24Identity)
 			}
@@ -1903,6 +1928,9 @@ type aa24Lingered struct {
 	// aa24Strict marks a fence-cancelled identity: only a record queued before the
 	// horizon is evidence, a completion posted after the fence stays stale.
 	aa24Strict bool
+	// aa24Retired marks an identity whose plan retirement the worker acknowledged:
+	// the worker then holds no deferred output for it, so it cannot publish later.
+	aa24Retired bool
 }
 
 // aa24Linger keeps an identity that no longer occupies outstanding capacity, since
@@ -1912,7 +1940,7 @@ type aa24Lingered struct {
 // A full list first drops entries whose horizon the data tail has passed; it never
 // evicts an entry that may still have a queued completion. Without room it reports
 // false and the caller keeps the identity outstanding.
-func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Strict bool, aa24At *uint64) bool {
+func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Strict bool, aa24At *uint64, aa24Retired bool) bool {
 	if cap(aa24Host.aa24Lingering) == 0 {
 		return false
 	}
@@ -1923,8 +1951,17 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Stric
 		// horizon captured at expiry, so it is evicted only once the consumer passed
 		// the producer index current now.
 		aa24Produced := aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
+		aa24Progress := aa24Host.aa24LastControlTime
+		if aa24Host.aa24LastDataCapture > aa24Progress {
+			aa24Progress = aa24Host.aa24LastDataCapture
+		}
 		for _, aa24Held := range aa24Host.aa24Lingering {
-			if aa24Held.aa24Horizon > aa24Data.aa24LocalConsumer || (!aa24Held.aa24Strict && aa24Produced > aa24Data.aa24LocalConsumer) {
+			// Worker progress proves publication impossible only once a worker record
+			// carries a capture time at or past the identity's deadline: the worker
+			// refuses a later completion. A paused worker with an empty lane proves
+			// nothing, so the entry is kept and new work is refused instead.
+			aa24Pending := !aa24Held.aa24Strict && !aa24Held.aa24Retired && (aa24Produced > aa24Data.aa24LocalConsumer || aa24Held.aa24Identity.aa24Live(aa24Progress))
+			if aa24Held.aa24Horizon > aa24Data.aa24LocalConsumer || aa24Pending {
 				aa24Kept = append(aa24Kept, aa24Held)
 			}
 		}
@@ -1939,7 +1976,7 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Stric
 	} else {
 		aa24Horizon = aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
 	}
-	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Lingered{aa24Identity: aa24Identity, aa24Horizon: aa24Horizon, aa24Strict: aa24Strict})
+	aa24Host.aa24Lingering = append(aa24Host.aa24Lingering, aa24Lingered{aa24Identity: aa24Identity, aa24Horizon: aa24Horizon, aa24Strict: aa24Strict, aa24Retired: aa24Retired})
 	return true
 }
 
@@ -1949,7 +1986,7 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Stric
 func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24LingerMoved(aa24Identity) {
+		if aa24Identity.aa24Live(aa24Now) || !aa24Host.aa24LingerMoved(aa24Identity, false) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}
@@ -1958,12 +1995,12 @@ func (aa24Host *AA24Host) aa24RetireExpired(aa24Now AA23Tick) {
 
 // aa24LingerMoved moves an outstanding identity to lingering and keeps the strict
 // horizon a fence already set for retained identities.
-func (aa24Host *AA24Host) aa24LingerMoved(aa24Identity AA24CommandIdentity) bool {
+func (aa24Host *AA24Host) aa24LingerMoved(aa24Identity AA24CommandIdentity, aa24Retired bool) bool {
 	if aa24Host.aa24RetainedStrict {
 		aa24Horizon := aa24Host.aa24RetainedHorizon
-		return aa24Host.aa24Linger(aa24Identity, true, &aa24Horizon)
+		return aa24Host.aa24Linger(aa24Identity, true, &aa24Horizon, aa24Retired)
 	}
-	return aa24Host.aa24Linger(aa24Identity, false, nil)
+	return aa24Host.aa24Linger(aa24Identity, false, nil, aa24Retired)
 }
 
 // AA24SendCommand queues one command. A full data lane refuses it without any
@@ -2159,7 +2196,7 @@ func (aa24Host *AA24Host) aa24HandleControl(aa24Record *AA24Record, aa24Now AA23
 	aa24Retired := aa24Record.aa24Ref()
 	aa24Kept := aa24Host.aa24Outstanding[:0]
 	for _, aa24Identity := range aa24Host.aa24Outstanding {
-		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24LingerMoved(aa24Identity) {
+		if !aa24Identity.AA24Ref.aa24Matches(aa24Retired) || !aa24Host.aa24LingerMoved(aa24Identity, true) {
 			aa24Kept = append(aa24Kept, aa24Identity)
 		}
 	}
