@@ -2435,8 +2435,97 @@ func TestAA24RevokeAfterStopMustBeReadBeforeTeardown(aa24T *aa24testing.T) {
 		aa24T.Fatalf("resync: %v", aa24Err)
 	}
 	aa24Want(aa24T, "worker reads revoke", aa24Pair.aa24Worker.AA24PollControl(aa24At(14)), nil)
+	// The adopted plan's retirement is still unposted, so the lanes are empty yet the
+	// host plan stays quarantined and nothing may settle.
+	if aa24Pair.aa24Host.aa24ControlSettled() {
+		aa24T.Fatal("settled past an unacknowledged adopted revocation")
+	}
+	aa24Want(aa24T, "host teardown before acknowledgement", aa24Pair.aa24Host.AA24Teardown(), ErrAA24NotAcknowledged)
+	if _, aa24Err := aa24Pair.aa24Host.AA24ResyncExpected(aa24FixtureStream + 1); !aa24errorstest.Is(aa24Err, ErrAA24NotAcknowledged) {
+		aa24T.Fatalf("resync before acknowledgement: %v", aa24Err)
+	}
+	aa24Want(aa24T, "acknowledge", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(15)), nil)
+	aa24Want(aa24T, "host teardown before the retirement is read", aa24Pair.aa24Host.AA24Teardown(), ErrAA24NotAcknowledged)
+	if aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(16); aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordAcknowledge {
+		aa24T.Fatalf("retirement: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+	if !aa24Pair.aa24Host.aa24ControlSettled() {
+		aa24T.Fatal("not settled after the retirement was consumed")
+	}
 	aa24Want(aa24T, "worker teardown after read", aa24Pair.aa24Worker.AA24Teardown(), nil)
 	aa24Want(aa24T, "host teardown after read", aa24Pair.aa24Host.AA24Teardown(), nil)
+}
+
+// Catches an eviction that trusts the producer snapshot taken at expiry: the worker
+// captured a completion before its deadline, queued it after the host expired the
+// command, and a full lingering list dropped the identity so the completion drained
+// as stale.
+func TestAA24LateCompletionAfterExpirySurvivesFullLingering(aa24T *aa24testing.T) {
+	aa24Mem := aa24FixtureMemory(aa24FixtureBytes())
+	aa24Config := aa24FixtureConfig
+	aa24Config.AA24Lanes[AA24LaneWorkerData-1].AA24Capacity = 2
+	aa24Limits := aa24FixtureLimits
+	aa24Limits.AA24MaxOutstanding = 1
+	aa24Expected, _, aa24Err := AA24InitMapping(aa24Mem, aa24FixtureBinding(), aa24Config, aa24Limits)
+	if aa24Err != nil {
+		aa24T.Fatalf("init: %v", aa24Err)
+	}
+	aa24Pair := aa24AttachPair(aa24T, aa24Mem, aa24Expected)
+	aa24Pair.aa24Publish(1, 5)
+	aa24Identity := func(aa24Token AA24OwnerToken, aa24Tick AA23Tick) AA24CommandIdentity {
+		aa24Command := aa24FixtureCommand(1, aa24Token)
+		aa24Command.AA24RequestDeadline = aa24Tick + 10
+		return aa24Command
+	}
+	aa24First := aa24Identity(1, 10)
+	aa24Want(aa24T, "send first", aa24Pair.aa24Host.AA24SendCommand(aa24First, nil, aa24At(10)), nil)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(10)); aa24Err != nil || !aa24OK {
+		aa24T.Fatalf("next: %v %v", aa24OK, aa24Err)
+	}
+	// Each later send expires the previous command on the host, filling the list.
+	aa24Want(aa24T, "send second", aa24Pair.aa24Host.AA24SendCommand(aa24Identity(2, 30), nil, aa24At(30)), nil)
+	aa24Want(aa24T, "send third", aa24Pair.aa24Host.AA24SendCommand(aa24Identity(3, 50), nil, aa24At(50)), nil)
+	// The descheduled worker now queues the completion it captured before the deadline.
+	aa24Want(aa24T, "late completion", aa24Pair.aa24Worker.AA24Complete(aa24First, AA24StatusAccepted, aa24At(15)), nil)
+	aa24Want(aa24T, "fourth send finds no room", aa24Pair.aa24Host.AA24SendCommand(aa24Identity(4, 70), nil, aa24At(70)), ErrAA24Capacity)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(71)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("late completion: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
+// Catches a completion shape check that ignores the unused payload and phase: a
+// corrupted record would be surfaced, or retried as a buffer error, instead of
+// fencing malformed framing.
+func TestAA24CompletionWithPayloadOrPhaseIsFenced(aa24T *aa24testing.T) {
+	aa24Cases := []struct {
+		aa24Name  string
+		aa24Patch func([]byte)
+		aa24Dst   int
+	}{
+		{"phase", func(aa24Slot []byte) { aa24Slot[123] = 1 }, 16},
+		{"payload fits", func(aa24Slot []byte) { aa24binarytest.LittleEndian.PutUint32(aa24Slot[4:], 2) }, 16},
+		{"payload exceeds buffer", func(aa24Slot []byte) { aa24binarytest.LittleEndian.PutUint32(aa24Slot[4:], 2) }, 0},
+	}
+	for _, aa24Case := range aa24Cases {
+		aa24Pair := aa24NewPair(aa24T)
+		aa24Pair.aa24Publish(1, 10)
+		aa24Identity := aa24Pair.aa24Admit(1, 1, 10)
+		aa24Want(aa24T, aa24Case.aa24Name+" complete", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(11)), nil)
+		aa24Case.aa24Patch(aa24Pair.aa24Host.aa24Lane(AA24LaneWorkerData).aa24Slot(0))
+		_, aa24OK, aa24Err := aa24Pair.aa24Host.AA24Poll(make([]byte, 0, aa24Case.aa24Dst), aa24At(12))
+		if aa24OK || aa24Err != ErrAA24Record || aa24Pair.aa24Host.AA24Fence().AA24Reason != AA24FenceCorruption {
+			aa24T.Fatalf("%s: ok=%v err=%v fence=%+v", aa24Case.aa24Name, aa24OK, aa24Err, aa24Pair.aa24Host.AA24Fence())
+		}
+	}
+	// The unpatched record is the positive control.
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24Identity := aa24Pair.aa24Admit(1, 1, 10)
+	aa24Want(aa24T, "control complete", aa24Pair.aa24Worker.AA24Complete(aa24Identity, AA24StatusAccepted, aa24At(11)), nil)
+	if aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(12); aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion {
+		aa24T.Fatalf("control: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
 }
 
 // Catches a completion with an invalid status that clears the active command first.

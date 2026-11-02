@@ -663,7 +663,7 @@ func (aa24Record *AA24Record) aa24Shape(aa24Lane AA24LaneKind, aa24Layout *AA24L
 			aa24Record.AA24Direction != AA24DirectionControl && len(aa24Record.AA24Payload) == 0
 	case AA24RecordCompletion:
 		return aa24RegistrationFull && aa24PlanFull && aa24OwnerFull && aa24CaptureFull && aa24ArenaZero &&
-			aa24ControlPlain && aa24Record.AA24Status != AA24StatusPending
+			aa24ControlPlain && aa24NoPhase && len(aa24Record.AA24Payload) == 0 && aa24Record.AA24Status != AA24StatusPending
 	}
 	return false
 }
@@ -885,6 +885,11 @@ func (aa24Lane *aa24Lane) aa24Peek(aa24Dst []byte) (AA24Record, bool, error) {
 		return AA24Record{}, false, ErrAA24Truncated
 	}
 	if aa24PayloadBytes != 0 && (aa24Lane.aa24Layout.aa24Kind == AA24LaneHostControl || aa24Lane.aa24Layout.aa24Kind == AA24LaneWorkerControl) {
+		return AA24Record{}, false, ErrAA24Record
+	}
+	if aa24PayloadBytes != 0 && AA24RecordKind(aa24binary.LittleEndian.Uint32(aa24Slot[0:])) == AA24RecordCompletion {
+		// A completion never carries a payload, so it is malformed framing before any
+		// buffer size can matter.
 		return AA24Record{}, false, ErrAA24Record
 	}
 	if aa24PayloadBytes > aa24Lane.aa24PayloadCap {
@@ -1914,8 +1919,12 @@ func (aa24Host *AA24Host) aa24Linger(aa24Identity AA24CommandIdentity, aa24Stric
 	aa24Data := aa24Host.aa24Lane(AA24LaneWorkerData)
 	if len(aa24Host.aa24Lingering) == cap(aa24Host.aa24Lingering) {
 		aa24Kept := aa24Host.aa24Lingering[:0]
+		// A non-strict entry may still meet a completion the worker queues after the
+		// horizon captured at expiry, so it is evicted only once the consumer passed
+		// the producer index current now.
+		aa24Produced := aa24LoadAcquire(aa24Data.aa24Mem, aa24Data.aa24Layout.aa24ProducerOffset)
 		for _, aa24Held := range aa24Host.aa24Lingering {
-			if aa24Held.aa24Horizon > aa24Data.aa24LocalConsumer {
+			if aa24Held.aa24Horizon > aa24Data.aa24LocalConsumer || (!aa24Held.aa24Strict && aa24Produced > aa24Data.aa24LocalConsumer) {
 				aa24Kept = append(aa24Kept, aa24Held)
 			}
 		}
@@ -2259,7 +2268,16 @@ func (aa24Host *AA24Host) aa24ControlSettled() bool {
 	}
 	// A revocation queued behind the stop must be consumed before settlement.
 	aa24Produced, aa24Read, aa24Err := aa24Host.aa24Lane(AA24LaneHostControl).aa24Indices()
-	return aa24Err == nil && aa24Produced == aa24Read
+	if aa24Err != nil || aa24Produced != aa24Read {
+		return false
+	}
+	// A revoked plan stays quarantined until its exact retirement is consumed.
+	for aa24Index := range aa24Host.aa24Plans {
+		if aa24Host.aa24Plans[aa24Index].aa24Revoking {
+			return false
+		}
+	}
+	return true
 }
 
 // AA24ResyncExpected names the successor mapping once the fence is acknowledged: the
