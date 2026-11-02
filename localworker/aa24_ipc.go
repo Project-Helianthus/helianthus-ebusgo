@@ -1748,10 +1748,10 @@ func (aa24Host *AA24Host) aa24Close(aa24Reason AA24FenceReason, aa24Sequence uin
 		for aa24Index := range aa24Host.aa24Lingering {
 			aa24Held := &aa24Host.aa24Lingering[aa24Index]
 			if !aa24Held.aa24Strict {
+				// The expiry snapshot may predate a valid completion the worker queued
+				// before the fence, so the entry adopts the fence horizon.
 				aa24Held.aa24Strict = true
-				if aa24Held.aa24Horizon > aa24FenceHorizon {
-					aa24Held.aa24Horizon = aa24FenceHorizon
-				}
+				aa24Held.aa24Horizon = aa24FenceHorizon
 			}
 		}
 	}

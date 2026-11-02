@@ -2178,6 +2178,26 @@ func TestAA24FenceTightensExistingLingeringIdentities(aa24T *aa24testing.T) {
 	aa24Want(aa24T, "post-fence completion is stale", aa24Err, ErrAA24Stale)
 }
 
+// Catches a fence that keeps the expiry-time horizon of a lingering identity: a valid
+// completion queued before the fence would be discarded as stale.
+func TestAA24FenceAdoptsHeadForExpiryLingeringIdentity(aa24T *aa24testing.T) {
+	aa24Pair := aa24LingerPair(aa24T)
+	aa24Pair.aa24Publish(1, 10)
+	aa24First := aa24FixtureCommand(1, 1)
+	aa24First.AA24RequestDeadline = 20
+	aa24Want(aa24T, "send", aa24Pair.aa24Host.AA24SendCommand(aa24First, nil, aa24At(10)), nil)
+	if _, aa24OK, aa24Err := aa24Pair.aa24Worker.AA24NextCommand(make([]byte, 0, 16), aa24At(11)); aa24Err != nil || !aa24OK {
+		aa24T.Fatalf("next: %v %v", aa24OK, aa24Err)
+	}
+	aa24Want(aa24T, "second send expires the first at horizon zero", aa24Pair.aa24Host.AA24SendCommand(aa24FixtureCommand(1, 2), nil, aa24At(20)), nil)
+	aa24Want(aa24T, "descheduled worker completes", aa24Pair.aa24Worker.AA24Complete(aa24First, AA24StatusAccepted, aa24At(15)), nil)
+	aa24Want(aa24T, "stop before polling", aa24Pair.aa24Host.AA24RequestStop(aa24At(22)), nil)
+	aa24Delivery, aa24OK, aa24Err := aa24Pair.aa24Poll(24)
+	if aa24Err != nil || !aa24OK || aa24Delivery.AA24Record.AA24Kind != AA24RecordCompletion || aa24Delivery.AA24Record.AA24OwnerToken != 1 {
+		aa24T.Fatalf("pre-fence completion: %+v %v %v", aa24Delivery, aa24OK, aa24Err)
+	}
+}
+
 // Catches teardown on stop consumption alone: the worker's gap stays unread, so the
 // worker could never settle its own teardown.
 func TestAA24HostTeardownWaitsForTheWorkerGapToBeRead(aa24T *aa24testing.T) {
