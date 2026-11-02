@@ -1239,8 +1239,8 @@ func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now 
 		}
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
 	case AA24RecordPublish:
-		if aa24Fenced {
-			// A fenced drain adopts nothing, but the host still lists the plan, so the
+		if aa24Fenced || aa24Worker.aa24Fence.AA24Reason != AA24FenceNone {
+			// A fenced drain, or a publication met while any fence is raised, adopts nothing, but the host still lists the plan, so the
 			// reference is kept as refused and its exact revocation retires it.
 			aa24Worker.aa24Refused++
 			if len(aa24Worker.aa24RefusedRefs) < cap(aa24Worker.aa24RefusedRefs) {

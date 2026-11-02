@@ -2741,3 +2741,29 @@ func TestAA24HostRevokeQueuedUnderLatchedClockFence(aa24T *aa24testing.T) {
 	aa24Want(aa24T, "worker reads the revocation", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
 	aa24Want(aa24T, "retirement", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(13)), nil)
 }
+
+// Catches a drain that decides fencing once per pass from the clock alone: a
+// publication queued before the worker learns of a data-lane gap fence would be
+// adopted and stay quarantined until an explicit acknowledgement.
+func TestAA24PublicationQueuedBeforeGapFenceIsRefused(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24FixtureRef(1)
+	aa24ArenaStart := aa24Pair.aa24Host.aa24Lanes[0].aa24ArenaLayout.AA24ArenaOffset + aa24BuildBytes
+	aa24Want(aa24T, "publish stays queued", aa24Pair.aa24Host.AA24PublishPlan(aa24Ref, aa24ArenaStart, 8, aa24At(10)), nil)
+	aa24Pair.aa24Worker.aa24RaiseLocalGap(AA24FenceCounter)
+	if aa24Pair.aa24Worker.AA24Fence().AA24Reason != AA24FenceCounter {
+		aa24T.Fatalf("fence %+v", aa24Pair.aa24Worker.AA24Fence())
+	}
+	aa24Want(aa24T, "worker drains under the gap fence", aa24Pair.aa24Worker.AA24PollControl(aa24At(11)), nil)
+	if len(aa24Pair.aa24Worker.aa24Adopted) != 0 || len(aa24Pair.aa24Worker.aa24RefusedRefs) != 1 {
+		aa24T.Fatalf("adopted %d refused %d", len(aa24Pair.aa24Worker.aa24Adopted), len(aa24Pair.aa24Worker.aa24RefusedRefs))
+	}
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(12)), nil)
+	aa24Want(aa24T, "worker retires the refused plan", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	for aa24Tick := AA23Tick(20); aa24Tick < 26; aa24Tick++ {
+		_, _, _ = aa24Pair.aa24Poll(aa24Tick)
+	}
+	if aa24Left := aa24Pair.aa24Host.AA24QuarantinedPlans(nil); len(aa24Left) != 0 {
+		aa24T.Fatalf("plan stayed quarantined: %+v", aa24Left)
+	}
+}
