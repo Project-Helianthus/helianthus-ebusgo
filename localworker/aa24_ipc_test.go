@@ -13,7 +13,7 @@ import (
 // prove the model's validation and state rules, never cross-process ordering.
 
 const (
-	aa24FixtureDomain     = uint64(7)
+	aa24FixtureDomain     = AA24DefaultClockDomain
 	aa24FixtureWorker     = AA23WorkerID(11)
 	aa24FixtureStream     = AA23StreamGeneration(21)
 	aa24FixtureAddress    = byte(0x15)
@@ -3103,4 +3103,28 @@ func TestAA24TeardownWaitsForPendingRetirement(aa24T *aa24testing.T) {
 	aa24Want(aa24T, "teardown before retirement", aa24Pair.aa24Worker.AA24Teardown(), ErrAA24NotAcknowledged)
 	aa24Want(aa24T, "retire", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(14)), nil)
 	aa24Want(aa24T, "teardown after retirement", aa24Pair.aa24Worker.AA24Teardown(), nil)
+}
+
+// Catches an attach that accepts an unset clock domain: host and worker could then
+// each adopt the domain of their first reading and compare incomparable deadlines.
+// Each endpoint is varied alone with the default expectation otherwise valid.
+func TestAA24AttachRequiresSharedClockDomain(aa24T *aa24testing.T) {
+	aa24Mem, aa24Expected := aa24FixtureMapping(aa24T)
+	if aa24Expected.AA24ClockDomain == 0 {
+		aa24T.Fatal("default expectation has no clock domain")
+	}
+	aa24Zero := aa24Expected
+	aa24Zero.AA24ClockDomain = 0
+	if _, aa24Err := AA24AttachHost(aa24Mem, aa24Zero); aa24Err != ErrAA24Clock {
+		aa24T.Fatalf("host zero domain: %v", aa24Err)
+	}
+	if _, aa24Err := AA24AttachWorker(aa24Mem, aa24Zero); aa24Err != ErrAA24Clock {
+		aa24T.Fatalf("worker zero domain: %v", aa24Err)
+	}
+	if _, aa24Err := AA24AttachHost(aa24Mem, aa24Expected); aa24Err != nil {
+		aa24T.Fatalf("host default domain: %v", aa24Err)
+	}
+	if _, aa24Err := AA24AttachWorker(aa24Mem, aa24Expected); aa24Err != nil {
+		aa24T.Fatalf("worker default domain: %v", aa24Err)
+	}
 }

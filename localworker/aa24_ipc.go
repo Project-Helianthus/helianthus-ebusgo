@@ -199,12 +199,15 @@ type AA24Expected struct {
 	AA24Limits       AA24Limits
 	AA24PlanFloor    AA23PlanGeneration
 	AA24TokenFloor   AA24OwnerToken
-	// AA24ClockDomain is the one clock domain both endpoints share. When nonzero,
-	// each endpoint's guard is seeded with it, so a reading from any other nonzero
+	// AA24ClockDomain is the one clock domain both endpoints share. It must be
+	// nonzero: each endpoint's guard is seeded with it, so a reading from any other
 	// domain latches the clock fence and is never compared with a deadline or
-	// capture time. Zero keeps the guard unseeded and takes the first reading's domain.
+	// capture time. AA24InitMapping returns the default domain.
 	AA24ClockDomain uint64
 }
+
+// AA24DefaultClockDomain is the clock domain AA24InitMapping puts in its expectation.
+const AA24DefaultClockDomain = uint64(1)
 
 // aa24SeedClock builds a guard bound to the expected clock domain.
 func aa24SeedClock(aa24Domain uint64) aa23ClockGuard {
@@ -339,7 +342,8 @@ func AA24InitMapping(aa24Mem []byte, aa24Binding AA24Binding, aa24Config AA24Con
 		aa24Put64(aa24Desc[aa24DescOffsetRegion:], aa24Regions[aa24Index])
 	}
 	copy(aa24Mem[aa24ArenaOffset:], aa24Binding.AA24Build[:])
-	aa24Expected := AA24Expected{AA24Binding: aa24Binding, AA24MappingBytes: uint32(aa24Total), AA24Limits: aa24Limits}
+	aa24Expected := AA24Expected{AA24Binding: aa24Binding, AA24MappingBytes: uint32(aa24Total), AA24Limits: aa24Limits,
+		AA24ClockDomain: AA24DefaultClockDomain}
 	aa24Layout, aa24Err := AA24ValidateMapping(aa24Mem, aa24Expected)
 	return aa24Expected, aa24Layout, aa24Err
 }
@@ -1047,6 +1051,9 @@ type AA24Worker struct {
 
 // AA24AttachWorker validates a fresh mapping before any lane becomes reachable.
 func AA24AttachWorker(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Worker, error) {
+	if aa24Expected.AA24ClockDomain == 0 {
+		return nil, ErrAA24Clock
+	}
 	aa24Layout, aa24Err := AA24ValidateMapping(aa24Mem, aa24Expected)
 	if aa24Err != nil {
 		return nil, aa24Err
@@ -1703,6 +1710,9 @@ type AA24Host struct {
 
 // AA24AttachHost validates a fresh mapping before any lane becomes reachable.
 func AA24AttachHost(aa24Mem []byte, aa24Expected AA24Expected) (*AA24Host, error) {
+	if aa24Expected.AA24ClockDomain == 0 {
+		return nil, ErrAA24Clock
+	}
 	aa24Layout, aa24Err := AA24ValidateMapping(aa24Mem, aa24Expected)
 	if aa24Err != nil {
 		return nil, aa24Err
