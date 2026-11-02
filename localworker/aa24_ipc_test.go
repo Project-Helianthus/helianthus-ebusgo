@@ -2685,3 +2685,59 @@ func TestAA24ControlRecordPayloadFencesWithZeroCapacityDestination(aa24T *aa24te
 		aa24T.Fatalf("fence %+v", aa24Pair.aa24Host.AA24Fence())
 	}
 }
+
+// Catches an acknowledgement path that returns the latched clock error before the
+// retirement of an already revoked plan, which leaves the host plan quarantined.
+func TestAA24RetirementAcceptedAfterLatchedClockFence(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24Pair.aa24Publish(1, 10)
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(11)), nil)
+	aa24Want(aa24T, "regressed worker clock consumes the revocation", aa24Pair.aa24Worker.AA24PollControl(aa24At(5)), ErrAA24Clock)
+	aa24Want(aa24T, "retirement under the latched fence", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(5)), nil)
+	aa24Want(aa24T, "second retirement", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(5)), ErrAA24Stale)
+	for aa24Tick := AA23Tick(20); aa24Tick < 24; aa24Tick++ {
+		if _, _, aa24Err := aa24Pair.aa24Poll(aa24Tick); aa24Err != nil {
+			aa24T.Fatalf("host poll %d: %v", aa24Tick, aa24Err)
+		}
+	}
+	if aa24Left := aa24Pair.aa24Host.AA24QuarantinedPlans(nil); len(aa24Left) != 0 {
+		aa24T.Fatalf("plan stayed quarantined: %+v", aa24Left)
+	}
+}
+
+// Catches a fenced drain that discards a queued publication: its exact revocation
+// would find nothing to retire and the host would keep the plan indefinitely.
+func TestAA24FencedDrainKeepsRefusedPublication(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24FixtureRef(1)
+	aa24ArenaStart := aa24Pair.aa24Host.aa24Lanes[0].aa24ArenaLayout.AA24ArenaOffset + aa24BuildBytes
+	aa24Want(aa24T, "publish stays queued", aa24Pair.aa24Host.AA24PublishPlan(aa24Ref, aa24ArenaStart, 8, aa24At(10)), nil)
+	// A completion attempt reads the worker clock without draining the control lane.
+	aa24Want(aa24T, "clock read", aa24Pair.aa24Worker.AA24Complete(aa24FixtureCommand(1, 1), AA24StatusAccepted, aa24At(10)), ErrAA24Mismatch)
+	aa24Want(aa24T, "clock fault before the drain", aa24Pair.aa24Worker.AA24PollControl(aa24At(5)), ErrAA24Clock)
+	if len(aa24Pair.aa24Worker.aa24Adopted) != 0 || len(aa24Pair.aa24Worker.aa24RefusedRefs) != 1 {
+		aa24T.Fatalf("adopted %d refused %d", len(aa24Pair.aa24Worker.aa24Adopted), len(aa24Pair.aa24Worker.aa24RefusedRefs))
+	}
+	aa24Want(aa24T, "revoke", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(11)), nil)
+	aa24Want(aa24T, "fenced worker retires the revocation", aa24Pair.aa24Worker.AA24PollControl(aa24At(5)), ErrAA24Clock)
+	for aa24Tick := AA23Tick(20); aa24Tick < 24; aa24Tick++ {
+		if _, _, aa24Err := aa24Pair.aa24Poll(aa24Tick); aa24Err != nil {
+			aa24T.Fatalf("host poll %d: %v", aa24Tick, aa24Err)
+		}
+	}
+	if aa24Left := aa24Pair.aa24Host.AA24QuarantinedPlans(nil); len(aa24Left) != 0 {
+		aa24T.Fatalf("plan stayed quarantined: %+v", aa24Left)
+	}
+}
+
+// Catches a host revoke that returns the latched host clock error before queueing
+// the revocation of published work.
+func TestAA24HostRevokeQueuedUnderLatchedClockFence(aa24T *aa24testing.T) {
+	aa24Pair := aa24NewPair(aa24T)
+	aa24Ref := aa24Pair.aa24Publish(1, 10)
+	_, _, aa24Err := aa24Pair.aa24Poll(5)
+	aa24Want(aa24T, "regressed host clock", aa24Err, ErrAA24Clock)
+	aa24Want(aa24T, "revoke on a fenced clock", aa24Pair.aa24Host.AA24RevokePlan(aa24Ref, aa24At(5)), nil)
+	aa24Want(aa24T, "worker reads the revocation", aa24Pair.aa24Worker.AA24PollControl(aa24At(12)), nil)
+	aa24Want(aa24T, "retirement", aa24Pair.aa24Worker.AA24AcknowledgeRevocation(aa24Ref, aa24At(13)), nil)
+}

@@ -1240,7 +1240,14 @@ func (aa24Worker *AA24Worker) aa24HandleControl(aa24Record *AA24Record, aa24Now 
 		aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
 	case AA24RecordPublish:
 		if aa24Fenced {
-			aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
+			// A fenced drain adopts nothing, but the host still lists the plan, so the
+			// reference is kept as refused and its exact revocation retires it.
+			aa24Worker.aa24Refused++
+			if len(aa24Worker.aa24RefusedRefs) < cap(aa24Worker.aa24RefusedRefs) {
+				aa24Worker.aa24RefusedRefs = append(aa24Worker.aa24RefusedRefs, aa24Record.aa24Ref())
+			} else {
+				aa24Control.aa24Bump(&aa24Control.aa24Stats.AA24Dropped)
+			}
 			return
 		}
 		if aa24Record.AA24Plan <= aa24Worker.aa24PlanFloor || aa24Now >= aa24Record.AA24PlanExpiry ||
@@ -1451,8 +1458,17 @@ func (aa24Worker *AA24Worker) AA24Complete(aa24Identity AA24CommandIdentity, aa2
 // to the plan. The caller invokes it only after that holds. It may run on a fenced
 // stream, and it never takes the slot reserved for the gap: without room it fences.
 func (aa24Worker *AA24Worker) AA24AcknowledgeRevocation(aa24Ref AA24PlanRef, aa24Now AA23ClockReading) error {
+	aa24Stamp := aa24Now.AA23Tick
 	if aa24Err := aa24Worker.aa24Service(aa24Now); aa24Err != nil {
-		return aa24Err
+		if aa24Err != ErrAA24Clock {
+			return aa24Err
+		}
+		// A latched clock fence refuses new work, never the retirement of a plan whose
+		// exact revocation was consumed; it is stamped with the last trusted tick.
+		aa24Stamp = aa24Worker.aa24TrustedTick()
+		if aa24Worker.aa24LastCapture > aa24Stamp {
+			aa24Stamp = aa24Worker.aa24LastCapture
+		}
 	}
 	aa24Found := -1
 	for aa24Index := range aa24Worker.aa24Adopted {
@@ -1464,7 +1480,7 @@ func (aa24Worker *AA24Worker) AA24AcknowledgeRevocation(aa24Ref AA24PlanRef, aa2
 	if aa24Found < 0 {
 		return ErrAA24Stale
 	}
-	if aa24Err := aa24Worker.aa24PostRetired(aa24Ref, aa24Now.AA23Tick); aa24Err != nil {
+	if aa24Err := aa24Worker.aa24PostRetired(aa24Ref, aa24Stamp); aa24Err != nil {
 		return aa24Err
 	}
 	aa24Worker.aa24Adopted = append(aa24Worker.aa24Adopted[:aa24Found], aa24Worker.aa24Adopted[aa24Found+1:]...)
@@ -1800,7 +1816,9 @@ func (aa24Host *AA24Host) AA24PublishPlan(aa24Ref AA24PlanRef, aa24ArenaOffset u
 // the host and keeps the plan quarantined; the call may be repeated. A revocation
 // queued after the stop must be read before either side settles or tears down.
 func (aa24Host *AA24Host) AA24RevokePlan(aa24Ref AA24PlanRef, aa24Now AA23ClockReading) error {
-	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil {
+	// The revocation record carries no time, so a latched host clock fence does not
+	// stop it: the fence refuses new work, never the revocation of published work.
+	if aa24Err := aa24Host.aa24Tick(aa24Now); aa24Err != nil && aa24Err != ErrAA24Clock {
 		return aa24Err
 	}
 	aa24Index := aa24Host.aa24FindPlan(aa24Ref)
