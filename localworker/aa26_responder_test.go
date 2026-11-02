@@ -166,7 +166,7 @@ func (aa26Wire *aa26TestWire) AA26EmitResponderSymbol(aa26Symbol byte, aa26NotBe
 	return true
 }
 
-func (aa26Wire *aa26TestWire) AA26StartMaster(aa26Identity AA24CommandIdentity, aa26Initiator byte) bool {
+func (aa26Wire *aa26TestWire) AA26StartInitiator(aa26Identity AA24CommandIdentity, aa26Initiator byte) bool {
 	aa26Wire.aa26Starts = append(aa26Wire.aa26Starts, aa26Identity)
 	return true
 }
@@ -654,7 +654,7 @@ func TestAA26AcknowledgesOnlyAValidCRCAfterItsCharacterEnds(aa26T *aa26testing.T
 	}
 }
 
-func TestAA26CompletesThePreparedResponseWithoutMasterStart(aa26T *aa26testing.T) {
+func TestAA26CompletesThePreparedResponseWithoutInitiatorStart(aa26T *aa26testing.T) {
 	aa26Self := aa26NewFixture(aa26T, aa26DefaultOptions())
 	aa26RequestEnd := aa26Self.aa26Request(aa26TestFrameTick)
 	aa26End := aa26Self.aa26EchoPending()
@@ -667,7 +667,7 @@ func TestAA26CompletesThePreparedResponseWithoutMasterStart(aa26T *aa26testing.T
 	}
 	aa26Self.aa26Send(aa26End, 0x00, 0xAA)
 	if len(aa26Self.aa26Wire.aa26Starts) != 0 {
-		aa26T.Fatalf("aa26 responder issued %d master starts", len(aa26Self.aa26Wire.aa26Starts))
+		aa26T.Fatalf("aa26 responder issued %d initiator starts", len(aa26Self.aa26Wire.aa26Starts))
 	}
 	aa26Events := aa26Self.aa26Drain()
 	aa26WantRaw := append(append([]byte{0xAA}, aa26TestRequestWire(aa26TestInitiator, aa26TestAddress, aa26TestPB, aa26TestSB, aa26TestRequestData)...), 0x00)
@@ -787,7 +787,7 @@ func TestAA26EngineLoopbackCompletesThroughTheAA25WireModel(aa26T *aa26testing.T
 	aa26Line.aa26PaintAll(aa26AckStart, []byte{0x00, 0xAA})
 	aa26RunEngine(aa26Line, aa26Engine, aa26AckStart+3*aa26TestCharacter)
 	if aa26Line.aa26Edges != 0 || aa26Engine.AA25Stats().AA25TXEdges != 0 || len(aa26Self.aa26Wire.aa26Starts) != 0 {
-		aa26T.Fatal("aa26 the AA25 engine transmitted or a master start was issued")
+		aa26T.Fatal("aa26 the AA25 engine transmitted or an initiator start was issued")
 	}
 	aa26Events := aa26Self.aa26Drain()
 	aa26WantRaw := append(append([]byte(nil), aa26Request...), 0x00)
@@ -932,23 +932,23 @@ func aa26AdmitCommand(aa26Self *aa26Fixture, aa26Identity AA24CommandIdentity) {
 	}
 }
 
-func TestAA26MasterStartsUseOnlyTheAdmittedOwnerAndWaitForClosure(aa26T *aa26testing.T) {
+func TestAA26InitiatorStartsUseOnlyTheAdmittedOwnerAndWaitForClosure(aa26T *aa26testing.T) {
 	aa26Self := aa26NewFixture(aa26T, aa26DefaultOptions())
 	aa26Identity := aa26TestCommand(aa26Self, 7)
 	aa26AdmitCommand(aa26Self, aa26Identity)
 	// The responder transaction holds the wire from selection to closure.
 	aa26RequestEnd := aa26Self.aa26Send(aa26TestFrameTick, 0xAA, aa26TestInitiator, aa26TestAddress)
-	aa26WantErr(aa26T, "start during selection", aa26Self.aa26Responder.AA26StartMaster(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick), AA26ErrWireBusy)
+	aa26WantErr(aa26T, "start during selection", aa26Self.aa26Responder.AA26StartInitiator(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick), AA26ErrWireBusy)
 	aa26Rest := aa26TestRequestWire(aa26TestInitiator, aa26TestAddress, aa26TestPB, aa26TestSB, aa26TestRequestData)[2:]
 	aa26Self.aa26Send(aa26RequestEnd, aa26Rest...)
 	aa26Self.aa26Symbol(0x00, aa26Self.aa26Wire.aa26Emits[0].aa26NotBefore)
 	aa26Self.aa26Echoed = 1
-	aa26WantErr(aa26T, "start during response", aa26Self.aa26Responder.AA26StartMaster(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick), AA26ErrWireBusy)
+	aa26WantErr(aa26T, "start during response", aa26Self.aa26Responder.AA26StartInitiator(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick), AA26ErrWireBusy)
 	if len(aa26Self.aa26Wire.aa26Starts) != 0 {
-		aa26T.Fatal("aa26 a master start reached the wire during a response")
+		aa26T.Fatal("aa26 an initiator start reached the wire during a response")
 	}
 	aa26Self.aa26Send(aa26Self.aa26EchoPending(), 0x00)
-	aa26Self.aa26WantClosedClean("before master")
+	aa26Self.aa26WantClosedClean("before initiator")
 	// Nothing was queued: the refused start is gone until the caller offers it again.
 	if len(aa26Self.aa26Wire.aa26Starts) != 0 {
 		aa26T.Fatal("aa26 a refused start was replayed")
@@ -971,47 +971,47 @@ func TestAA26MasterStartsUseOnlyTheAdmittedOwnerAndWaitForClosure(aa26T *aa26tes
 	} {
 		aa26Mutated := aa26Identity
 		aa26Case.aa26Mutate(&aa26Mutated)
-		if aa26Self.aa26Responder.AA26StartMaster(aa26Mutated, aa26TestOtherInitiator, aa26Self.aa26Tick) == nil {
+		if aa26Self.aa26Responder.AA26StartInitiator(aa26Mutated, aa26TestOtherInitiator, aa26Self.aa26Tick) == nil {
 			aa26T.Fatalf("aa26 %s: a command the AA24 worker never admitted took the wire", aa26Case.aa26Name)
 		}
 	}
 	if len(aa26Self.aa26Wire.aa26Starts) != 0 {
 		aa26T.Fatal("aa26 a mutated owner reached the wire")
 	}
-	aa26WantErr(aa26T, "responder address as initiator", aa26Self.aa26Responder.AA26StartMaster(aa26Identity, aa26TestAddress, aa26Self.aa26Tick), AA26ErrAddress)
-	aa26WantOK(aa26T, "admitted start", aa26Self.aa26Responder.AA26StartMaster(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick))
+	aa26WantErr(aa26T, "responder address as initiator", aa26Self.aa26Responder.AA26StartInitiator(aa26Identity, aa26TestAddress, aa26Self.aa26Tick), AA26ErrAddress)
+	aa26WantOK(aa26T, "admitted start", aa26Self.aa26Responder.AA26StartInitiator(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick))
 	if len(aa26Self.aa26Wire.aa26Starts) != 1 || aa26Self.aa26Wire.aa26Starts[0] != aa26Identity {
 		aa26T.Fatalf("aa26 starts = %+v", aa26Self.aa26Wire.aa26Starts)
 	}
-	aa26WantErr(aa26T, "second start", aa26Self.aa26Responder.AA26StartMaster(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick), AA26ErrWireBusy)
-	// While the master holds the wire, a frame to the registered address is not selected.
+	aa26WantErr(aa26T, "second start", aa26Self.aa26Responder.AA26StartInitiator(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick), AA26ErrWireBusy)
+	// While the initiator holds the wire, a frame to the registered address is not selected.
 	aa26Self.aa26Request(aa26Self.aa26Tick + aa26TestCharacter)
 	if _, aa26Active := aa26Self.aa26Responder.AA26Active(); aa26Active || len(aa26Self.aa26Wire.aa26Emits) != len(aa26Self.aa26ExpectedEmits(0)) {
-		aa26T.Fatal("aa26 the responder answered during a master hold")
+		aa26T.Fatal("aa26 the responder answered during an initiator hold")
 	}
 	aa26Mutated := aa26Identity
 	aa26Mutated.AA24OwnerToken++
-	aa26WantErr(aa26T, "end with another owner", aa26Self.aa26Responder.AA26EndMaster(aa26Mutated), AA26ErrNotHeld)
-	aa26WantOK(aa26T, "end master", aa26Self.aa26Responder.AA26EndMaster(aa26Identity))
+	aa26WantErr(aa26T, "end with another owner", aa26Self.aa26Responder.AA26EndInitiator(aa26Mutated), AA26ErrNotHeld)
+	aa26WantOK(aa26T, "end initiator", aa26Self.aa26Responder.AA26EndInitiator(aa26Identity))
 	aa26Self.aa26Request(aa26Self.aa26Tick + aa26TestCharacter)
 	if _, aa26Active := aa26Self.aa26Responder.AA26Active(); !aa26Active {
-		aa26T.Fatal("aa26 the responder stayed excluded after the master hold ended")
+		aa26T.Fatal("aa26 the responder stayed excluded after the initiator hold ended")
 	}
 }
 
-func TestAA26ExpiredMasterHoldReleasesAtItsExclusiveDeadline(aa26T *aa26testing.T) {
+func TestAA26ExpiredInitiatorHoldReleasesAtItsExclusiveDeadline(aa26T *aa26testing.T) {
 	aa26Self := aa26NewFixture(aa26T, aa26DefaultOptions())
 	aa26Identity := aa26TestCommand(aa26Self, 3)
 	aa26Identity.AA24OwnerExpiry = AA23Tick(aa26TestFrameTick + 50)
 	aa26AdmitCommand(aa26Self, aa26Identity)
-	aa26WantOK(aa26T, "start", aa26Self.aa26Responder.AA26StartMaster(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick))
+	aa26WantOK(aa26T, "start", aa26Self.aa26Responder.AA26StartInitiator(aa26Identity, aa26TestOtherInitiator, aa26Self.aa26Tick))
 	aa26Self.aa26Responder.AA26Poll(aa26TestFrameTick + 49)
-	if !aa26Self.aa26Responder.aa26Master {
-		aa26T.Fatal("aa26 master hold dropped before its deadline")
+	if !aa26Self.aa26Responder.aa26InitiatorHeld {
+		aa26T.Fatal("aa26 initiator hold dropped before its deadline")
 	}
 	aa26Self.aa26Responder.AA26Poll(aa26TestFrameTick + 50)
-	if aa26Self.aa26Responder.aa26Master {
-		aa26T.Fatal("aa26 master hold survived its exclusive deadline")
+	if aa26Self.aa26Responder.aa26InitiatorHeld {
+		aa26T.Fatal("aa26 initiator hold survived its exclusive deadline")
 	}
 }
 
@@ -1472,9 +1472,9 @@ func TestAA26ProductionShapeHasNoWaitAndNoResponderStart(aa26T *aa26testing.T) {
 			case *aa26ast.GoStmt, *aa26ast.DeferStmt, *aa26ast.SelectStmt, *aa26ast.SendStmt, *aa26ast.ChanType, *aa26ast.FuncLit:
 				aa26T.Fatalf("aa26 forbidden construct %T in %s", aa26Value, aa26Name)
 			case *aa26ast.SelectorExpr:
-				// Only the explicit master-start entry point may reach the port's START.
-				if aa26Value.Sel.Name == "AA26StartMaster" && aa26Name != "AA26StartMaster" && aa26Name != "" {
-					aa26T.Fatalf("aa26 %s reaches the master start", aa26Name)
+				// Only the explicit initiator-start entry point may reach the port's START.
+				if aa26Value.Sel.Name == "AA26StartInitiator" && aa26Name != "AA26StartInitiator" && aa26Name != "" {
+					aa26T.Fatalf("aa26 %s reaches the initiator start", aa26Name)
 				}
 			}
 			return true

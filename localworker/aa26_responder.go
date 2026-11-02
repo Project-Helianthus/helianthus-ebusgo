@@ -31,8 +31,8 @@ import (
 //     reference, and every deadline still in the future.
 //   - The only failure action AA23 admits is silence, so a malformed request, an
 //     unmatched request and an initiator NACK all end in silence.
-//   - The responder never calls AA26StartMaster. Its wire authority excludes local
-//     master starts from selection to closure; a refused start is returned, never
+//   - The responder never calls AA26StartInitiator. Its wire authority excludes local
+//     initiator starts from selection to closure; a refused start is returned, never
 //     queued, so this is no second scheduler.
 //   - A supersession leaves the selected generation fixed: the transaction finishes
 //     on the bytes it pinned. Any revocation, including unregistration, closes the
@@ -61,7 +61,7 @@ var (
 	AA26ErrIdentity      = aa26errors.New("localworker: aa26 worker, stream or clock domain mismatch") //nolint:staticcheck // ST1012: AA26 prefix is mandatory
 	AA26ErrAuthority     = aa26errors.New("localworker: aa26 plan reference is not the adopted plan")  //nolint:staticcheck // ST1012: AA26 prefix is mandatory
 	AA26ErrWireBusy      = aa26errors.New("localworker: aa26 wire authority is held")                  //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrNotHeld       = aa26errors.New("localworker: aa26 no matching master hold")                 //nolint:staticcheck // ST1012: AA26 prefix is mandatory
+	AA26ErrNotHeld       = aa26errors.New("localworker: aa26 no matching initiator hold")              //nolint:staticcheck // ST1012: AA26 prefix is mandatory
 	AA26ErrRefused       = aa26errors.New("localworker: aa26 wire port refused")                       //nolint:staticcheck // ST1012: AA26 prefix is mandatory
 	AA26ErrClock         = aa26errors.New("localworker: aa26 clock regression")                        //nolint:staticcheck // ST1012: AA26 prefix is mandatory
 	AA26ErrAddress       = aa26errors.New("localworker: aa26 address not admitted")                    //nolint:staticcheck // ST1012: AA26 prefix is mandatory
@@ -73,9 +73,9 @@ type AA26WirePort interface {
 	// bit begins at or after aa26NotBefore. It never arbitrates and never sends a
 	// START. False means the symbol cannot be placed and nothing was sent.
 	AA26EmitResponderSymbol(aa26Symbol byte, aa26NotBefore uint64) bool
-	// AA26StartMaster begins arbitration for one already-admitted local master
+	// AA26StartInitiator begins arbitration for one already-admitted local initiator
 	// command. The responder path never calls it.
-	AA26StartMaster(aa26Identity AA24CommandIdentity, aa26Initiator byte) bool
+	AA26StartInitiator(aa26Identity AA24CommandIdentity, aa26Initiator byte) bool
 }
 
 // AA26Config holds fixture parameters, never qualified timing budgets. Ticks of
@@ -179,14 +179,14 @@ type AA26ObserverEvent struct {
 
 // AA26Stats is a snapshot of bounded counters.
 type AA26Stats struct {
-	AA26Selected        uint64
-	AA26SelectRefused   uint64
-	AA26Prepared        uint64
-	AA26Emitted         uint64
-	AA26ObserverDropped uint64
-	AA26MasterStarted   uint64
-	AA26MasterRefused   uint64
-	AA26Closed          [AA26CloseReasonCount]uint64
+	AA26Selected         uint64
+	AA26SelectRefused    uint64
+	AA26Prepared         uint64
+	AA26Emitted          uint64
+	AA26ObserverDropped  uint64
+	AA26InitiatorStarted uint64
+	AA26InitiatorRefused uint64
+	AA26Closed           [AA26CloseReasonCount]uint64
 }
 
 type aa26Binding struct {
@@ -263,8 +263,8 @@ type AA26Responder struct {
 	aa26EchoNotBefore uint64
 	aa26Lost          uint64
 
-	aa26Master         bool
-	aa26MasterIdentity AA24CommandIdentity
+	aa26InitiatorHeld         bool
+	aa26InitiatorHeldIdentity AA24CommandIdentity
 
 	aa26Ack      AA23Acknowledgement
 	aa26AckReady bool
@@ -421,53 +421,53 @@ func (aa26Responder *AA26Responder) AA26AdvanceStream(aa26Stream AA23StreamGener
 	aa26Responder.aa26Bindings = [aa23AddressSpace]aa26Binding{}
 	aa26Responder.aa26Ordinal = 0
 	aa26Responder.aa26Disarmed = false
-	aa26Responder.aa26Master = false
-	aa26Responder.aa26MasterIdentity = AA24CommandIdentity{}
+	aa26Responder.aa26InitiatorHeld = false
+	aa26Responder.aa26InitiatorHeldIdentity = AA24CommandIdentity{}
 	aa26Responder.aa26Frame = aa26FrameUnsynced
 	aa26Responder.aa26Escape = false
 	aa26Responder.aa26PrefixLen = 0
 	return nil
 }
 
-// AA26StartMaster lets one local master command take the wire. The command must
+// AA26StartInitiator lets one local initiator command take the wire. The command must
 // be the one the AA24 worker already admitted, exactly; the responder holds no
 // queue and refuses while a transaction holds the wire authority.
-func (aa26Responder *AA26Responder) AA26StartMaster(aa26Identity AA24CommandIdentity, aa26Initiator byte, aa26Tick uint64) error {
+func (aa26Responder *AA26Responder) AA26StartInitiator(aa26Identity AA24CommandIdentity, aa26Initiator byte, aa26Tick uint64) error {
 	if aa26Tick < aa26Responder.aa26LastTick {
 		return AA26ErrClock
 	}
 	if !aa23IsInitiatorAddress(aa26Initiator) {
 		return AA26ErrAddress
 	}
-	if aa26Responder.aa26Active || aa26Responder.aa26Master {
-		aa26Responder.aa26Stats.AA26MasterRefused++
+	if aa26Responder.aa26Active || aa26Responder.aa26InitiatorHeld {
+		aa26Responder.aa26Stats.AA26InitiatorRefused++
 		return AA26ErrWireBusy
 	}
 	if aa26Err := aa26Responder.aa26IPC.AA24AdmitOutput(aa26Identity, aa26Responder.aa26Reading(aa26Tick)); aa26Err != nil {
-		aa26Responder.aa26Stats.AA26MasterRefused++
+		aa26Responder.aa26Stats.AA26InitiatorRefused++
 		return aa26Err
 	}
 	aa26Responder.aa26LastTick = aa26Tick
-	if !aa26Responder.aa26Wire.AA26StartMaster(aa26Identity, aa26Initiator) {
+	if !aa26Responder.aa26Wire.AA26StartInitiator(aa26Identity, aa26Initiator) {
 		return AA26ErrRefused
 	}
-	aa26Responder.aa26Master = true
-	aa26Responder.aa26MasterIdentity = aa26Identity
-	aa26Responder.aa26Stats.AA26MasterStarted++
+	aa26Responder.aa26InitiatorHeld = true
+	aa26Responder.aa26InitiatorHeldIdentity = aa26Identity
+	aa26Responder.aa26Stats.AA26InitiatorStarted++
 	return nil
 }
 
-// AA26EndMaster releases the master hold of exactly this command.
-func (aa26Responder *AA26Responder) AA26EndMaster(aa26Identity AA24CommandIdentity) error {
-	if !aa26Responder.aa26Master || !aa26Responder.aa26MasterIdentity.aa24Matches(aa26Identity) {
+// AA26EndInitiator releases the initiator hold of exactly this command.
+func (aa26Responder *AA26Responder) AA26EndInitiator(aa26Identity AA24CommandIdentity) error {
+	if !aa26Responder.aa26InitiatorHeld || !aa26Responder.aa26InitiatorHeldIdentity.aa24Matches(aa26Identity) {
 		return AA26ErrNotHeld
 	}
-	aa26Responder.aa26Master = false
-	aa26Responder.aa26MasterIdentity = AA24CommandIdentity{}
+	aa26Responder.aa26InitiatorHeld = false
+	aa26Responder.aa26InitiatorHeldIdentity = AA24CommandIdentity{}
 	return nil
 }
 
-// AA26Poll is bounded housekeeping at an injected tick: an expired master hold is
+// AA26Poll is bounded housekeeping at an injected tick: an expired initiator hold is
 // dropped, and a selected transaction closes on a missing echo, an idle bus or any
 // failed authority check.
 func (aa26Responder *AA26Responder) AA26Poll(aa26Tick uint64) {
@@ -476,9 +476,9 @@ func (aa26Responder *AA26Responder) AA26Poll(aa26Tick uint64) {
 		return
 	}
 	aa26Responder.aa26LastTick = aa26Tick
-	if aa26Responder.aa26Master && !aa26Responder.aa26MasterIdentity.aa24Live(AA23Tick(aa26Tick)) {
-		aa26Responder.aa26Master = false
-		aa26Responder.aa26MasterIdentity = AA24CommandIdentity{}
+	if aa26Responder.aa26InitiatorHeld && !aa26Responder.aa26InitiatorHeldIdentity.aa24Live(AA23Tick(aa26Tick)) {
+		aa26Responder.aa26InitiatorHeld = false
+		aa26Responder.aa26InitiatorHeldIdentity = AA24CommandIdentity{}
 	}
 	if !aa26Responder.aa26Active {
 		return
@@ -632,13 +632,13 @@ func (aa26Responder *AA26Responder) aa26Select(aa26Address byte, aa26Tick uint64
 		aa26Responder.aa26Stats.AA26SelectRefused++
 		return false
 	}
-	if aa26Responder.aa26Master {
-		if aa26Responder.aa26MasterIdentity.aa24Live(AA23Tick(aa26Tick)) {
+	if aa26Responder.aa26InitiatorHeld {
+		if aa26Responder.aa26InitiatorHeldIdentity.aa24Live(AA23Tick(aa26Tick)) {
 			aa26Responder.aa26Stats.AA26SelectRefused++
 			return false
 		}
-		aa26Responder.aa26Master = false
-		aa26Responder.aa26MasterIdentity = AA24CommandIdentity{}
+		aa26Responder.aa26InitiatorHeld = false
+		aa26Responder.aa26InitiatorHeldIdentity = AA24CommandIdentity{}
 	}
 	aa26Bound := aa26Responder.aa26Bindings[aa26Address]
 	if !aa26Bound.aa26Valid || aa26Responder.aa26IPCReason(aa26Bound.aa26Ref, aa26Tick) != AA26CloseNone {
