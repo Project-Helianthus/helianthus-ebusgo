@@ -9,6 +9,7 @@ import (
 	aa29fmt "fmt"
 	aa29bits "math/bits"
 	aa29reflect "reflect"
+	aa29atomic "sync/atomic"
 
 	aa29localworker "github.com/Project-Helianthus/helianthus-ebusgo/localworker"
 )
@@ -279,10 +280,12 @@ type AA29Backend struct {
 	aa29Counter AA29CounterPort
 	aa29Stats   AA29Stats
 
-	aa29Closed  bool
-	aa29Armed   bool
-	aa29Driving bool
-	aa29Lease   AA29Lease
+	// aa29Closed is atomic so capability queries stay coherent against close.
+	aa29Closed   aa29atomic.Bool
+	aa29Unmapped bool
+	aa29Armed    bool
+	aa29Driving  bool
+	aa29Lease    AA29Lease
 }
 
 // AA29Open admits the profile and checks both control resources before asking
@@ -305,7 +308,7 @@ func AA29Open(aa29Profile *AA29PlatformProfile, aa29Mapping AA29MappingPort, aa2
 	if aa29Err != nil {
 		if !aa29Absent(aa29Window) {
 			if aa29UnmapErr := aa29Window.AA29Unmap(); aa29UnmapErr != nil {
-				return nil, aa29fmt.Errorf("%w: %w: %w", AA29ErrMapping, aa29Err, aa29UnmapErr)
+				return aa29RetainWindow(aa29Window, aa29Counter), aa29fmt.Errorf("%w: %w: %w", AA29ErrMapping, aa29Err, aa29UnmapErr)
 			}
 		}
 		return nil, aa29fmt.Errorf("%w: %w", AA29ErrMapping, aa29Err)
@@ -317,7 +320,7 @@ func AA29Open(aa29Profile *AA29PlatformProfile, aa29Mapping AA29MappingPort, aa2
 		aa29Window.AA29MappedAccessWidth() != aa29AccessWidth ||
 		aa29Window.AA29MappedOrdering() != AA29OrderingDevice {
 		if aa29UnmapErr := aa29Window.AA29Unmap(); aa29UnmapErr != nil {
-			return nil, aa29fmt.Errorf("%w: %w", AA29ErrResourceMatch, aa29UnmapErr)
+			return aa29RetainWindow(aa29Window, aa29Counter), aa29fmt.Errorf("%w: %w", AA29ErrResourceMatch, aa29UnmapErr)
 		}
 		return nil, AA29ErrResourceMatch
 	}
@@ -327,6 +330,14 @@ func AA29Open(aa29Profile *AA29PlatformProfile, aa29Mapping AA29MappingPort, aa2
 		aa29Window:  aa29Window,
 		aa29Counter: aa29Counter,
 	}, nil
+}
+
+// aa29RetainWindow keeps a window whose rollback unmap failed in a closed,
+// unusable backend so the caller can retry AA29Close until the unmap succeeds.
+func aa29RetainWindow(aa29Window AA29Window, aa29Counter AA29CounterPort) *AA29Backend {
+	aa29Backend := &AA29Backend{aa29Window: aa29Window, aa29Counter: aa29Counter}
+	aa29Backend.aa29Closed.Store(true)
+	return aa29Backend
 }
 
 // AA29Stats returns a snapshot of the bounded counters.
@@ -339,7 +350,7 @@ func (aa29Backend *AA29Backend) AA29Stats() AA29Stats {
 // profile admission qualifies resources, not wire behavior. A closed backend
 // claims nothing.
 func (aa29Backend *AA29Backend) AA22TransportCapabilities() AA22Capabilities {
-	if aa29Backend.aa29Closed {
+	if aa29Backend.aa29Closed.Load() {
 		return AA22Capabilities{}
 	}
 	return AA22Capabilities{
@@ -357,7 +368,7 @@ func (aa29Backend *AA29Backend) AA22TransportCapabilities() AA22Capabilities {
 // window, never from the last TX level, so an echo is observed, not
 // synthesized. A closed backend reads the idle level without a load.
 func (aa29Backend *AA29Backend) AA25SampleLevel() aa29localworker.AA25Level {
-	if aa29Backend.aa29Closed {
+	if aa29Backend.aa29Closed.Load() {
 		return aa29localworker.AA25LevelHigh
 	}
 	aa29GPIO := aa29Backend.aa29Profile.AA29GPIO
@@ -373,7 +384,7 @@ func (aa29Backend *AA29Backend) AA25SampleLevel() aa29localworker.AA25Level {
 // closed backend returns zero without a read, which the engine treats as a tick
 // regression and a withdrawal.
 func (aa29Backend *AA29Backend) AA25NowTicks() uint64 {
-	if aa29Backend.aa29Closed {
+	if aa29Backend.aa29Closed.Load() {
 		return 0
 	}
 	aa29Now := aa29Backend.aa29Counter.AA29ReadCounter()
@@ -387,7 +398,7 @@ func (aa29Backend *AA29Backend) AA25NowTicks() uint64 {
 // AA25WriteEdge stores an edge only while a live lease arms the backend. Any
 // other write is refused and counted. An expired lease disarms and releases.
 func (aa29Backend *AA29Backend) AA25WriteEdge(aa29Level aa29localworker.AA25Level) {
-	if aa29Backend.aa29Closed || !aa29Backend.aa29Armed {
+	if aa29Backend.aa29Closed.Load() || !aa29Backend.aa29Armed {
 		aa29Backend.aa29Stats.AA29RefusedEdges++
 		return
 	}
@@ -428,7 +439,7 @@ func (aa29Backend *AA29Backend) aa29Disarm() {
 // away than the profile's AA29MaxLeaseTicks. An armed backend must be revoked
 // or expire before another lease is admitted.
 func (aa29Backend *AA29Backend) aa29Arm(aa29Lease AA29Lease) error {
-	if aa29Backend.aa29Closed {
+	if aa29Backend.aa29Closed.Load() {
 		return AA29ErrClosed
 	}
 	if aa29Backend.aa29Armed || aa29Lease.AA29LeaseID == 0 || aa29Lease.AA29ProfileDigest != aa29Backend.aa29Digest {
@@ -457,7 +468,7 @@ func (aa29Backend *AA29Backend) aa29Revoke(aa29LeaseID uint64) bool {
 // construction admits no lease: the engine still transmits only an offered
 // prepared response, and this backend still refuses edges while disarmed.
 func (aa29Backend *AA29Backend) AA29NewEngine(aa29Config aa29localworker.AA25Config, aa29Sink aa29localworker.AA25EventSink) (*aa29localworker.AA25Engine, error) {
-	if aa29Backend.aa29Closed {
+	if aa29Backend.aa29Closed.Load() {
 		return nil, AA29ErrClosed
 	}
 	if aa29Config.AA25TickHz != aa29Backend.aa29Profile.AA29Counter.AA29Hz {
@@ -472,12 +483,19 @@ func (aa29Backend *AA29Backend) AA29NewEngine(aa29Config aa29localworker.AA25Con
 }
 
 // AA29Close disarms, releasing a driven line, and unmaps the window once.
-// Later calls return nil.
+// A failed unmap keeps the window owned, so a later call retries it; calls
+// after a successful unmap return nil.
 func (aa29Backend *AA29Backend) AA29Close() error {
-	if aa29Backend.aa29Closed {
+	if aa29Backend.aa29Unmapped {
 		return nil
 	}
-	aa29Backend.aa29Disarm()
-	aa29Backend.aa29Closed = true
-	return aa29Backend.aa29Window.AA29Unmap()
+	if !aa29Backend.aa29Closed.Load() {
+		aa29Backend.aa29Disarm()
+		aa29Backend.aa29Closed.Store(true)
+	}
+	aa29Err := aa29Backend.aa29Window.AA29Unmap()
+	if aa29Err == nil {
+		aa29Backend.aa29Unmapped = true
+	}
+	return aa29Err
 }

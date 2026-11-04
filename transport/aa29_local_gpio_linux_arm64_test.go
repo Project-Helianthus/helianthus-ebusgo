@@ -12,6 +12,7 @@ import (
 	aa29os "os"
 	aa29strconv "strconv"
 	aa29strings "strings"
+	aa29sync "sync"
 	aa29testing "testing"
 
 	aa29localworker "github.com/Project-Helianthus/helianthus-ebusgo/localworker"
@@ -951,16 +952,52 @@ func TestAA29OpenPreservesUnmapFailures(aa29T *aa29testing.T) {
 	aa29Mismatched.aa29UnmapErr = aa29UnmapCause
 	aa29Mapper := &aa29FakeMapper{aa29Window: aa29Mismatched}
 	aa29Counter := &aa29FakeCounter{aa29Hz: aa29TestHz}
-	if aa29Backend, aa29Err := AA29Open(&aa29Profile, aa29Mapper, aa29Counter); aa29Backend != nil ||
+	aa29MismatchBackend, aa29Err := AA29Open(&aa29Profile, aa29Mapper, aa29Counter)
+	if aa29MismatchBackend == nil || aa29MismatchBackend.AA22TransportCapabilities() != (AA22Capabilities{}) ||
 		!aa29errors.Is(aa29Err, AA29ErrResourceMatch) || !aa29errors.Is(aa29Err, aa29UnmapCause) || aa29Mismatched.aa29Unmaps != 1 {
-		aa29T.Fatalf("aa29 mismatched window with failing unmap = (%v, %v) unmaps=%d", aa29Backend, aa29Err, aa29Mismatched.aa29Unmaps)
+		aa29T.Fatalf("aa29 mismatched window with failing unmap = (%v, %v) unmaps=%d", aa29MismatchBackend, aa29Err, aa29Mismatched.aa29Unmaps)
+	}
+	if aa29Err := aa29MismatchBackend.AA29Close(); !aa29errors.Is(aa29Err, aa29UnmapCause) || aa29Mismatched.aa29Unmaps != 2 {
+		aa29T.Fatalf("aa29 retained close = %v unmaps=%d, want retry failure and 2", aa29Err, aa29Mismatched.aa29Unmaps)
+	}
+	aa29Mismatched.aa29UnmapErr = nil
+	if aa29Err := aa29MismatchBackend.AA29Close(); aa29Err != nil || aa29Mismatched.aa29Unmaps != 3 {
+		aa29T.Fatalf("aa29 retained close after recovery = %v unmaps=%d, want nil and 3", aa29Err, aa29Mismatched.aa29Unmaps)
+	}
+	if aa29Err := aa29MismatchBackend.AA29Close(); aa29Err != nil || aa29Mismatched.aa29Unmaps != 3 {
+		aa29T.Fatalf("aa29 close after successful unmap = %v unmaps=%d, want nil and 3", aa29Err, aa29Mismatched.aa29Unmaps)
 	}
 
 	aa29Errored := aa29TestWindow()
 	aa29Errored.aa29UnmapErr = aa29UnmapCause
 	aa29Failing := &aa29FakeMapper{aa29Window: aa29Errored, aa29Err: aa29MapCause}
-	if aa29Backend, aa29Err := AA29Open(&aa29Profile, aa29Failing, aa29Counter); aa29Backend != nil ||
+	if aa29Backend, aa29Err := AA29Open(&aa29Profile, aa29Failing, aa29Counter); aa29Backend == nil ||
 		!aa29errors.Is(aa29Err, AA29ErrMapping) || !aa29errors.Is(aa29Err, aa29MapCause) || !aa29errors.Is(aa29Err, aa29UnmapCause) || aa29Errored.aa29Unmaps != 1 {
 		aa29T.Fatalf("aa29 mapping error with failing unmap = (%v, %v) unmaps=%d", aa29Backend, aa29Err, aa29Errored.aa29Unmaps)
+	}
+}
+
+// Catches: a plain bool for the closed state, which races between capability
+// queries and AA29Close (reported by the race detector).
+func TestAA29CapabilitiesQueryRacesCloseSafely(aa29T *aa29testing.T) {
+	aa29Fix := aa29OpenFixture(aa29T, aa29TestProfile())
+	aa29Backend := aa29Fix.aa29Backend
+	if aa29Backend.AA22TransportCapabilities().AA22Kind != AA22KindLocalRaw {
+		aa29T.Fatalf("aa29 open backend must report LocalRaw")
+	}
+	var aa29Group aa29sync.WaitGroup
+	aa29Group.Add(1)
+	go func() {
+		defer aa29Group.Done()
+		for aa29Index := 0; aa29Index < 64; aa29Index++ {
+			_ = aa29Backend.AA22TransportCapabilities()
+		}
+	}()
+	if aa29Err := aa29Backend.AA29Close(); aa29Err != nil {
+		aa29T.Fatalf("aa29 close: %v", aa29Err)
+	}
+	aa29Group.Wait()
+	if aa29Backend.AA22TransportCapabilities() != (AA22Capabilities{}) {
+		aa29T.Fatalf("aa29 closed backend must claim nothing")
 	}
 }
