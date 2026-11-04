@@ -304,7 +304,9 @@ func AA29Open(aa29Profile *AA29PlatformProfile, aa29Mapping AA29MappingPort, aa2
 	aa29Window, aa29Err := aa29Mapping.AA29Map(aa29GPIO)
 	if aa29Err != nil {
 		if !aa29Absent(aa29Window) {
-			_ = aa29Window.AA29Unmap()
+			if aa29UnmapErr := aa29Window.AA29Unmap(); aa29UnmapErr != nil {
+				return nil, aa29fmt.Errorf("%w: %w: %w", AA29ErrMapping, aa29Err, aa29UnmapErr)
+			}
 		}
 		return nil, aa29fmt.Errorf("%w: %w", AA29ErrMapping, aa29Err)
 	}
@@ -314,7 +316,9 @@ func AA29Open(aa29Profile *AA29PlatformProfile, aa29Mapping AA29MappingPort, aa2
 	if aa29Window.AA29MappedLength() != aa29GPIO.AA29MapLength ||
 		aa29Window.AA29MappedAccessWidth() != aa29AccessWidth ||
 		aa29Window.AA29MappedOrdering() != AA29OrderingDevice {
-		_ = aa29Window.AA29Unmap()
+		if aa29UnmapErr := aa29Window.AA29Unmap(); aa29UnmapErr != nil {
+			return nil, aa29fmt.Errorf("%w: %w", AA29ErrResourceMatch, aa29UnmapErr)
+		}
 		return nil, AA29ErrResourceMatch
 	}
 	return &AA29Backend{
@@ -364,13 +368,20 @@ func (aa29Backend *AA29Backend) AA25SampleLevel() aa29localworker.AA25Level {
 	return aa29localworker.AA25LevelLow
 }
 
-// AA25NowTicks reads the counter. A closed backend returns zero without a
-// read, which the engine treats as a tick regression and a withdrawal.
+// AA25NowTicks reads the counter. A read at or past the lease expiry disarms
+// and releases a driven line, so expiry holds without another edge request. A
+// closed backend returns zero without a read, which the engine treats as a tick
+// regression and a withdrawal.
 func (aa29Backend *AA29Backend) AA25NowTicks() uint64 {
 	if aa29Backend.aa29Closed {
 		return 0
 	}
-	return aa29Backend.aa29Counter.AA29ReadCounter()
+	aa29Now := aa29Backend.aa29Counter.AA29ReadCounter()
+	if aa29Backend.aa29Armed && aa29Now >= aa29Backend.aa29Lease.AA29NotAfterTick {
+		aa29Backend.aa29Stats.AA29LeaseExpiries++
+		aa29Backend.aa29Disarm()
+	}
+	return aa29Now
 }
 
 // AA25WriteEdge stores an edge only while a live lease arms the backend. Any

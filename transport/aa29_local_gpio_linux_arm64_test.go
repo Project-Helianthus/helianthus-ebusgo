@@ -51,6 +51,7 @@ type aa29FakeWindow struct {
 	aa29Loads     []uint64
 	aa29Stores    []aa29FakeStore
 	aa29Unmaps    int
+	aa29UnmapErr  error
 }
 
 func (aa29Window *aa29FakeWindow) AA29MappedLength() uint64         { return aa29Window.aa29Length }
@@ -68,7 +69,7 @@ func (aa29Window *aa29FakeWindow) AA29Store32(aa29Offset uint64, aa29Value uint3
 
 func (aa29Window *aa29FakeWindow) AA29Unmap() error {
 	aa29Window.aa29Unmaps++
-	return nil
+	return aa29Window.aa29UnmapErr
 }
 
 type aa29FakeMapper struct {
@@ -903,5 +904,63 @@ func TestAA29EveryDeclaredIdentifierIsPrefixed(aa29T *aa29testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+// Catches: enforcing lease expiry only on an edge request, so a polling engine
+// leaves a driven line held past the deadline.
+func TestAA29TickReadPastLeaseExpiryDisarmsAndReleases(aa29T *aa29testing.T) {
+	aa29Profile := aa29TestProfile()
+	aa29Fix := aa29OpenFixture(aa29T, aa29Profile)
+	aa29Lease := aa29TestLease(aa29Profile)
+	if aa29Err := aa29Fix.aa29Backend.aa29Arm(aa29Lease); aa29Err != nil {
+		aa29T.Fatalf("aa29 arm: %v", aa29Err)
+	}
+	aa29Fix.aa29Backend.AA25WriteEdge(aa29localworker.AA25LevelLow)
+	aa29Fix.aa29Counter.aa29Now = aa29Lease.AA29NotAfterTick - 1
+	if aa29Fix.aa29Backend.AA25NowTicks() != aa29Lease.AA29NotAfterTick-1 || !aa29Fix.aa29Backend.aa29Armed {
+		aa29T.Fatal("aa29 tick read before expiry disarmed")
+	}
+	aa29Fix.aa29Counter.aa29Now = aa29Lease.AA29NotAfterTick
+	if aa29Fix.aa29Backend.AA25NowTicks() != aa29Lease.AA29NotAfterTick {
+		aa29T.Fatal("aa29 tick read changed the reported tick")
+	}
+	aa29Want := []aa29FakeStore{{aa29TestClear, aa29TestTXMask}, {aa29TestSet, aa29TestTXMask}}
+	if len(aa29Fix.aa29Window.aa29Stores) != 2 || aa29Fix.aa29Window.aa29Stores[1] != aa29Want[1] {
+		aa29T.Fatalf("aa29 stores = %v, want drive then release", aa29Fix.aa29Window.aa29Stores)
+	}
+	aa29Stats := aa29Fix.aa29Backend.AA29Stats()
+	if aa29Fix.aa29Backend.aa29Armed || aa29Stats.AA29LeaseExpiries != 1 || aa29Stats.AA29Releases != 1 {
+		aa29T.Fatalf("aa29 after tick expiry armed=%v stats=%+v", aa29Fix.aa29Backend.aa29Armed, aa29Stats)
+	}
+	aa29Fix.aa29Backend.AA25WriteEdge(aa29localworker.AA25LevelLow)
+	if len(aa29Fix.aa29Window.aa29Stores) != 2 {
+		aa29T.Fatal("aa29 edge stored after tick expiry")
+	}
+}
+
+// Catches: discarding an unmap failure while refusing an open, which hides a
+// mapping that is still held.
+func TestAA29OpenPreservesUnmapFailures(aa29T *aa29testing.T) {
+	aa29Profile := aa29TestProfile()
+	aa29UnmapCause := aa29errors.New("aa29 synthetic unmap failure")
+	aa29MapCause := aa29errors.New("aa29 synthetic map failure")
+
+	aa29Mismatched := aa29TestWindow()
+	aa29Mismatched.aa29Length++
+	aa29Mismatched.aa29UnmapErr = aa29UnmapCause
+	aa29Mapper := &aa29FakeMapper{aa29Window: aa29Mismatched}
+	aa29Counter := &aa29FakeCounter{aa29Hz: aa29TestHz}
+	if aa29Backend, aa29Err := AA29Open(&aa29Profile, aa29Mapper, aa29Counter); aa29Backend != nil ||
+		!aa29errors.Is(aa29Err, AA29ErrResourceMatch) || !aa29errors.Is(aa29Err, aa29UnmapCause) || aa29Mismatched.aa29Unmaps != 1 {
+		aa29T.Fatalf("aa29 mismatched window with failing unmap = (%v, %v) unmaps=%d", aa29Backend, aa29Err, aa29Mismatched.aa29Unmaps)
+	}
+
+	aa29Errored := aa29TestWindow()
+	aa29Errored.aa29UnmapErr = aa29UnmapCause
+	aa29Failing := &aa29FakeMapper{aa29Window: aa29Errored, aa29Err: aa29MapCause}
+	if aa29Backend, aa29Err := AA29Open(&aa29Profile, aa29Failing, aa29Counter); aa29Backend != nil ||
+		!aa29errors.Is(aa29Err, AA29ErrMapping) || !aa29errors.Is(aa29Err, aa29MapCause) || !aa29errors.Is(aa29Err, aa29UnmapCause) || aa29Errored.aa29Unmaps != 1 {
+		aa29T.Fatalf("aa29 mapping error with failing unmap = (%v, %v) unmaps=%d", aa29Backend, aa29Err, aa29Errored.aa29Unmaps)
 	}
 }
