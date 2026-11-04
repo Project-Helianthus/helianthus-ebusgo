@@ -227,6 +227,7 @@ func TestAA29ProductionOpensNoResourceItself(aa29T *aa29testing.T) {
 		"fmt":             true,
 		"math/bits":       true,
 		"reflect":         true,
+		"sync/atomic":     true,
 		"github.com/Project-Helianthus/helianthus-ebusgo/localworker": true,
 	}
 	for _, aa29Import := range aa29File.Imports {
