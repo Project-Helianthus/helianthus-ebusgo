@@ -265,6 +265,7 @@ type AA31Result struct {
 func AA31Run(aa31Engine AA31Stepper, aa31Ticks aa31localworker.AA25TickPort, aa31Recorder *AA31Recorder, aa31BudgetTicks uint64, aa31Stop *aa31atomic.Bool) AA31Result {
 	var aa31Result AA31Result
 	aa31Start := aa31Ticks.AA25NowTicks()
+	aa31Prev := aa31Start
 	for {
 		if aa31Stop != nil && aa31Stop.Load() {
 			aa31Result.AA31Stop = AA31StopRequested
@@ -273,10 +274,11 @@ func AA31Run(aa31Engine AA31Stepper, aa31Ticks aa31localworker.AA25TickPort, aa3
 		aa31Engine.AA25Step()
 		aa31Result.AA31Steps++
 		aa31Now := aa31Ticks.AA25NowTicks()
-		if aa31Now < aa31Start {
+		if aa31Now < aa31Prev {
 			aa31Result.AA31Stop = AA31StopTickRegression
 			return aa31Result
 		}
+		aa31Prev = aa31Now
 		aa31Result.AA31ElapsedTicks = aa31Now - aa31Start
 		if aa31Recorder.AA31Full() {
 			aa31Result.AA31Stop = AA31StopRecorderFull

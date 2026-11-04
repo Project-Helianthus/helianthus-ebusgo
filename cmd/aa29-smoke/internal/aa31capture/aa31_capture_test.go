@@ -308,6 +308,12 @@ func TestAA31RunStopsOnEveryBound(aa31T *aa31testing.T) {
 		aa31T.Fatalf("aa31 regression run = %+v", aa31Result)
 	}
 
+	// A reading below the previous one stops the run even when it stays above the start.
+	aa31Result = AA31Run(&aa31FakeStepper{}, &aa31FakeTicks{aa31Values: []uint64{100, 140, 120, 200}}, aa31NewRecorder(4), 1_000, nil)
+	if aa31Result != (AA31Result{AA31Steps: 2, AA31ElapsedTicks: 40, AA31Stop: AA31StopTickRegression}) {
+		aa31T.Fatalf("aa31 regression above start run = %+v", aa31Result)
+	}
+
 	aa31Names := map[string]bool{}
 	for _, aa31Reason := range []AA31StopReason{AA31StopNone, AA31StopBudget, AA31StopRecorderFull, AA31StopRequested, AA31StopTickRegression} {
 		aa31Names[AA31StopName(aa31Reason)] = true
