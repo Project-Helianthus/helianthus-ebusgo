@@ -180,13 +180,12 @@ type AA25Prepared struct {
 	aa25WireLen    uint8
 }
 
-// The AA25 prefix is mandatory for every identifier in this ticket (enforced by
-// TestAA25EveryDeclaredIdentifierIsPrefixed), which conflicts with the ErrFoo
+// These exported names keep the AA25 prefix, which conflicts with the ErrFoo
 // naming form that ST1012 expects.
 var (
-	AA25ErrInvalidConfig   = aa25errors.New("localworker: aa25 invalid config")            //nolint:staticcheck // ST1012: AA25 prefix is mandatory
-	AA25ErrMissingPort     = aa25errors.New("localworker: aa25 missing port")              //nolint:staticcheck // ST1012: AA25 prefix is mandatory
-	AA25ErrInvalidResponse = aa25errors.New("localworker: aa25 invalid prepared response") //nolint:staticcheck // ST1012: AA25 prefix is mandatory
+	AA25ErrInvalidConfig   = aa25errors.New("localworker: aa25 invalid config")            //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA25ErrMissingPort     = aa25errors.New("localworker: aa25 missing port")              //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA25ErrInvalidResponse = aa25errors.New("localworker: aa25 invalid prepared response") //nolint:staticcheck // ST1012: name keeps its established prefix
 )
 
 // AA25PrepareResponse precomputes the raw wire form of the initial ACK and the

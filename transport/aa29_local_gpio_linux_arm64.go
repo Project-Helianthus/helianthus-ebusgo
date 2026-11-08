@@ -146,18 +146,17 @@ type AA29Stats struct {
 	AA29LeaseExpiries uint64
 }
 
-// The AA29 prefix is mandatory for every identifier in this ticket (enforced by
-// TestAA29EveryDeclaredIdentifierIsPrefixed), which conflicts with the ErrFoo
+// These exported names keep the AA29 prefix, which conflicts with the ErrFoo
 // naming form that ST1012 expects.
 var (
-	AA29ErrProfileMissing  = aa29errors.New("transport: aa29 platform profile missing")            //nolint:staticcheck // ST1012: AA29 prefix is mandatory
-	AA29ErrUnqualified     = aa29errors.New("transport: aa29 platform profile not qualified")      //nolint:staticcheck // ST1012: AA29 prefix is mandatory
-	AA29ErrDescriptor      = aa29errors.New("transport: aa29 resource descriptor invalid")         //nolint:staticcheck // ST1012: AA29 prefix is mandatory
-	AA29ErrResourceMissing = aa29errors.New("transport: aa29 control resource missing")            //nolint:staticcheck // ST1012: AA29 prefix is mandatory
-	AA29ErrResourceMatch   = aa29errors.New("transport: aa29 control resource does not match")     //nolint:staticcheck // ST1012: AA29 prefix is mandatory
-	AA29ErrLease           = aa29errors.New("transport: aa29 lease not admitted")                  //nolint:staticcheck // ST1012: AA29 prefix is mandatory
-	AA29ErrClosed          = aa29errors.New("transport: aa29 backend closed")                      //nolint:staticcheck // ST1012: AA29 prefix is mandatory
-	AA29ErrMapping         = aa29errors.New("transport: aa29 mapping port refused the descriptor") //nolint:staticcheck // ST1012: AA29 prefix is mandatory
+	AA29ErrProfileMissing  = aa29errors.New("transport: aa29 platform profile missing")            //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA29ErrUnqualified     = aa29errors.New("transport: aa29 platform profile not qualified")      //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA29ErrDescriptor      = aa29errors.New("transport: aa29 resource descriptor invalid")         //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA29ErrResourceMissing = aa29errors.New("transport: aa29 control resource missing")            //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA29ErrResourceMatch   = aa29errors.New("transport: aa29 control resource does not match")     //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA29ErrLease           = aa29errors.New("transport: aa29 lease not admitted")                  //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA29ErrClosed          = aa29errors.New("transport: aa29 backend closed")                      //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA29ErrMapping         = aa29errors.New("transport: aa29 mapping port refused the descriptor") //nolint:staticcheck // ST1012: name keeps its established prefix
 )
 
 // AA29ProfileDigest is SHA-256 over a fixed-order encoding of every profile
