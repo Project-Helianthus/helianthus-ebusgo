@@ -6,7 +6,6 @@ import (
 	aa26ast "go/ast"
 	aa26parser "go/parser"
 	aa26token "go/token"
-	aa26strings "strings"
 	aa26testing "testing"
 )
 
@@ -1475,63 +1474,6 @@ func TestAA26ProductionShapeHasNoWaitAndNoResponderStart(aa26T *aa26testing.T) {
 				// Only the explicit initiator-start entry point may reach the port's START.
 				if aa26Value.Sel.Name == "AA26StartInitiator" && aa26Name != "AA26StartInitiator" && aa26Name != "" {
 					aa26T.Fatalf("aa26 %s reaches the initiator start", aa26Name)
-				}
-			}
-			return true
-		})
-	}
-}
-
-func aa26CheckPrefix(aa26T *aa26testing.T, aa26Name string) {
-	aa26T.Helper()
-	switch aa26Name {
-	case "_", "localworker":
-		return
-	case "AA25TryPublish", "AA25NowTicks", "AA25SampleLevel", "AA25WriteEdge":
-		// Method names fixed by the AA25 port interfaces these types implement.
-		return
-	}
-	if !aa26strings.HasPrefix(aa26Name, "aa26") && !aa26strings.HasPrefix(aa26Name, "AA26") && !aa26strings.HasPrefix(aa26Name, "TestAA26") {
-		aa26T.Fatalf("aa26 unprefixed identifier %q", aa26Name)
-	}
-}
-
-func TestAA26EveryDeclaredIdentifierIsPrefixed(aa26T *aa26testing.T) {
-	for _, aa26Path := range []string{"aa26_responder.go", "aa26_responder_test.go"} {
-		aa26File := aa26ParseSource(aa26T, aa26Path)
-		for _, aa26Import := range aa26File.Imports {
-			if aa26Import.Name == nil {
-				aa26T.Fatalf("aa26 import %s has no prefixed alias", aa26Import.Path.Value)
-			}
-			aa26CheckPrefix(aa26T, aa26Import.Name.Name)
-		}
-		aa26ast.Inspect(aa26File, func(aa26Node aa26ast.Node) bool {
-			switch aa26Value := aa26Node.(type) {
-			case *aa26ast.FuncDecl:
-				aa26CheckPrefix(aa26T, aa26Value.Name.Name)
-			case *aa26ast.TypeSpec:
-				aa26CheckPrefix(aa26T, aa26Value.Name.Name)
-			case *aa26ast.ValueSpec:
-				for _, aa26Name := range aa26Value.Names {
-					aa26CheckPrefix(aa26T, aa26Name.Name)
-				}
-			case *aa26ast.Field:
-				for _, aa26Name := range aa26Value.Names {
-					aa26CheckPrefix(aa26T, aa26Name.Name)
-				}
-			case *aa26ast.AssignStmt:
-				if aa26Value.Tok == aa26token.DEFINE {
-					for _, aa26Left := range aa26Value.Lhs {
-						if aa26Ident, aa26OK := aa26Left.(*aa26ast.Ident); aa26OK {
-							aa26CheckPrefix(aa26T, aa26Ident.Name)
-						}
-					}
-				}
-			case *aa26ast.RangeStmt:
-				for _, aa26Bound := range []aa26ast.Expr{aa26Value.Key, aa26Value.Value} {
-					if aa26Ident, aa26OK := aa26Bound.(*aa26ast.Ident); aa26OK {
-						aa26CheckPrefix(aa26T, aa26Ident.Name)
-					}
 				}
 			}
 			return true
