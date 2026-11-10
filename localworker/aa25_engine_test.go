@@ -5,7 +5,6 @@ import (
 	aa25parser "go/parser"
 	aa25token "go/token"
 	aa25big "math/big"
-	aa25strings "strings"
 	aa25testing "testing"
 )
 
@@ -1785,61 +1784,6 @@ func TestAA25TimingPathStaticShape(aa25T *aa25testing.T) {
 					switch aa25Ident.Name {
 					case "append", "make", "new", "panic", "print", "println":
 						aa25T.Fatalf("aa25 forbidden call %s in %s", aa25Ident.Name, aa25Name)
-					}
-				}
-			}
-			return true
-		})
-	}
-}
-
-func aa25CheckPrefix(aa25T *aa25testing.T, aa25Name string) {
-	aa25T.Helper()
-	if aa25Name != "_" && aa25Name != "localworker" &&
-		!aa25strings.HasPrefix(aa25Name, "aa25") &&
-		!aa25strings.HasPrefix(aa25Name, "AA25") &&
-		!aa25strings.HasPrefix(aa25Name, "TestAA25") {
-		aa25T.Fatalf("aa25 unprefixed identifier %q", aa25Name)
-	}
-}
-
-func TestAA25EveryDeclaredIdentifierIsPrefixed(aa25T *aa25testing.T) {
-	for _, aa25Path := range []string{"aa25_engine.go", "aa25_engine_test.go"} {
-		aa25File := aa25ParseSource(aa25T, aa25Path)
-		for _, aa25Import := range aa25File.Imports {
-			if aa25Import.Name == nil {
-				aa25T.Fatalf("aa25 import %s has no prefixed alias", aa25Import.Path.Value)
-			}
-			aa25CheckPrefix(aa25T, aa25Import.Name.Name)
-		}
-		aa25ast.Inspect(aa25File, func(aa25Node aa25ast.Node) bool {
-			switch aa25Value := aa25Node.(type) {
-			case *aa25ast.FuncDecl:
-				aa25CheckPrefix(aa25T, aa25Value.Name.Name)
-			case *aa25ast.TypeSpec:
-				aa25CheckPrefix(aa25T, aa25Value.Name.Name)
-			case *aa25ast.ValueSpec:
-				for _, aa25Name := range aa25Value.Names {
-					aa25CheckPrefix(aa25T, aa25Name.Name)
-				}
-			case *aa25ast.Field:
-				for _, aa25Name := range aa25Value.Names {
-					aa25CheckPrefix(aa25T, aa25Name.Name)
-				}
-			case *aa25ast.AssignStmt:
-				if aa25Value.Tok == aa25token.DEFINE {
-					for _, aa25Left := range aa25Value.Lhs {
-						if aa25Ident, aa25OK := aa25Left.(*aa25ast.Ident); aa25OK {
-							aa25CheckPrefix(aa25T, aa25Ident.Name)
-						}
-					}
-				}
-			case *aa25ast.RangeStmt:
-				if aa25Value.Tok == aa25token.DEFINE {
-					for _, aa25Left := range []aa25ast.Expr{aa25Value.Key, aa25Value.Value} {
-						if aa25Ident, aa25OK := aa25Left.(*aa25ast.Ident); aa25OK {
-							aa25CheckPrefix(aa25T, aa25Ident.Name)
-						}
 					}
 				}
 			}

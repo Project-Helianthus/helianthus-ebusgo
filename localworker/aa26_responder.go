@@ -53,18 +53,17 @@ const (
 	aa26ObserverCeiling uint32 = 1 << 16
 )
 
-// The AA26 prefix is mandatory for every identifier in this ticket (enforced by
-// TestAA26EveryDeclaredIdentifierIsPrefixed), which conflicts with the ErrFoo
+// These exported names keep the AA26 prefix, which conflicts with the ErrFoo
 // naming form that ST1012 expects.
 var (
-	AA26ErrInvalidConfig = aa26errors.New("localworker: aa26 invalid responder configuration")         //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrIdentity      = aa26errors.New("localworker: aa26 worker, stream or clock domain mismatch") //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrAuthority     = aa26errors.New("localworker: aa26 plan reference is not the adopted plan")  //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrWireBusy      = aa26errors.New("localworker: aa26 wire authority is held")                  //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrNotHeld       = aa26errors.New("localworker: aa26 no matching initiator hold")              //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrRefused       = aa26errors.New("localworker: aa26 wire port refused")                       //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrClock         = aa26errors.New("localworker: aa26 clock regression")                        //nolint:staticcheck // ST1012: AA26 prefix is mandatory
-	AA26ErrAddress       = aa26errors.New("localworker: aa26 address not admitted")                    //nolint:staticcheck // ST1012: AA26 prefix is mandatory
+	AA26ErrInvalidConfig = aa26errors.New("localworker: aa26 invalid responder configuration")         //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA26ErrIdentity      = aa26errors.New("localworker: aa26 worker, stream or clock domain mismatch") //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA26ErrAuthority     = aa26errors.New("localworker: aa26 plan reference is not the adopted plan")  //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA26ErrWireBusy      = aa26errors.New("localworker: aa26 wire authority is held")                  //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA26ErrNotHeld       = aa26errors.New("localworker: aa26 no matching initiator hold")              //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA26ErrRefused       = aa26errors.New("localworker: aa26 wire port refused")                       //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA26ErrClock         = aa26errors.New("localworker: aa26 clock regression")                        //nolint:staticcheck // ST1012: name keeps its established prefix
+	AA26ErrAddress       = aa26errors.New("localworker: aa26 address not admitted")                    //nolint:staticcheck // ST1012: name keeps its established prefix
 )
 
 // AA26WirePort is the one injected wire authority. Neither method may block.
