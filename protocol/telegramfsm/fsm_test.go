@@ -1,4 +1,4 @@
-package telegram_fsm
+package telegramfsm
 
 import "testing"
 
