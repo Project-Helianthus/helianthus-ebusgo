@@ -5,9 +5,9 @@
 // build refuses to run.
 package main
 
-import aa31os "os"
+import "os"
 
 func main() {
-	_, _ = aa31os.Stderr.WriteString("aa29-smoke: built without linux/arm64 and the aa29_local_gpio tag; refusing to run\n")
-	aa31os.Exit(2)
+	_, _ = os.Stderr.WriteString("aa29-smoke: built without linux/arm64 and the aa29_local_gpio tag; refusing to run\n")
+	os.Exit(2)
 }
