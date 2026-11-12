@@ -6,8 +6,9 @@
 // Canonical hashing: CanonicalClone, CanonicalJSON and CanonicalHash accept
 // only JSON-encodable values. Values are normalized through a JSON round
 // trip, so map key order does not matter and numbers keep their decimal
-// text as json.Number; equivalent payloads therefore hash to the same
-// lowercase hex SHA-256 digest. Values that cannot be encoded fail with an
+// text as json.Number. Equivalent payloads with identical JSON number spellings
+// hash to the same lowercase hex SHA-256 digest regardless of map key order.
+// Numerically equal spellings such as 1, 1.0 and 1e0 produce different hashes. Values that cannot be encoded fail with an
 // error that wraps errors.ErrInvalidPayload from this module.
 //
 // Idempotency: IdempotencyStore is safe for concurrent use. Keys and
