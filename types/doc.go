@@ -15,9 +15,12 @@
 // infinity) is not an error: it decodes to a Value with Valid false and no
 // Value, so callers can tell "no data" from a bad frame.
 //
-// Encode accepts integer kinds for the integer types, integer and float
-// kinds for DATA2b and DATA2c, float32 and float64 for EXP, and []bool,
-// []byte or a non-negative integer for BITFIELD. Other kinds and
+// Encode accepts the concrete types int, int8, int16, int32, int64,
+// uint, uint8, uint16, uint32, uint64 for the integer codecs. DATA2b and
+// DATA2c also accept float32 and float64; EXP accepts float32 and float64.
+// BITFIELD accepts []bool, []byte or a non-negative value of one of those
+// integer types. Defined numeric types and uintptr are not accepted. Other
+// inputs and
 // out-of-range input fail with errors.ErrInvalidPayload, and Encode never
 // emits the replacement value; use ReplacementValue to send "no data"
 // explicitly. ReplacementValue returns a new slice on each call.
