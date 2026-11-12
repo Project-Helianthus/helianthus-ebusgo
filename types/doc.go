@@ -20,6 +20,7 @@
 // DATA2c also accept float32 and float64; EXP accepts float32 and float64.
 // BITFIELD accepts []bool, []byte or a non-negative value of one of those
 // integer types, subject to the encoded width and replacement-value restrictions.
+// Numeric inputs require SizeBytes <= 8; wider fields require []bool or []byte.
 // For BITFIELD, uint inputs above MaxInt64 are rejected even when they fit
 // in eight bytes; uint64 inputs can use the full unsigned range subject to
 // those restrictions. Defined numeric types and uintptr are not accepted.
