@@ -7,7 +7,7 @@
 //
 //   - AD01: this package is a parallel top-level namespace under
 //     `protocol/vaillant/b503`; it does not share code with
-//     `protocol/ebus_standard/*` and carries no cross-protocol knowledge.
+//     `protocol/ebusstandard/*` and carries no cross-protocol knowledge.
 //   - AD02: install-write selectors `02 01` (Clearerrorhistory) and `02 02`
 //     (Clearservicehistory) are classified for awareness via [Safety] but no
 //     encode helper is provided. Install-writes are not exposed on any

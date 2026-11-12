@@ -1,5 +1,5 @@
 // Package types implements the L7 primitive types for the cross-vendor
-// ebus_standard namespace.
+// ebusstandard namespace.
 //
 // This package is namespace-isolated: it MUST NOT depend on Vaillant 0xB5
 // provider logic, and the Vaillant types package (github.com/Project-Helianthus/
@@ -55,7 +55,7 @@ func newDecodeError(code ErrorCode, message string) *DecodeError {
 	return &DecodeError{Code: code, Message: message}
 }
 
-// Value is the decode output for every ebus_standard primitive.
+// Value is the decode output for every ebusstandard primitive.
 //
 // Contract (02-l7-types.md §"Decode Output Validity"):
 //

@@ -47,7 +47,7 @@ import "time"
 //
 // All values are constants. Downstream consumers (the proxy in
 // helianthus-ebus-adapter-proxy, the future FSM extraction in
-// protocol/telegram_fsm) must reference these names rather than
+// protocol/telegramfsm) must reference these names rather than
 // duplicating the literals.
 const (
 	// FrameAtomicV8InterByteTimeout is the deadline between consecutive

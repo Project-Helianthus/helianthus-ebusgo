@@ -1,4 +1,4 @@
-// Package telegram_fsm implements the per-telegram phase state machine
+// Package telegramfsm implements the per-telegram phase state machine
 // described in helianthus-docs-ebus/architecture/adaptermux/
 // frame-atomic-visibility-v8.md §3 + v6 §3.
 //
@@ -39,7 +39,7 @@
 //   - PASSIVE_TRACKING (composite, entered via EnterPassiveTracking)
 //
 // Step B3 wires this FSM into the proxy's adapter-facing read path.
-package telegram_fsm
+package telegramfsm
 
 import "fmt"
 
