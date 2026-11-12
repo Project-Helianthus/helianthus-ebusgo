@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add package documentation in new comment-only `doc.go` files for the root
+  package `ebusgo` and the packages `determinism`, `emulation`, `errors`,
+  `internal/crc` and `types`. Each file holds only the package comment and
+  the package clause; no code, API or protocol behavior changes.
+
 - Rename the passive-capture smoke command internals under `cmd/aa29-smoke`
   to behavior names. The internal package `internal/aa31capture` becomes
   `internal/capture`. Files: `aa31_smoke_linux_arm64.go` →
