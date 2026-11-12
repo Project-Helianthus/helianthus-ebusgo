@@ -26,7 +26,7 @@
 // The normative L7 specification for every decode/encode rule implemented
 // here lives in helianthus-docs-ebus:
 //
-//	protocols/vaillant/ebus-vaillant-B503.md
+//	protocols/vaillant/ebus-vaillant-b503.md
 //
 // Canonical plan SHA-256:
 //
