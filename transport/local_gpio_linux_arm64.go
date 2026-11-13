@@ -1,4 +1,4 @@
-//go:build linux && arm64 && aa29_local_gpio
+//go:build linux && arm64 && local_gpio
 
 package transport
 
@@ -16,7 +16,7 @@ import (
 
 // This file is the local GPIO backend boundary for the first local engine
 // candidate, a bit-level GPIO poller at a nominal 10x sampling rate. It is only
-// built for linux/arm64 with the explicit, non-default aa29_local_gpio tag, so
+// built for linux/arm64 with the explicit, non-default local_gpio tag, so
 // the default binary does not contain it.
 //
 // Status: Hypothesis. The boundary owns only what the engine cannot: admission
@@ -48,7 +48,7 @@ const (
 	// localGPIOMaxLabel bounds profile identifier and family labels.
 	localGPIOMaxLabel = 64
 
-	localGPIODigestDomain = "aa29.profile.1"
+	localGPIODigestDomain = "local_gpio.profile.1"
 )
 
 // LocalGPIOResourceRole names what an owner-provisioned descriptor describes. The
@@ -149,14 +149,14 @@ type LocalGPIOStats struct {
 // The local GPIO backend refuses profiles, resources, leases and mappings
 // with these errors.
 var (
-	ErrLocalGPIOProfileMissing  = errors.New("transport: aa29 platform profile missing")
-	ErrLocalGPIOUnqualified     = errors.New("transport: aa29 platform profile not qualified")
-	ErrLocalGPIODescriptor      = errors.New("transport: aa29 resource descriptor invalid")
-	ErrLocalGPIOResourceMissing = errors.New("transport: aa29 control resource missing")
-	ErrLocalGPIOResourceMatch   = errors.New("transport: aa29 control resource does not match")
-	ErrLocalGPIOLease           = errors.New("transport: aa29 lease not admitted")
-	ErrLocalGPIOClosed          = errors.New("transport: aa29 backend closed")
-	ErrLocalGPIOMapping         = errors.New("transport: aa29 mapping port refused the descriptor")
+	ErrLocalGPIOProfileMissing  = errors.New("transport: local GPIO platform profile missing")
+	ErrLocalGPIOUnqualified     = errors.New("transport: local GPIO platform profile not qualified")
+	ErrLocalGPIODescriptor      = errors.New("transport: local GPIO resource descriptor invalid")
+	ErrLocalGPIOResourceMissing = errors.New("transport: local GPIO control resource missing")
+	ErrLocalGPIOResourceMatch   = errors.New("transport: local GPIO control resource does not match")
+	ErrLocalGPIOLease           = errors.New("transport: local GPIO lease not admitted")
+	ErrLocalGPIOClosed          = errors.New("transport: local GPIO backend closed")
+	ErrLocalGPIOMapping         = errors.New("transport: local GPIO mapping port refused the descriptor")
 )
 
 // LocalGPIOProfileDigest is SHA-256 over a fixed-order encoding of every profile

@@ -56,14 +56,14 @@ const (
 // The responder refuses configuration, identity, authority, wire, clock and
 // address faults with these errors.
 var (
-	ErrResponderInvalidConfig = errors.New("localworker: aa26 invalid responder configuration")
-	ErrResponderIdentity      = errors.New("localworker: aa26 worker, stream or clock domain mismatch")
-	ErrAuthority              = errors.New("localworker: aa26 plan reference is not the adopted plan")
-	ErrWireBusy               = errors.New("localworker: aa26 wire authority is held")
-	ErrNotHeld                = errors.New("localworker: aa26 no matching initiator hold")
-	ErrRefused                = errors.New("localworker: aa26 wire port refused")
-	ErrResponderClock         = errors.New("localworker: aa26 clock regression")
-	ErrAddress                = errors.New("localworker: aa26 address not admitted")
+	ErrResponderInvalidConfig = errors.New("localworker: responder invalid configuration")
+	ErrResponderIdentity      = errors.New("localworker: responder worker, stream or clock domain mismatch")
+	ErrAuthority              = errors.New("localworker: responder plan reference is not the adopted plan")
+	ErrWireBusy               = errors.New("localworker: responder wire authority is held")
+	ErrNotHeld                = errors.New("localworker: responder no matching initiator hold")
+	ErrRefused                = errors.New("localworker: responder wire port refused")
+	ErrResponderClock         = errors.New("localworker: responder clock regression")
+	ErrAddress                = errors.New("localworker: responder address not admitted")
 )
 
 // WirePort is the one injected wire authority. Neither method may block.

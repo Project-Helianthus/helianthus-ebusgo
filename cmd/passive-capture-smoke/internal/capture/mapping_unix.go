@@ -19,7 +19,7 @@ const (
 )
 
 // ErrMapping reports a refused or failed read-only mapping.
-var ErrMapping = errors.New("aa29-smoke: read-only mapping refused")
+var ErrMapping = errors.New("passive-capture-smoke: read-only mapping refused")
 
 // Mapping is a read-only shared mapping of an owner-named file. The pages
 // are mapped without write permission, so no store can reach the resource

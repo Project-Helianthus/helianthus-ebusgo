@@ -1,4 +1,4 @@
-//go:build linux && arm64 && aa29_local_gpio
+//go:build linux && arm64 && local_gpio
 
 package transport
 
@@ -24,7 +24,7 @@ import (
 const (
 	localGPIOTestProductionFile = "local_gpio_linux_arm64.go"
 	localGPIOTestTestFile       = "local_gpio_linux_arm64_test.go"
-	localGPIOTestBuildLine      = "//go:build linux && arm64 && aa29_local_gpio"
+	localGPIOTestBuildLine      = "//go:build linux && arm64 && local_gpio"
 
 	localGPIOTestHz        uint64 = 1_000_000
 	localGPIOTestNow       uint64 = 10_000
@@ -299,7 +299,7 @@ func TestAA29OpenRejectsUnqualifiedProfileWithoutMapping(t *testing.T) {
 // production encoding helpers.
 func localGPIOIndependentDigest(profile LocalGPIOPlatformProfile) [sha256.Size]byte {
 	var buffer []byte
-	buffer = append(buffer, []byte("aa29.profile.1\x00")...)
+	buffer = append(buffer, []byte("local_gpio.profile.1\x00")...)
 	for _, label := range []string{profile.ProfileID, profile.Family} {
 		buffer = append(buffer, byte(len(label)>>8), byte(len(label)))
 		buffer = append(buffer, label...)
