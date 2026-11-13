@@ -19,9 +19,8 @@ package types
 // 02-l7-types.md. These values surface to consumers via Value.Err.
 type ErrorCode string
 
-// Consumers match on these codes; the Message of a DecodeError is only
-// human-readable detail. The decode and encode
-// rules behind them are specified in
+// DecodeError.Code carries one of these codes; DecodeError.Message carries
+// free-text detail. For the decode and encode rules see
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/architecture/ebus_standard/02-l7-types.md
 const (
 	// ErrCodeTruncatedPayload means a payload has fewer bytes than its length
@@ -47,7 +46,8 @@ const (
 	// cannot represent exactly, so decoding would not return it.
 	ErrCodeInvalidRoundTrip ErrorCode = "invalid_round_trip"
 	// ErrCodeEncodesReplacement means Encode would produce the primitive's
-	// replacement sentinel, which a decoder reads as "no value".
+	// replacement sentinel, which Decode reports with Replacement set and
+	// Valid false.
 	ErrCodeEncodesReplacement ErrorCode = "encodes_replacement_value"
 	// ErrCodeFixedWidthExceeded means Encode received text longer than the
 	// primitive's fixed width.

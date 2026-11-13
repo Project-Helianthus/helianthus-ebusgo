@@ -19,9 +19,9 @@ const (
 type ArbitrationFailureReason string
 
 const (
-	// ArbitrationFailureReasonAddressCollision means another node was seen
-	// using the monitor's initiator address, so transmission stays blocked
-	// until the initiator address changes (see CollisionMonitor).
+	// ArbitrationFailureReasonAddressCollision is the reason
+	// CollisionMonitor.RecordTX reports while a collision is active. The
+	// state clears when SetInitiator changes the initiator address.
 	ArbitrationFailureReasonAddressCollision ArbitrationFailureReason = "address_collision"
 )
 
@@ -45,12 +45,13 @@ func (e *ErrArbitrationFailed) Unwrap() error {
 type CollisionReason string
 
 const (
-	// CollisionReasonForeignSameSource means a frame carried our initiator
-	// address as its source but matched no frame we sent within the echo
-	// window.
+	// CollisionReasonForeignSameSource means a frame carried the monitor's
+	// initiator address as its source but matched no frame recorded with
+	// RecordTX within the echo window.
 	CollisionReasonForeignSameSource CollisionReason = "foreign_same_source"
-	// CollisionReasonObservedWhileMuted means a frame carried our initiator
-	// address while the monitor was muted, so it cannot be our own echo.
+	// CollisionReasonObservedWhileMuted means a frame carried the monitor's
+	// initiator address as its source while the monitor was muted; recorded
+	// transmissions are not consulted.
 	CollisionReasonObservedWhileMuted CollisionReason = "observed_while_muted"
 )
 

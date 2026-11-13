@@ -40,9 +40,9 @@ const udpReadBufferSize = 65535
 // memory growth from rapid datagram arrival (EG42/EG53).
 const maxUDPPendingBytes = 65536
 
-// NewUDPPlainTransport wraps a connected UDP socket; the transport owns conn
-// from then on and closes it in Close. readTimeout and writeTimeout bound each
-// socket read and write; zero or negative disables the deadline.
+// NewUDPPlainTransport wraps a connected UDP socket, which Close closes.
+// readTimeout and writeTimeout set the deadline of each socket read and
+// write; zero or negative disables the deadline.
 func NewUDPPlainTransport(conn *net.UDPConn, readTimeout, writeTimeout time.Duration) *UDPPlainTransport {
 	return &UDPPlainTransport{
 		conn:         conn,
@@ -52,12 +52,12 @@ func NewUDPPlainTransport(conn *net.UDPConn, readTimeout, writeTimeout time.Dura
 	}
 }
 
-// ReadByte returns the next byte of the received datagrams in order, reading
-// a new datagram when none is buffered. At most 65,536 bytes are buffered;
-// beyond that the oldest bytes are dropped. Bytes already buffered stay
-// readable after Close. A timeout returns an error wrapping ErrTimeout; any
-// other failure returns ErrTransportClosed (wrapped). Reads are serialized
-// with each other but not with Write.
+// ReadByte returns the next byte of the received datagrams in order. It reads
+// a new datagram, of at most 65,535 bytes, only when every earlier byte has
+// been returned. Bytes already buffered stay readable after Close. A timeout
+// returns an error wrapping ErrTimeout; any other failure, or a read after
+// Close with nothing buffered, returns an error matching ErrTransportClosed.
+// Reads are serialized with each other but not with Write.
 func (t *UDPPlainTransport) ReadByte() (byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -99,7 +99,7 @@ func (t *UDPPlainTransport) ReadByte() (byte, error) {
 	}
 }
 
-// Write sends payload as one datagram. It returns an error wrapping
+// Write sends payload as one datagram. It returns an error matching
 // ErrTimeout on a write timeout, ErrTransportClosed on a closed or failed
 // socket, or ErrInvalidPayload when the datagram was sent short. An empty
 // payload is a no-op.

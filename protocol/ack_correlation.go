@@ -1,31 +1,27 @@
 package protocol
 
-// ACKPosition names where in a transaction an acknowledgement symbol was
-// observed.
+// ACKPosition is a string label for the position of an acknowledgement
+// within a transaction.
 type ACKPosition string
 
 const (
-	// ACKPositionRequestACK is the acknowledgement that answers the
-	// initiator's request, as opposed to one sent for a response.
+	// ACKPositionRequestACK is the only position label this package
+	// defines.
 	ACKPositionRequestACK ACKPosition = "request_ack"
 )
 
-// ACKCorrelator names the rule that tied an acknowledgement to its request.
+// ACKCorrelator is a string label for how an acknowledgement was correlated.
 type ACKCorrelator string
 
 const (
-	// ACKCorrelatorM2A tags a correlation made by the M2A rule.
+	// ACKCorrelatorM2A is the only correlator label this package defines.
 	ACKCorrelatorM2A ACKCorrelator = "M2A"
 )
 
-// ACKCorrelation records which acknowledgement symbol was observed for a
-// request, where it was observed and by which correlation rule. The zero value
-// means no acknowledgement was correlated.
-//
-// Byte holds the observed symbol as received (compare it with SymbolAck and
-// SymbolNack). CompleteRequest is set by the producer of the correlation.
-// The protocol package defines this type for
-// consumers that reconstruct transactions; it does not populate it itself.
+// ACKCorrelation holds an acknowledgement byte, its position label, a
+// CompleteRequest flag and a correlator label. No code in this module
+// produces or consumes it. The zero value is not distinguishable by Byte
+// alone: Byte 0x00 equals SymbolAck.
 type ACKCorrelation struct {
 	Byte            byte
 	Position        ACKPosition

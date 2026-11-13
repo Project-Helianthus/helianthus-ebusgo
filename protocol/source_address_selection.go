@@ -17,27 +17,28 @@ const (
 	defaultSourceAddressLikelyTargetSourceMin = 2
 	defaultSourceAddressLikelyTargetTargetMin = 2
 	defaultSourceAddressTopTalkerCount        = 8
-	// SourceAddressTableAnchor is the anchor of the source-address table
-	// block in the public address table page:
+	// SourceAddressTableAnchor is the fragment of the source-address table
+	// on the public address table page:
 	// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/architecture/ebus_standard/12-address-table.md
+	// Select copies it into SourceAddressSelection.TableAnchor.
 	SourceAddressTableAnchor = "#ebus-source-address-table-v1"
-	// SourceAddressTableVersion identifies the version of that table the
-	// rows in this package reproduce. It changes only with the table.
+	// SourceAddressTableVersion names the table version the rows in this
+	// package reproduce. Select copies it into
+	// SourceAddressSelection.TableVersion.
 	SourceAddressTableVersion = "ebus-source-address-table/v1"
-	// SourceAddressTableHash is the lowercase hex SHA-256 of the table
-	// block, computed as the page's "Hash Contract (v1 table)" section
-	// defines. The package tests recompute it from the rows, so a row
-	// change without a matching documentation change fails those tests.
+	// SourceAddressTableHash is a lowercase hex SHA-256 that the package
+	// tests recompute from the rows, so changing a row without updating it
+	// fails those tests. Select copies it into
+	// SourceAddressSelection.TableHash.
 	SourceAddressTableHash = "e78954445087f63064818ab60a2739b9a6b9bf0ae0147fbe92aac5ac76592103"
 )
 
 // SourceAddressPriorityIndex is the official p0..p4 eBUS source-address priority class.
 type SourceAddressPriorityIndex string
 
-// The priority classes in wire-arbitration order: p0 wins over p1, and so on
-// to p4 (see OfficialSourceAddressArbitrationRank). The order describes the
-// bus, not the Helianthus candidate preference (HelianthusGatewayDefaultPolicy).
-// The string values are the ones used in the public address table.
+// The priority classes. OfficialSourceAddressArbitrationRank ranks them from
+// p0 (0) to p4 (4), the lower rank winning; HelianthusGatewayDefaultPolicy
+// uses its own candidate order.
 const (
 	SourceAddressPriorityP0 SourceAddressPriorityIndex = "p0"
 	SourceAddressPriorityP1 SourceAddressPriorityIndex = "p1"
@@ -50,10 +51,10 @@ const (
 // docs-owned source-address table.
 type SourceAddressDescription string
 
-// The canonical descriptions of the table rows. Each value is the exact
-// "Canonical description" cell of the public address table and is stable
-// for enum-style matching; several rows may share one description, and
-// SourceAddressDescriptionNotPreallocated marks the free-use rows.
+// The canonical descriptions of the table rows (CanonicalDescription), also
+// accepted as SourceAddressSelectionConfig.SourceDescription. Several rows
+// share a description; SourceAddressDescriptionNotPreallocated is the
+// description of exactly the FreeUse rows.
 const (
 	SourceAddressDescriptionPCModem                      SourceAddressDescription = "PC/Modem"
 	SourceAddressDescriptionHeatingRegulator             SourceAddressDescription = "Heating regulator"
@@ -201,7 +202,7 @@ type SourceAddressSelectionMode string
 
 // The mode follows from SourceAddressSelectionConfig, checked in this order:
 // ExplicitSourceSet, then SourceDescription, then PriorityIndex, otherwise the
-// default policy. The string values are stable for metrics and logs.
+// default policy.
 const (
 	// SourceAddressSelectionModeDefaultPolicy tries the rows of
 	// HelianthusGatewayDefaultPolicy in its order, except that a set
@@ -213,7 +214,9 @@ const (
 	// that a set HintCandidate that resolves to one of them is tried first.
 	SourceAddressSelectionModeSourceDescriptionConstrainedPolicy SourceAddressSelectionMode = "source_description_constrained_policy"
 	// SourceAddressSelectionModePriorityFilteredDefaultPolicy tries the
-	// default policy rows that belong to PriorityIndex.
+	// rows of HelianthusGatewayDefaultPolicy whose priority class is
+	// PriorityIndex, in that order, except that a set HintCandidate that
+	// resolves to one of them is tried first.
 	SourceAddressSelectionModePriorityFilteredDefaultPolicy SourceAddressSelectionMode = "priority_filtered_default_policy"
 	// SourceAddressSelectionModeExplicitValidateOnly only validates
 	// ExplicitSource; it never falls back to another address.
@@ -229,16 +232,18 @@ type SourceAddressOccupancyState string
 // rejected; an unknown companion is rejected only for source 0xFF, which
 // requires its companion to be observed free.
 const (
-	// SourceAddressOccupancyUnknown is the zero-evidence state.
+	// SourceAddressOccupancyUnknown is the state when no evidence reports
+	// another state for the address.
 	SourceAddressOccupancyUnknown SourceAddressOccupancyState = "unknown"
-	// SourceAddressOccupancyObservedFree means evidence shows the address
-	// unused.
+	// SourceAddressOccupancyObservedFree means supplied evidence reports the
+	// address free.
 	SourceAddressOccupancyObservedFree SourceAddressOccupancyState = "observed_free"
-	// SourceAddressOccupancyObservedOccupied means evidence or listening
-	// saw the address in use.
+	// SourceAddressOccupancyObservedOccupied means supplied evidence or the
+	// selector's own listening saw the address in use.
 	SourceAddressOccupancyObservedOccupied SourceAddressOccupancyState = "observed_occupied"
-	// SourceAddressOccupancyStaleKnownDevice means a previously known
-	// device owns the address even though it was not seen recently.
+	// SourceAddressOccupancyStaleKnownDevice means the address is listed in
+	// KnownAddressEvidence.StaleKnownDevices or reported with this state by
+	// other evidence.
 	SourceAddressOccupancyStaleKnownDevice SourceAddressOccupancyState = "stale_known_device"
 )
 
@@ -360,8 +365,7 @@ type ErrSourceAddressValidation struct {
 }
 
 // Error formats the source and companion as hexadecimal bytes followed by the
-// rejection reason, a stable kebab-case token such as
-// "source-observed-occupied".
+// rejection reason, a kebab-case token such as "source-observed-occupied".
 func (e *ErrSourceAddressValidation) Error() string {
 	return fmt.Sprintf("ebus: source address validation failed for 0x%02x/0x%02x: %s", e.Source, e.Companion, e.Reason)
 }

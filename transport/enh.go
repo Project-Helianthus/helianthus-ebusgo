@@ -12,10 +12,9 @@ var ErrUnknownENHCommand = fmt.Errorf("%w: unknown ENH command", ebuserrors.ErrI
 // ENHCommand represents an enhanced protocol command or response ID.
 type ENHCommand byte
 
-// ENH command IDs. The 4-bit ID is read by direction: ENHReq* values are sent
-// from host to adapter and ENHRes* values from adapter to host, so 0x0 to 0x3
-// each have a request and a response meaning and must not be compared across
-// directions. What each command does is specified in
+// ENH command IDs. ENHReq* values are sent from host to adapter and ENHRes*
+// values from adapter to host; 0x0 to 0x3 are shared, so the direction
+// decides which name applies. For what each command does see
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh.md
 //
 // DecodeENH rejects any other ID with ErrUnknownENHCommand.
@@ -79,9 +78,10 @@ func DecodeENH(byte1, byte2 byte) (ENHFrame, error) {
 type ENHMessageKind uint8
 
 const (
-	// ENHMessageFrame is the only kind ENHParser produces. A short-form data
-	// byte is reported as an ENHResReceived frame with the byte in Data;
-	// the Byte field of ENHMessage is left zero.
+	// ENHMessageFrame is the only kind ENHParser produces. A byte below
+	// 0x80 fed outside a two-byte sequence is reported as an ENHResReceived
+	// frame with the byte in Data; the Byte field of ENHMessage is left
+	// zero.
 	ENHMessageFrame ENHMessageKind = iota
 )
 

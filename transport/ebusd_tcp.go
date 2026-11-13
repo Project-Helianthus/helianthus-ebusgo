@@ -74,9 +74,10 @@ func NewEbusdTCPTransport(conn net.Conn, readTimeout, writeTimeout time.Duration
 // the synthesized acknowledgement and, for a target, the response of a
 // dispatched telegram. It blocks until a byte or an error is queued, or the
 // transport is closed; it does not apply the read timeout itself. A queued
-// error is returned once, when no bytes are left to read; after an error
-// matching ErrBusCollision two SYN bytes are queued so the bus can resume.
-// Queued bytes stay readable after Close; then it returns ErrTransportClosed.
+// error is returned once, when no bytes are left to read; only the latest
+// unread error is kept. After returning an error matching ErrBusCollision it
+// queues two SYN bytes. Queued bytes and a queued error stay readable after
+// Close; once both are drained it returns ErrTransportClosed.
 func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -111,17 +112,18 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 // error: later bytes of the same payload are neither processed nor echoed, yet
 // Write still returns len(payload).
 // When the bytes complete a telegram with a valid CRC it sends the telegram
-// to ebusd as a "hex" command and blocks until ebusd answers or the
-// configured timeouts expire; ReadByte can drain the echo meanwhile. The
-// command protocol is described in
+// to ebusd as a "hex" command and blocks while it writes the command and
+// reads the answer; ReadByte can drain the echo meanwhile. For the command
+// protocol see
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
 //
 // For a non-empty payload on an open transport Write returns len(payload),
 // even with an error. Framing and CRC errors are returned and also queued for
-// ReadByte. Errors reported for the ebusd command are only queued for
-// ReadByte, except a lost connection, which closes the transport and is
-// returned as well. A SYN byte ends the current telegram. Concurrent writers
-// are serialized.
+// ReadByte. An error from the ebusd command matching ErrTransportClosed
+// closes the transport and is returned and queued; any other command error
+// is queued but not returned, except that a broadcast answered without a hex
+// payload is not an error. A SYN byte ends the current telegram. Concurrent
+// writers are serialized.
 func (t *EbusdTCPTransport) Write(payload []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()

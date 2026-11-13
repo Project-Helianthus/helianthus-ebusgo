@@ -11,8 +11,7 @@ const CollisionRetryResyncSYNCount = 2
 // downstream consumers can build against one stable event vocabulary.
 type BusEventKind uint8
 
-// The zero BusEventKind is not a valid kind; numbering starts at 1 so an
-// unset event is detectable.
+// Numbering starts at 1: the zero BusEventKind matches no constant.
 const (
 	// BusEventArbitration reports the result of one arbitration attempt on
 	// a transport that arbitrates; Outcome tells success from failure.
@@ -21,40 +20,45 @@ const (
 	BusEventTX
 	// BusEventRX reports one byte read by the bus.
 	BusEventRX
-	// BusEventACK reports a positive acknowledgement. In an
-	// initiator-to-target transaction it is emitted twice: when the target
-	// acknowledges the request (HasResponse false) and when the initiator
-	// acknowledges the target's response (HasResponse true).
+	// BusEventACK reports a positive acknowledgement. A successful
+	// initiator-to-target attempt emits it for the target's acknowledgement
+	// of the request (HasResponse false) and for the bus's acknowledgement
+	// of the response (HasResponse true).
 	BusEventACK
-	// BusEventNACK reports a negative acknowledgement, or a request that
-	// ended with a NACK outcome.
+	// BusEventNACK reports a negative acknowledgement received or sent by
+	// the bus, or a failure matching ErrNACK.
 	BusEventNACK
-	// BusEventTimeout reports an attempt that ended in a timeout.
+	// BusEventTimeout reports a failure matching ErrTimeout.
 	BusEventTimeout
 	// BusEventCRCMismatch reports a CRC check that failed.
 	BusEventCRCMismatch
 	// BusEventEchoMismatch reports a written byte whose echo differed from
 	// what was sent. The byte values can be equal: an encoding mismatch (a
 	// structural byte echoed as a decoded logical byte, or a payload byte
-	// echoed as a raw SYN) also counts. Classify with EchoWasEscaped and
-	// ByteKnown, not by comparing Byte with the written value.
+	// echoed as a raw SYN) also counts. Byte holds the echo only when
+	// ByteKnown is set, and EchoWasEscaped tells whether it arrived
+	// escape-decoded.
 	BusEventEchoMismatch
-	// BusEventRetry is emitted before the bus retries a request. Retry
-	// carries the reason; TimeoutRetries and NACKRetries count the retries
-	// so far.
+	// BusEventRetry is emitted when the retry policy allows another
+	// attempt, before any wait that precedes it; the request can still end
+	// during that wait. Retry carries the reason; TimeoutRetries and
+	// NACKRetries carry the retry counters at that point.
 	BusEventRetry
 	// BusEventAttemptComplete reports one successful attempt, with the
 	// response when the frame type has one.
 	BusEventAttemptComplete
-	// BusEventRequestComplete is the final event of a logical request,
-	// after all retries; Outcome is its overall result.
+	// BusEventRequestComplete reports the end of a logical request; Outcome
+	// is its overall result. It is not emitted on every exit: a request
+	// that ends because its context or the bus's run context is done during
+	// the fixed delay before a collision or adapter-reset retry returns
+	// without it.
 	BusEventRequestComplete
-	// BusEventObserverFault is emitted to the observer after its previous
-	// callback returned an error or panicked. A fault while delivering
-	// this event is recorded but not reported again.
+	// BusEventObserverFault is emitted to the observer right after one of
+	// its callbacks returned an error or panicked; that failure is recorded
+	// in Bus.ObserverFaultSnapshot. A failure of the callback that receives
+	// this event is discarded: it is neither recorded nor reported again.
 	BusEventObserverFault
-	// BusEventAdapterReset reports an attempt interrupted by an adapter
-	// reset.
+	// BusEventAdapterReset reports a failure matching ErrAdapterReset.
 	BusEventAdapterReset
 )
 
@@ -68,7 +72,7 @@ const (
 	// BusOutcomeUnknown is the zero value and the class of any error that
 	// matches no other class.
 	BusOutcomeUnknown BusOutcomeClass = iota
-	// BusOutcomeSuccess means the step completed without error.
+	// BusOutcomeSuccess is the class of a nil error.
 	BusOutcomeSuccess
 	// BusOutcomeTimeout corresponds to ErrTimeout.
 	BusOutcomeTimeout
@@ -76,8 +80,9 @@ const (
 	BusOutcomeNACK
 	// BusOutcomeCRCMismatch corresponds to ErrCRCMismatch.
 	BusOutcomeCRCMismatch
-	// BusOutcomeEchoMismatch is a bus collision (ErrBusCollision) detected
-	// because a written byte did not echo back unchanged.
+	// BusOutcomeEchoMismatch is the class of BusEventEchoMismatch events
+	// and of an ErrBusCollision error whose message reports an echo
+	// mismatch.
 	BusOutcomeEchoMismatch
 	// BusOutcomeCollision is any other bus collision (ErrBusCollision).
 	BusOutcomeCollision
@@ -92,19 +97,19 @@ type BusRetryReason uint8
 
 // Each reason follows the BusOutcomeClass of the error that caused the retry.
 const (
-	// BusRetryReasonUnknown is the zero value: the cause matched no other
-	// reason.
+	// BusRetryReasonUnknown is the zero value and the reason for a cause in
+	// any class without its own reason.
 	BusRetryReasonUnknown BusRetryReason = iota
-	// BusRetryReasonTimeout retries after a timeout.
+	// BusRetryReasonTimeout corresponds to BusOutcomeTimeout.
 	BusRetryReasonTimeout
-	// BusRetryReasonNACK retries after a negative acknowledgement.
+	// BusRetryReasonNACK corresponds to BusOutcomeNACK.
 	BusRetryReasonNACK
-	// BusRetryReasonCRCMismatch retries after a CRC mismatch.
+	// BusRetryReasonCRCMismatch corresponds to BusOutcomeCRCMismatch.
 	BusRetryReasonCRCMismatch
-	// BusRetryReasonCollision retries after a collision, including an
-	// echo mismatch (BusOutcomeCollision or BusOutcomeEchoMismatch).
+	// BusRetryReasonCollision corresponds to BusOutcomeCollision and
+	// BusOutcomeEchoMismatch.
 	BusRetryReasonCollision
-	// BusRetryReasonAdapterReset retries after an adapter reset.
+	// BusRetryReasonAdapterReset corresponds to BusOutcomeAdapterReset.
 	BusRetryReasonAdapterReset
 )
 

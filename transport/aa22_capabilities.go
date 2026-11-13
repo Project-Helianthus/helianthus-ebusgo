@@ -22,26 +22,25 @@ const (
 type AA22TransportKind uint8
 
 // Values above AA22KindEBUSDCommand are cleared to AA22KindUnknown by
-// AA22QueryCapabilities. The adapter protocols are described in
+// AA22QueryCapabilities. A kind is reported only by an AA22CapabilityProvider;
+// TCPPlainTransport, UDPPlainTransport and EbusdTCPTransport do not implement
+// it, so AA22QueryCapabilities returns AA22KindUnknown for them. For the
+// adapter protocols see
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/tree/main/protocols
 const (
 	// AA22KindUnknown is the zero value: the backend is not identified.
 	AA22KindUnknown AA22TransportKind = iota
-	// AA22KindLocalRaw is a backend attached to the bus on this host,
-	// without adapter framing.
+	// AA22KindLocalRaw labels a local raw backend, without adapter framing.
 	AA22KindLocalRaw
-	// AA22KindENH is an adapter spoken to with ENH framing.
+	// AA22KindENH labels an adapter spoken to with ENH framing.
 	AA22KindENH
-	// AA22KindENS is an adapter spoken to with ENS framing.
+	// AA22KindENS labels an adapter spoken to with ENS framing.
 	AA22KindENS
-	// AA22KindTCP is a plain byte stream over TCP, the kind
-	// TCPPlainTransport implements.
+	// AA22KindTCP labels a plain byte stream over TCP.
 	AA22KindTCP
-	// AA22KindUDP is plain bytes over UDP datagrams, the kind
-	// UDPPlainTransport implements.
+	// AA22KindUDP labels plain bytes over UDP datagrams.
 	AA22KindUDP
-	// AA22KindEBUSDCommand is the ebusd command port, the kind
-	// EbusdTCPTransport implements.
+	// AA22KindEBUSDCommand labels the ebusd command port.
 	AA22KindEBUSDCommand
 )
 
@@ -54,9 +53,9 @@ type AA22Encoding uint8
 const (
 	// AA22EncodingUnknown is the zero value: the encoding is not claimed.
 	AA22EncodingUnknown AA22Encoding = iota
-	// AA22EncodingRaw delivers wire symbols; escape pairs are still encoded.
+	// AA22EncodingRaw labels a stream of raw bus symbols, not escape-decoded.
 	AA22EncodingRaw
-	// AA22EncodingLogical delivers escape-decoded logical bytes.
+	// AA22EncodingLogical labels a stream of escape-decoded logical bytes.
 	AA22EncodingLogical
 )
 

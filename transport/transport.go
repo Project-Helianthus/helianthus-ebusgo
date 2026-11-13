@@ -20,13 +20,15 @@ type RawTransport interface {
 // collision.
 type CollisionRecoveryDecision uint8
 
-// The zero CollisionRecoveryDecision is not a valid decision.
+// Numbering starts at 1: the zero CollisionRecoveryDecision matches no
+// constant.
 const (
-	// CollisionRecoveryRetry tells the transport that the bus waited out
-	// the collision and is about to retry the request.
+	// CollisionRecoveryRetry is passed by protocol.Bus after its wait
+	// following the collision succeeded, before it retries the request.
 	CollisionRecoveryRetry CollisionRecoveryDecision = iota + 1
-	// CollisionRecoveryAbandon tells the transport that the bus will not
-	// retry: the retry policy declined, a wait failed or a context ended.
+	// CollisionRecoveryAbandon is passed by protocol.Bus in the other
+	// cases: the retry policy declined the retry, the wait failed or a
+	// context ended.
 	CollisionRecoveryAbandon
 )
 
@@ -45,18 +47,19 @@ type CollisionRecoveryLifecycle interface {
 // passive consumers that need reset/lifecycle boundaries.
 type StreamEventKind uint8
 
-// The zero StreamEventKind is not a valid kind. Only StreamEventByte items
-// reach RawTransport.ReadByte; the other kinds reach only ReadEvent
-// consumers. START and the adapter reset are ENH commands, described in
+// Numbering starts at 1: the zero StreamEventKind matches no constant.
+// RawTransport.ReadByte returns only the bytes of StreamEventByte items; the
+// other kinds are read through StreamEventReader.ReadEvent or
+// RawSymbolStreamReader.ReadEventWithRawSymbol. A transport may
+// also surface a reset to ReadByte callers as an error: ENHTransport returns
+// ErrAdapterReset. For the ENH START and RESETTED commands see
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh.md
 const (
 	// StreamEventByte carries one received byte in Byte. On transports that
 	// deliver escape-decoded bytes, WasEscaped tells a decoded byte from a
 	// raw one.
 	StreamEventByte StreamEventKind = iota + 1
-	// StreamEventReset marks an adapter reset. Stream state from before it,
-	// including a pending arbitration, no longer applies. Each reset is
-	// reported once.
+	// StreamEventReset marks an adapter reset in the stream.
 	StreamEventReset
 	// StreamEventStarted reports that the adapter confirmed START
 	// arbitration; Data holds the confirmed initiator address.

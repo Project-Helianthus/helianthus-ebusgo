@@ -30,9 +30,9 @@ type TCPPlainTransport struct {
 	closed   bool
 }
 
-// NewTCPPlainTransport wraps an established connection; the transport owns
-// conn from then on and closes it in Close. readTimeout and writeTimeout bound
-// each read and write call; zero or negative disables the deadline.
+// NewTCPPlainTransport wraps an established connection, which Close closes.
+// readTimeout and writeTimeout set the deadline of each read from and write
+// to conn; zero or negative disables the deadline.
 func NewTCPPlainTransport(conn net.Conn, readTimeout, writeTimeout time.Duration) *TCPPlainTransport {
 	return &TCPPlainTransport{
 		conn:         conn,
@@ -44,10 +44,10 @@ func NewTCPPlainTransport(conn net.Conn, readTimeout, writeTimeout time.Duration
 
 // ReadByte returns the next byte from the stream, blocking for at most the
 // read timeout (no limit when it is zero or negative). A timeout returns an
-// error wrapping ErrTimeout; any other failure, or a read after Close, returns
-// ErrTransportClosed (a read after Close returns the
-// bare sentinel). Buffered bytes are not returned after Close.
-// Reads are serialized with each other but not with Write.
+// error wrapping ErrTimeout; any other failure, or a read after Close,
+// returns an error matching ErrTransportClosed. Buffered bytes are not
+// returned after Close. Reads are serialized with each other but not with
+// Write.
 func (t *TCPPlainTransport) ReadByte() (byte, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -74,11 +74,11 @@ func (t *TCPPlainTransport) ReadByte() (byte, error) {
 	return value, nil
 }
 
-// Write sends payload unchanged, retrying partial writes until all bytes are
-// written. It returns the number of bytes written with an error wrapping
-// ErrTimeout on a write timeout, ErrTransportClosed on a closed or failed
-// connection, or ErrInvalidPayload if the connection stops accepting bytes.
-// An empty payload is a no-op.
+// Write sends payload unchanged, writing the rest after a partial write until
+// all bytes are written. It returns the number of bytes written with an error
+// matching ErrTimeout on a write timeout, ErrTransportClosed on a closed or
+// failed connection, or ErrInvalidPayload if a write accepts no bytes. An
+// empty payload is a no-op.
 func (t *TCPPlainTransport) Write(payload []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
@@ -110,10 +110,10 @@ func (t *TCPPlainTransport) Write(payload []byte) (int, error) {
 	return written, nil
 }
 
-// Close closes the connection and makes later reads and non-empty writes fail with
-// ErrTransportClosed. Only the first call closes the connection and returns
-// its error; later calls return nil. An empty Write stays a no-op returning
-// (0, nil) even after Close.
+// Close closes the connection and makes later reads and non-empty writes
+// fail with ErrTransportClosed. Only the first call closes the connection and
+// returns its error; later calls return nil. An empty Write stays a no-op
+// returning (0, nil) even after Close.
 func (t *TCPPlainTransport) Close() error {
 	t.closedMu.Lock()
 	defer t.closedMu.Unlock()
