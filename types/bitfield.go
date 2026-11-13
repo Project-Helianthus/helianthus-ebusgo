@@ -57,7 +57,8 @@ func (b BITFIELD) Decode(payload []byte) (Value, error) {
 // Encode accepts a []bool of exactly SizeBytes*8 flags in Decode's order, a
 // []byte of exactly SizeBytes bytes (copied), or a non-negative integer
 // packed little-endian, which needs SizeBytes of at most 8 and a value that
-// fits. It fails with errors.ErrInvalidPayload for other inputs, for a
+// fits. A uint is accepted only up to the largest int64 value (it goes through
+// the signed helper), while a uint64 is accepted over its full range. It fails with errors.ErrInvalidPayload for other inputs, for a
 // SizeBytes that is not positive and for a result that would be all 0xFF.
 func (b BITFIELD) Encode(value any) ([]byte, error) {
 	if b.SizeBytes <= 0 {
