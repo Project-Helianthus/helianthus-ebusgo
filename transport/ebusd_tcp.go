@@ -106,7 +106,10 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 	return value, nil
 }
 
-// Write accepts raw (escaped) bus bytes and queues each one as its own echo.
+// Write accepts raw (escaped) bus bytes and queues each processed byte as its
+// own echo. Processing stops at the first byte that causes a framing or CRC
+// error: later bytes of the same payload are neither processed nor echoed, yet
+// Write still returns len(payload).
 // When the bytes complete a telegram with a valid CRC it sends the telegram
 // to ebusd as a "hex" command and blocks until ebusd answers or the
 // configured timeouts expire; ReadByte can drain the echo meanwhile. The

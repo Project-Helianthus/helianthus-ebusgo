@@ -34,7 +34,10 @@ const (
 	// BusEventCRCMismatch reports a CRC check that failed.
 	BusEventCRCMismatch
 	// BusEventEchoMismatch reports a written byte whose echo differed from
-	// what was sent; EchoWasEscaped qualifies the offending byte.
+	// what was sent. The byte values can be equal: an encoding mismatch (a
+	// structural byte echoed as a decoded logical byte, or a payload byte
+	// echoed as a raw SYN) also counts. Classify with EchoWasEscaped and
+	// ByteKnown, not by comparing Byte with the written value.
 	BusEventEchoMismatch
 	// BusEventRetry is emitted before the bus retries a request. Retry
 	// carries the reason; TimeoutRetries and NACKRetries count the retries

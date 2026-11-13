@@ -129,7 +129,8 @@ func (t *UDPPlainTransport) Write(payload []byte) (int, error) {
 }
 
 // Close closes the socket and makes later writes, and reads once the buffer
-// is drained, fail with ErrTransportClosed. Only the first call closes the
+// is drained, fail with ErrTransportClosed; an empty Write stays a no-op
+// returning (0, nil) even after Close. Only the first call closes the
 // socket and returns its error; later calls return nil.
 func (t *UDPPlainTransport) Close() error {
 	t.closedMu.Lock()

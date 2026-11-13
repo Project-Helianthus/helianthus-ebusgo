@@ -110,9 +110,10 @@ func (t *TCPPlainTransport) Write(payload []byte) (int, error) {
 	return written, nil
 }
 
-// Close closes the connection and makes later reads and writes fail with
+// Close closes the connection and makes later reads and non-empty writes fail with
 // ErrTransportClosed. Only the first call closes the connection and returns
-// its error; later calls return nil.
+// its error; later calls return nil. An empty Write stays a no-op returning
+// (0, nil) even after Close.
 func (t *TCPPlainTransport) Close() error {
 	t.closedMu.Lock()
 	defer t.closedMu.Unlock()
