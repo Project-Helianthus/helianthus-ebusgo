@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Rename the externally visible work-item-coded strings of the local worker,
+  the local GPIO transport and the passive-capture smoke command directly,
+  with no alias, no dual acceptance and no migration step:
+  - build tag: `aa29_local_gpio` → `local_gpio` (transport and smoke command;
+    build with `go build -tags local_gpio ./cmd/passive-capture-smoke`);
+  - local GPIO platform-profile digest domain: `aa29.profile.1` →
+    `local_gpio.profile.1`. Every profile digest changes, so every
+    owner-provisioned platform profile must be digested again before the next
+    RAW trial;
+  - smoke command name, flag-set name and message prefix: `aa29-smoke` →
+    `passive-capture-smoke` (`aa29-smoke: usage`, `aa29-smoke: profile:`,
+    `aa29-smoke: a passive invariant did not hold`, `aa29-smoke: profile
+    document invalid`, `aa29-smoke: capture limits invalid`, `aa29-smoke:
+    read-only mapping refused` and `aa29-smoke: built without linux/arm64 and
+    the aa29_local_gpio tag; refusing to run` take the new prefix and tag);
+  - `-profile` flag help: `owner-provisioned AA29 platform profile (JSON)` →
+    `owner-provisioned local GPIO platform profile (JSON)`;
+  - engine errors: `localworker: aa25 invalid config` → `localworker: engine
+    invalid config`, `localworker: aa25 missing port` → `localworker: engine
+    missing port`, `localworker: aa25 invalid prepared response` →
+    `localworker: engine invalid prepared response`;
+  - responder errors: `localworker: aa26 invalid responder configuration` →
+    `localworker: responder invalid configuration`, and `localworker: aa26 …`
+    → `localworker: responder …` for `worker, stream or clock domain
+    mismatch`, `plan reference is not the adopted plan`, `wire authority is
+    held`, `no matching initiator hold`, `wire port refused`, `clock
+    regression` and `address not admitted`;
+  - local GPIO transport errors: `transport: aa29 …` → `transport: local
+    GPIO …` for `platform profile missing`, `platform profile not qualified`,
+    `resource descriptor invalid`, `control resource missing`, `control
+    resource does not match`, `lease not admitted`, `backend closed` and
+    `mapping port refused the descriptor`.
 - Rename the work-item-coded local worker, local GPIO transport and smoke
   command files and identifiers to behavior names. The command directory
   `cmd/aa29-smoke` becomes `cmd/passive-capture-smoke` (its internal `capture`

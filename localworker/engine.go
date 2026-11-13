@@ -183,9 +183,9 @@ type Prepared struct {
 // The engine refuses a configuration, a missing port and a prepared response
 // with these errors.
 var (
-	ErrEngineInvalidConfig = errors.New("localworker: aa25 invalid config")
-	ErrMissingPort         = errors.New("localworker: aa25 missing port")
-	ErrInvalidResponse     = errors.New("localworker: aa25 invalid prepared response")
+	ErrEngineInvalidConfig = errors.New("localworker: engine invalid config")
+	ErrMissingPort         = errors.New("localworker: engine missing port")
+	ErrInvalidResponse     = errors.New("localworker: engine invalid prepared response")
 )
 
 // PrepareResponse precomputes the raw wire form of the initial ACK and the

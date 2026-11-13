@@ -1,4 +1,4 @@
-//go:build linux && arm64 && aa29_local_gpio
+//go:build linux && arm64 && local_gpio
 
 // Command passive-capture-smoke runs one bounded passive capture over the local GPIO
 // backend and writes the decoded engine events as JSON lines.
@@ -51,7 +51,7 @@ const (
 	closeAttempts    = 2
 )
 
-var errUsage = errors.New("aa29-smoke: usage")
+var errUsage = errors.New("passive-capture-smoke: usage")
 
 type options struct {
 	profilePath  string
@@ -65,11 +65,11 @@ type options struct {
 // parseOptions requires the profile, window and responder flags; nothing
 // that names a resource has a default.
 func parseOptions(args []string, stderr io.Writer) (options, error) {
-	flags := flag.NewFlagSet("aa29-smoke", flag.ContinueOnError)
+	flags := flag.NewFlagSet("passive-capture-smoke", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var result options
 	var responder string
-	flags.StringVar(&result.profilePath, "profile", "", "owner-provisioned AA29 platform profile (JSON)")
+	flags.StringVar(&result.profilePath, "profile", "", "owner-provisioned local GPIO platform profile (JSON)")
 	flags.StringVar(&result.windowPath, "window", "", "owner-provisioned file holding the GPIO control window")
 	flags.Uint64Var(&result.windowOffset, "window-offset", 0, "page-aligned offset of the window in that file")
 	flags.StringVar(&responder, "responder", "", "target address the engine tags frames for (for example 0x15)")
@@ -298,7 +298,7 @@ func runCapture(req request, mapping countingMapper, counter transport.LocalGPIO
 		return exitFailure, closeErr
 	}
 	if !summary.Passive {
-		return exitNotPassive, errors.New("aa29-smoke: a passive invariant did not hold")
+		return exitNotPassive, errors.New("passive-capture-smoke: a passive invariant did not hold")
 	}
 	return exitPassive, nil
 }
@@ -311,7 +311,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	platformProfile, err := loadProfile(opts.profilePath)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "aa29-smoke: profile:", err)
+		_, _ = fmt.Fprintln(stderr, "passive-capture-smoke: profile:", err)
 		return exitUsage
 	}
 	var stop atomic.Bool

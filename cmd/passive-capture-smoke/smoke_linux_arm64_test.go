@@ -1,4 +1,4 @@
-//go:build linux && arm64 && aa29_local_gpio
+//go:build linux && arm64 && local_gpio
 
 package main
 
@@ -27,8 +27,8 @@ const (
 	testProductionFile  = "smoke_linux_arm64.go"
 	testTestFile        = "smoke_linux_arm64_test.go"
 	testUnsupportedFile = "smoke_unsupported.go"
-	testBuildLine       = "//go:build linux && arm64 && aa29_local_gpio"
-	testUnsupportedLine = "//go:build !(linux && arm64 && aa29_local_gpio)"
+	testBuildLine       = "//go:build linux && arm64 && local_gpio"
+	testUnsupportedLine = "//go:build !(linux && arm64 && local_gpio)"
 
 	testHz        uint64 = 1_000_000
 	testLength    uint64 = 0x40

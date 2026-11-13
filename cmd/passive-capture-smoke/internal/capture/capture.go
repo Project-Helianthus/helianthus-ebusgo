@@ -39,8 +39,8 @@ const (
 // ErrProfile and ErrLimits classify a refused profile document and refused
 // capture limits.
 var (
-	ErrProfile = errors.New("aa29-smoke: profile document invalid")
-	ErrLimits  = errors.New("aa29-smoke: capture limits invalid")
+	ErrProfile = errors.New("passive-capture-smoke: profile document invalid")
+	ErrLimits  = errors.New("passive-capture-smoke: capture limits invalid")
 )
 
 // GPIODocument mirrors the local GPIO descriptor. It carries offsets inside
