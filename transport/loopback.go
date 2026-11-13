@@ -22,6 +22,9 @@ func NewLoopback() *Loopback {
 	return lb
 }
 
+// ReadByte returns the oldest unread written byte, blocking until one is
+// written or the loopback is closed. Bytes written before Close stay readable;
+// once they are drained it returns ErrTransportClosed (unwrapped).
 func (lb *Loopback) ReadByte() (byte, error) {
 	lb.mutex.Lock()
 	defer lb.mutex.Unlock()
@@ -43,6 +46,8 @@ func (lb *Loopback) ReadByte() (byte, error) {
 	return value, nil
 }
 
+// Write appends a copy of payload to the read queue and wakes blocked readers.
+// It does not wait for a reader and returns ErrTransportClosed after Close.
 func (lb *Loopback) Write(payload []byte) (int, error) {
 	lb.mutex.Lock()
 	defer lb.mutex.Unlock()
@@ -59,6 +64,8 @@ func (lb *Loopback) Write(payload []byte) (int, error) {
 	return len(payload), nil
 }
 
+// Close wakes blocked readers and rejects further writes. It is idempotent
+// and always returns nil.
 func (lb *Loopback) Close() error {
 	lb.mutex.Lock()
 	defer lb.mutex.Unlock()

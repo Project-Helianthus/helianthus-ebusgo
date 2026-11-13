@@ -2,6 +2,15 @@ package protocol
 
 import "github.com/Project-Helianthus/helianthus-ebusgo/internal/crc"
 
+// Reserved eBUS address and symbol values. Their meaning, the escape encoding
+// and the acknowledgement rules are owned by the public protocol overview:
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebus-services/ebus-overview.md
+//
+// SymbolEscape and SymbolSyn are never valid in an address position. A
+// logical 0xAA inside a frame is data, not SYN: before treating SymbolSyn as a
+// boundary, code that reads a transport must know whether the transport
+// delivers wire symbols or escape-decoded bytes (see the transport package's
+// EscapeAware).
 const (
 	AddressBroadcast = byte(0xFE)
 	SymbolEscape     = byte(0xA9)
@@ -10,12 +19,24 @@ const (
 	SymbolNack       = byte(0xFF)
 )
 
+// FrameType classifies a frame by the kind of its destination. The address
+// classes behind each value are defined by the public address table:
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/architecture/ebus_standard/12-address-table.md
 type FrameType uint8
 
 const (
+	// FrameTypeUnknown is the zero value: no explicit type was declared, or
+	// the target is not a valid address. On Frame it means "derive from
+	// Target" (see Frame.EffectiveFrameType).
 	FrameTypeUnknown FrameType = iota
+	// FrameTypeBroadcast addresses every node; no acknowledgement or
+	// response follows.
 	FrameTypeBroadcast
+	// FrameTypeInitiatorTarget addresses a target-only node, which may
+	// return a response payload.
 	FrameTypeInitiatorTarget
+	// FrameTypeInitiatorInitiator addresses another initiator-capable node;
+	// the transaction ends after the acknowledgement, without a response.
 	FrameTypeInitiatorInitiator
 )
 

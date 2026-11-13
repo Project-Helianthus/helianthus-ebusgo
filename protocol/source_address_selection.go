@@ -17,14 +17,27 @@ const (
 	defaultSourceAddressLikelyTargetSourceMin = 2
 	defaultSourceAddressLikelyTargetTargetMin = 2
 	defaultSourceAddressTopTalkerCount        = 8
-	SourceAddressTableAnchor                  = "#ebus-source-address-table-v1"
-	SourceAddressTableVersion                 = "ebus-source-address-table/v1"
-	SourceAddressTableHash                    = "e78954445087f63064818ab60a2739b9a6b9bf0ae0147fbe92aac5ac76592103"
+	// SourceAddressTableAnchor is the anchor of the source-address table
+	// block in the public address table page:
+	// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/architecture/ebus_standard/12-address-table.md
+	SourceAddressTableAnchor = "#ebus-source-address-table-v1"
+	// SourceAddressTableVersion identifies the version of that table the
+	// rows in this package reproduce. It changes only with the table.
+	SourceAddressTableVersion = "ebus-source-address-table/v1"
+	// SourceAddressTableHash is the lowercase hex SHA-256 of the table
+	// block, computed as the page's "Hash Contract (v1 table)" section
+	// defines. The package tests recompute it from the rows, so a row
+	// change without a matching documentation change fails those tests.
+	SourceAddressTableHash = "e78954445087f63064818ab60a2739b9a6b9bf0ae0147fbe92aac5ac76592103"
 )
 
 // SourceAddressPriorityIndex is the official p0..p4 eBUS source-address priority class.
 type SourceAddressPriorityIndex string
 
+// The priority classes in wire-arbitration order: p0 wins over p1, and so on
+// to p4 (see OfficialSourceAddressArbitrationRank). The order describes the
+// bus, not the Helianthus candidate preference (HelianthusGatewayDefaultPolicy).
+// The string values are the ones used in the public address table.
 const (
 	SourceAddressPriorityP0 SourceAddressPriorityIndex = "p0"
 	SourceAddressPriorityP1 SourceAddressPriorityIndex = "p1"
@@ -37,6 +50,10 @@ const (
 // docs-owned source-address table.
 type SourceAddressDescription string
 
+// The canonical descriptions of the table rows. Each value is the exact
+// "Canonical description" cell of the public address table and is stable
+// for enum-style matching; several rows may share one description, and
+// SourceAddressDescriptionNotPreallocated marks the free-use rows.
 const (
 	SourceAddressDescriptionPCModem                      SourceAddressDescription = "PC/Modem"
 	SourceAddressDescriptionHeatingRegulator             SourceAddressDescription = "Heating regulator"
@@ -182,20 +199,44 @@ type SourceAddressSelectionBus interface {
 // SourceAddressSelectionMode classifies how candidate rows were produced.
 type SourceAddressSelectionMode string
 
+// The mode follows from SourceAddressSelectionConfig, checked in this order:
+// ExplicitSourceSet, then SourceDescription, then PriorityIndex, otherwise the
+// default policy. The string values are stable for metrics and logs.
 const (
-	SourceAddressSelectionModeDefaultPolicy                      SourceAddressSelectionMode = "default_policy"
+	// SourceAddressSelectionModeDefaultPolicy tries the rows of
+	// HelianthusGatewayDefaultPolicy in its order.
+	SourceAddressSelectionModeDefaultPolicy SourceAddressSelectionMode = "default_policy"
+	// SourceAddressSelectionModeSourceDescriptionConstrainedPolicy tries
+	// only the table rows whose canonical description equals
+	// SourceDescription (and PriorityIndex, when set), in table order.
 	SourceAddressSelectionModeSourceDescriptionConstrainedPolicy SourceAddressSelectionMode = "source_description_constrained_policy"
-	SourceAddressSelectionModePriorityFilteredDefaultPolicy      SourceAddressSelectionMode = "priority_filtered_default_policy"
-	SourceAddressSelectionModeExplicitValidateOnly               SourceAddressSelectionMode = "explicit_validate_only"
+	// SourceAddressSelectionModePriorityFilteredDefaultPolicy tries the
+	// default policy rows that belong to PriorityIndex.
+	SourceAddressSelectionModePriorityFilteredDefaultPolicy SourceAddressSelectionMode = "priority_filtered_default_policy"
+	// SourceAddressSelectionModeExplicitValidateOnly only validates
+	// ExplicitSource; it never falls back to another address.
+	SourceAddressSelectionModeExplicitValidateOnly SourceAddressSelectionMode = "explicit_validate_only"
 )
 
 // SourceAddressOccupancyState is the selector's known state for a source or companion address.
 type SourceAddressOccupancyState string
 
+// When evidence sources disagree about one address, the stronger state wins:
+// observed occupied, then stale known device, then observed free, then
+// unknown. A source or companion that is occupied or a stale known device is
+// rejected; an unknown companion is rejected only for source 0xFF, which
+// requires its companion to be observed free.
 const (
-	SourceAddressOccupancyUnknown          SourceAddressOccupancyState = "unknown"
-	SourceAddressOccupancyObservedFree     SourceAddressOccupancyState = "observed_free"
+	// SourceAddressOccupancyUnknown is the zero-evidence state.
+	SourceAddressOccupancyUnknown SourceAddressOccupancyState = "unknown"
+	// SourceAddressOccupancyObservedFree means evidence shows the address
+	// unused.
+	SourceAddressOccupancyObservedFree SourceAddressOccupancyState = "observed_free"
+	// SourceAddressOccupancyObservedOccupied means evidence or listening
+	// saw the address in use.
 	SourceAddressOccupancyObservedOccupied SourceAddressOccupancyState = "observed_occupied"
+	// SourceAddressOccupancyStaleKnownDevice means a previously known
+	// device owns the address even though it was not seen recently.
 	SourceAddressOccupancyStaleKnownDevice SourceAddressOccupancyState = "stale_known_device"
 )
 
@@ -304,6 +345,7 @@ type ErrSourceAddressConfig struct {
 	Reason string
 }
 
+// Error formats the configuration problem.
 func (e *ErrSourceAddressConfig) Error() string {
 	return fmt.Sprintf("ebus: source address selection config: %s", e.Reason)
 }
@@ -315,6 +357,9 @@ type ErrSourceAddressValidation struct {
 	Reason    string
 }
 
+// Error formats the source and companion as hexadecimal bytes followed by the
+// rejection reason, a stable kebab-case token such as
+// "source-observed-occupied".
 func (e *ErrSourceAddressValidation) Error() string {
 	return fmt.Sprintf("ebus: source address validation failed for 0x%02x/0x%02x: %s", e.Source, e.Companion, e.Reason)
 }
@@ -324,6 +369,7 @@ type ErrNoAvailableSourceAddress struct {
 	Metrics SourceAddressSelectionMetrics
 }
 
+// Error returns a fixed message; the per-candidate reasons are in Metrics.
 func (e *ErrNoAvailableSourceAddress) Error() string {
 	return "ebus: no available source address"
 }
@@ -334,10 +380,12 @@ type ErrSourceAddressBusObservation struct {
 	Err       error
 }
 
+// Error names the failed observation operation and its cause.
 func (e *ErrSourceAddressBusObservation) Error() string {
 	return fmt.Sprintf("ebus: source address bus observation %s failed: %v", e.Operation, e.Err)
 }
 
+// Unwrap returns the underlying bus error so errors.Is and errors.As reach it.
 func (e *ErrSourceAddressBusObservation) Unwrap() error {
 	return e.Err
 }

@@ -19,17 +19,39 @@ package types
 // 02-l7-types.md. These values surface to consumers via Value.Err.
 type ErrorCode string
 
+// Consumers match on these codes; the Message of a DecodeError is only
+// human-readable detail. The decode and encode
+// rules behind them are specified in
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/architecture/ebus_standard/02-l7-types.md
 const (
-	ErrCodeTruncatedPayload   ErrorCode = "truncated_payload"
-	ErrCodeOverlongPayload    ErrorCode = "overlong_payload"
-	ErrCodeOutOfRange         ErrorCode = "out_of_range"
-	ErrCodeInvalidNibble      ErrorCode = "invalid_nibble"
-	ErrCodeAmbiguousSelector  ErrorCode = "ambiguous_selector_branch"
-	ErrCodeUnknownSelector    ErrorCode = "unknown_selector_branch"
-	ErrCodeInvalidRoundTrip   ErrorCode = "invalid_round_trip"
+	// ErrCodeTruncatedPayload means Decode received fewer bytes than the
+	// primitive's fixed width.
+	ErrCodeTruncatedPayload ErrorCode = "truncated_payload"
+	// ErrCodeOverlongPayload means Decode received more bytes than the primitive
+	// consumes; the extra bytes are not ignored.
+	ErrCodeOverlongPayload ErrorCode = "overlong_payload"
+	// ErrCodeOutOfRange means Encode received a value outside the primitive's
+	// range, or a non-finite number.
+	ErrCodeOutOfRange ErrorCode = "out_of_range"
+	// ErrCodeInvalidNibble means a BCD byte has a nibble greater than 9.
+	ErrCodeInvalidNibble ErrorCode = "invalid_nibble"
+	// ErrCodeAmbiguousSelector means more than one selector branch matches the
+	// same inputs.
+	ErrCodeAmbiguousSelector ErrorCode = "ambiguous_selector_branch"
+	// ErrCodeUnknownSelector means no selector branch matches the inputs.
+	ErrCodeUnknownSelector ErrorCode = "unknown_selector_branch"
+	// ErrCodeInvalidRoundTrip means Encode received a value that the wire format
+	// cannot represent exactly, so decoding would not return it.
+	ErrCodeInvalidRoundTrip ErrorCode = "invalid_round_trip"
+	// ErrCodeEncodesReplacement means Encode would produce the primitive's
+	// replacement sentinel, which a decoder reads as "no value".
 	ErrCodeEncodesReplacement ErrorCode = "encodes_replacement_value"
+	// ErrCodeFixedWidthExceeded means Encode received text longer than the
+	// primitive's fixed width.
 	ErrCodeFixedWidthExceeded ErrorCode = "fixed_width_exceeded"
-	ErrCodeInvalidArgument    ErrorCode = "invalid_argument"
+	// ErrCodeInvalidArgument means Encode received a Go value of the wrong type
+	// or shape for the primitive.
+	ErrCodeInvalidArgument ErrorCode = "invalid_argument"
 )
 
 // DecodeError is the structured error type for 02-l7-types.md decode failures.
@@ -38,6 +60,8 @@ type DecodeError struct {
 	Message string
 }
 
+// Error returns the code, followed by ": " and Message when Message is set.
+// It is safe on a nil receiver.
 func (e *DecodeError) Error() string {
 	if e == nil {
 		return "<nil decode error>"

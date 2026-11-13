@@ -10,6 +10,14 @@ import (
 // AdapterInfoID represents an enhanced protocol INFO query identifier (0x00–0x07).
 type AdapterInfoID byte
 
+// The INFO IDs this package knows. Response layouts, units and the
+// capability gating are described in
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh-info-reference.md
+//
+// Query an ID only when AdapterVersion.SupportsInfoID allows it. This package
+// parses the responses to AdapterInfoVersion (ParseAdapterVersion) and
+// AdapterInfoResetInfo (ParseAdapterResetInfo); InfoRequester.RequestInfo
+// returns the other responses as raw bytes for the caller to interpret.
 const (
 	AdapterInfoVersion      AdapterInfoID = 0x00
 	AdapterInfoHardwareID   AdapterInfoID = 0x01

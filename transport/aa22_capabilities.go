@@ -6,9 +6,14 @@ import aa22reflect "reflect"
 // Only AA22Proven is affirmative; a hypothesis is not qualification.
 type AA22Evidence uint8
 
+// AA22QueryCapabilities clears any value above AA22Proven to AA22Unknown.
 const (
+	// AA22Unknown is the zero value: no claim is made.
 	AA22Unknown AA22Evidence = iota
+	// AA22Hypothesis is a claim not yet proven. It is not affirmative:
+	// AA22DeadlineSuitable, for one, requires AA22Proven.
 	AA22Hypothesis
+	// AA22Proven is the only affirmative claim.
 	AA22Proven
 )
 
@@ -16,13 +21,27 @@ const (
 // A local raw backend is distinct from ENS adapter framing.
 type AA22TransportKind uint8
 
+// AA22QueryCapabilities clears any value above AA22KindEBUSDCommand to
+// AA22KindUnknown. The adapter protocols are described in
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/tree/main/protocols
 const (
+	// AA22KindUnknown is the zero value: the backend is not identified.
 	AA22KindUnknown AA22TransportKind = iota
+	// AA22KindLocalRaw is a backend attached to the bus on this host,
+	// without adapter framing.
 	AA22KindLocalRaw
+	// AA22KindENH is an adapter spoken to with ENH framing.
 	AA22KindENH
+	// AA22KindENS is an adapter spoken to with ENS framing.
 	AA22KindENS
+	// AA22KindTCP is a plain byte stream over TCP, the kind
+	// TCPPlainTransport implements.
 	AA22KindTCP
+	// AA22KindUDP is plain bytes over UDP datagrams, the kind
+	// UDPPlainTransport implements.
 	AA22KindUDP
+	// AA22KindEBUSDCommand is the ebusd command port, the kind
+	// EbusdTCPTransport implements.
 	AA22KindEBUSDCommand
 )
 
@@ -30,9 +49,14 @@ const (
 // host-to-adapter framing. Raw symbols and escape-decoded logical bytes differ.
 type AA22Encoding uint8
 
+// AA22QueryCapabilities clears any value above AA22EncodingLogical to
+// AA22EncodingUnknown.
 const (
+	// AA22EncodingUnknown is the zero value: the encoding is not claimed.
 	AA22EncodingUnknown AA22Encoding = iota
+	// AA22EncodingRaw delivers wire symbols; escape pairs are still encoded.
 	AA22EncodingRaw
+	// AA22EncodingLogical delivers escape-decoded logical bytes.
 	AA22EncodingLogical
 )
 

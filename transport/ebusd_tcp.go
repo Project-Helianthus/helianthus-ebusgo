@@ -70,6 +70,13 @@ func NewEbusdTCPTransport(conn net.Conn, readTimeout, writeTimeout time.Duration
 	return tr
 }
 
+// ReadByte returns the next queued byte: the echo of each written byte, then
+// the synthesized acknowledgement and, for a target, the response of a
+// dispatched telegram. It blocks until a byte or an error is queued, or the
+// transport is closed; it does not apply the read timeout itself. A queued
+// error is returned once, when no bytes are left to read; after an error
+// matching ErrBusCollision two SYN bytes are queued so the bus can resume.
+// Queued bytes stay readable after Close; then it returns ErrTransportClosed.
 func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -99,6 +106,19 @@ func (t *EbusdTCPTransport) ReadByte() (byte, error) {
 	return value, nil
 }
 
+// Write accepts raw (escaped) bus bytes and queues each one as its own echo.
+// When the bytes complete a telegram with a valid CRC it sends the telegram
+// to ebusd as a "hex" command and blocks until ebusd answers or the
+// configured timeouts expire; ReadByte can drain the echo meanwhile. The
+// command protocol is described in
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
+//
+// For a non-empty payload on an open transport Write returns len(payload),
+// even with an error. Framing and CRC errors are returned and also queued for
+// ReadByte. Errors reported for the ebusd command are only queued for
+// ReadByte, except a lost connection, which closes the transport and is
+// returned as well. A SYN byte ends the current telegram. Concurrent writers
+// are serialized.
 func (t *EbusdTCPTransport) Write(payload []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
@@ -176,6 +196,8 @@ func (t *EbusdTCPTransport) Write(payload []byte) (int, error) {
 	return len(payload), nil
 }
 
+// Close closes the connection and wakes a blocked ReadByte. It is idempotent,
+// ignores the connection's close error and always returns nil.
 func (t *EbusdTCPTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()

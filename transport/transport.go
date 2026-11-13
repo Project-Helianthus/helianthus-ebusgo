@@ -20,8 +20,13 @@ type RawTransport interface {
 // collision.
 type CollisionRecoveryDecision uint8
 
+// The zero CollisionRecoveryDecision is not a valid decision.
 const (
+	// CollisionRecoveryRetry tells the transport that the bus waited out
+	// the collision and is about to retry the request.
 	CollisionRecoveryRetry CollisionRecoveryDecision = iota + 1
+	// CollisionRecoveryAbandon tells the transport that the bus will not
+	// retry: the retry policy declined, a wait failed or a context ended.
 	CollisionRecoveryAbandon
 )
 
@@ -40,11 +45,25 @@ type CollisionRecoveryLifecycle interface {
 // passive consumers that need reset/lifecycle boundaries.
 type StreamEventKind uint8
 
+// The zero StreamEventKind is not a valid kind. Only StreamEventByte items
+// reach RawTransport.ReadByte; the other kinds reach only ReadEvent
+// consumers. START and the adapter reset are ENH commands, described in
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh.md
 const (
+	// StreamEventByte carries one received byte in Byte. On transports that
+	// deliver escape-decoded bytes, WasEscaped tells a decoded byte from a
+	// raw one.
 	StreamEventByte StreamEventKind = iota + 1
+	// StreamEventReset marks an adapter reset. Stream state from before it,
+	// including a pending arbitration, no longer applies. Each reset is
+	// reported once.
 	StreamEventReset
-	StreamEventStarted // adapter confirmed START arbitration
-	StreamEventFailed  // adapter rejected START arbitration
+	// StreamEventStarted reports that the adapter confirmed START
+	// arbitration; Data holds the confirmed initiator address.
+	StreamEventStarted
+	// StreamEventFailed reports that the adapter rejected START
+	// arbitration; Data holds the winning address.
+	StreamEventFailed
 
 	// StreamEventWireSyn is a passive bus-idle marker (wire 0xAA SYN)
 	// surfaced during an in-flight async RequestStart's `awaitingStart`
