@@ -21,7 +21,10 @@ const (
 	BusEventTX
 	// BusEventRX reports one byte read by the bus.
 	BusEventRX
-	// BusEventACK reports a positive acknowledgement for the request.
+	// BusEventACK reports a positive acknowledgement. In an
+	// initiator-to-target transaction it is emitted twice: when the target
+	// acknowledges the request (HasResponse false) and when the initiator
+	// acknowledges the target's response (HasResponse true).
 	BusEventACK
 	// BusEventNACK reports a negative acknowledgement, or a request that
 	// ended with a NACK outcome.

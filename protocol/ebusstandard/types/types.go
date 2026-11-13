@@ -24,13 +24,14 @@ type ErrorCode string
 // rules behind them are specified in
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/architecture/ebus_standard/02-l7-types.md
 const (
-	// ErrCodeTruncatedPayload means a payload has fewer bytes than the
-	// primitive or selector requires (its fixed width, minimum length or
-	// declared length).
+	// ErrCodeTruncatedPayload means a payload has fewer bytes than its length
+	// contract requires (fixed width, minimum length or declared length). It
+	// is returned by both Decode and Encode paths.
 	ErrCodeTruncatedPayload ErrorCode = "truncated_payload"
-	// ErrCodeOverlongPayload means a payload has more bytes than the primitive
-	// or selector allows (its fixed width, maximum length or declared length);
-	// the extra bytes are not ignored.
+	// ErrCodeOverlongPayload means a payload has more bytes than its length
+	// contract allows (fixed width, maximum length or declared length); the
+	// extra bytes are not ignored. It is returned by both Decode and Encode
+	// paths.
 	ErrCodeOverlongPayload ErrorCode = "overlong_payload"
 	// ErrCodeOutOfRange means Encode received a value outside the primitive's
 	// range, or a non-finite number.
