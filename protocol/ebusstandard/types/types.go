@@ -24,11 +24,13 @@ type ErrorCode string
 // rules behind them are specified in
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/architecture/ebus_standard/02-l7-types.md
 const (
-	// ErrCodeTruncatedPayload means Decode received fewer bytes than the
-	// primitive's fixed width.
+	// ErrCodeTruncatedPayload means a payload has fewer bytes than the
+	// primitive or selector requires (its fixed width, minimum length or
+	// declared length).
 	ErrCodeTruncatedPayload ErrorCode = "truncated_payload"
-	// ErrCodeOverlongPayload means Decode received more bytes than the primitive
-	// consumes; the extra bytes are not ignored.
+	// ErrCodeOverlongPayload means a payload has more bytes than the primitive
+	// or selector allows (its fixed width, maximum length or declared length);
+	// the extra bytes are not ignored.
 	ErrCodeOverlongPayload ErrorCode = "overlong_payload"
 	// ErrCodeOutOfRange means Encode received a value outside the primitive's
 	// range, or a non-finite number.
@@ -49,8 +51,9 @@ const (
 	// ErrCodeFixedWidthExceeded means Encode received text longer than the
 	// primitive's fixed width.
 	ErrCodeFixedWidthExceeded ErrorCode = "fixed_width_exceeded"
-	// ErrCodeInvalidArgument means Encode received a Go value of the wrong type
-	// or shape for the primitive.
+	// ErrCodeInvalidArgument means a Go value has the wrong type or shape for
+	// the primitive, or a primitive parameter (such as a text width) is invalid;
+	// returned by Encode and, for invalid parameters, by Decode.
 	ErrCodeInvalidArgument ErrorCode = "invalid_argument"
 )
 

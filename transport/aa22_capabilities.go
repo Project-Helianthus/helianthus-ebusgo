@@ -6,7 +6,7 @@ import aa22reflect "reflect"
 // Only AA22Proven is affirmative; a hypothesis is not qualification.
 type AA22Evidence uint8
 
-// AA22QueryCapabilities clears any value above AA22Proven to AA22Unknown.
+// Values above AA22Proven are cleared to AA22Unknown by AA22QueryCapabilities.
 const (
 	// AA22Unknown is the zero value: no claim is made.
 	AA22Unknown AA22Evidence = iota
@@ -21,8 +21,8 @@ const (
 // A local raw backend is distinct from ENS adapter framing.
 type AA22TransportKind uint8
 
-// AA22QueryCapabilities clears any value above AA22KindEBUSDCommand to
-// AA22KindUnknown. The adapter protocols are described in
+// Values above AA22KindEBUSDCommand are cleared to AA22KindUnknown by
+// AA22QueryCapabilities. The adapter protocols are described in
 // https://github.com/Project-Helianthus/helianthus-docs-ebus/tree/main/protocols
 const (
 	// AA22KindUnknown is the zero value: the backend is not identified.
@@ -49,8 +49,8 @@ const (
 // host-to-adapter framing. Raw symbols and escape-decoded logical bytes differ.
 type AA22Encoding uint8
 
-// AA22QueryCapabilities clears any value above AA22EncodingLogical to
-// AA22EncodingUnknown.
+// Values above AA22EncodingLogical are cleared to AA22EncodingUnknown by
+// AA22QueryCapabilities.
 const (
 	// AA22EncodingUnknown is the zero value: the encoding is not claimed.
 	AA22EncodingUnknown AA22Encoding = iota

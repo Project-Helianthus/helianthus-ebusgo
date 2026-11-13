@@ -14,8 +14,7 @@ const (
 type ACKCorrelator string
 
 const (
-	// ACKCorrelatorM2A tags a correlation whose acknowledgement symbol was
-	// matched to the complete request immediately before it.
+	// ACKCorrelatorM2A tags a correlation made by the M2A rule.
 	ACKCorrelatorM2A ACKCorrelator = "M2A"
 )
 
@@ -24,8 +23,8 @@ const (
 // means no acknowledgement was correlated.
 //
 // Byte holds the observed symbol as received (compare it with SymbolAck and
-// SymbolNack). CompleteRequest reports whether the producer saw the whole
-// request before the symbol. The protocol package defines this type for
+// SymbolNack). CompleteRequest is set by the producer of the correlation.
+// The protocol package defines this type for
 // consumers that reconstruct transactions; it does not populate it itself.
 type ACKCorrelation struct {
 	Byte            byte

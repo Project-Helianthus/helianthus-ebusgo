@@ -204,11 +204,13 @@ type SourceAddressSelectionMode string
 // default policy. The string values are stable for metrics and logs.
 const (
 	// SourceAddressSelectionModeDefaultPolicy tries the rows of
-	// HelianthusGatewayDefaultPolicy in its order.
+	// HelianthusGatewayDefaultPolicy in its order, except that a set
+	// HintCandidate that resolves to one of those rows is tried first.
 	SourceAddressSelectionModeDefaultPolicy SourceAddressSelectionMode = "default_policy"
 	// SourceAddressSelectionModeSourceDescriptionConstrainedPolicy tries
 	// only the table rows whose canonical description equals
-	// SourceDescription (and PriorityIndex, when set), in table order.
+	// SourceDescription (and PriorityIndex, when set), in table order, except
+	// that a set HintCandidate that resolves to one of them is tried first.
 	SourceAddressSelectionModeSourceDescriptionConstrainedPolicy SourceAddressSelectionMode = "source_description_constrained_policy"
 	// SourceAddressSelectionModePriorityFilteredDefaultPolicy tries the
 	// default policy rows that belong to PriorityIndex.

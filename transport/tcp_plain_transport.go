@@ -45,7 +45,8 @@ func NewTCPPlainTransport(conn net.Conn, readTimeout, writeTimeout time.Duration
 // ReadByte returns the next byte from the stream, blocking for at most the
 // read timeout (no limit when it is zero or negative). A timeout returns an
 // error wrapping ErrTimeout; any other failure, or a read after Close, returns
-// ErrTransportClosed (wrapped). Buffered bytes are not returned after Close.
+// ErrTransportClosed (a read after Close returns the
+// bare sentinel). Buffered bytes are not returned after Close.
 // Reads are serialized with each other but not with Write.
 func (t *TCPPlainTransport) ReadByte() (byte, error) {
 	t.readMu.Lock()
