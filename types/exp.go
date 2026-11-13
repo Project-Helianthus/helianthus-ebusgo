@@ -15,14 +15,23 @@ const (
 // EXP is a 4-byte IEEE754 float32 (little-endian).
 type EXP struct{}
 
+// Size returns 4, the encoded width in bytes.
 func (EXP) Size() int {
 	return expSize
 }
 
+// ReplacementValue returns a new slice holding 0x00 0x00 0xC0 0x7F, the
+// EXP "no data" value: the float32 quiet NaN 0x7FC00000 in little-endian
+// order.
 func (EXP) ReplacementValue() []byte {
 	return []byte{0x00, 0x00, 0xC0, 0x7F}
 }
 
+// Decode reads the first four bytes as a little-endian IEEE 754 float32 and
+// returns it as a float32. The replacement value and every other NaN or
+// infinity decode to Valid false; a payload shorter than four bytes fails
+// with errors.ErrInvalidPayload. The wire format is documented at
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/types/primitives.md
 func (EXP) Decode(payload []byte) (Value, error) {
 	if len(payload) < expSize {
 		return Value{}, ebuserrors.ErrInvalidPayload
@@ -41,6 +50,10 @@ func (EXP) Decode(payload []byte) (Value, error) {
 	return Value{Value: value, Valid: true}, nil
 }
 
+// Encode writes a float32 or float64 as a little-endian float32. A float64
+// is converted to the nearest float32, so precision can be lost; one that
+// overflows float32 fails. NaN, infinities and every other input type fail
+// with errors.ErrInvalidPayload.
 func (EXP) Encode(value any) ([]byte, error) {
 	var f32 float32
 

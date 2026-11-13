@@ -9,10 +9,14 @@ type BITFIELD struct {
 	SizeBytes int
 }
 
+// Size returns SizeBytes unchecked; a value that is not positive makes
+// Decode and Encode fail.
 func (b BITFIELD) Size() int {
 	return b.SizeBytes
 }
 
+// ReplacementValue returns a new slice of SizeBytes bytes of 0xFF, the
+// "no data" value, or nil when SizeBytes is not positive.
 func (b BITFIELD) ReplacementValue() []byte {
 	if b.SizeBytes <= 0 {
 		return nil
@@ -24,6 +28,12 @@ func (b BITFIELD) ReplacementValue() []byte {
 	return out
 }
 
+// Decode reads the first SizeBytes bytes and returns a []bool of
+// SizeBytes*8 flags, where index i is bit i%8 (least significant first) of
+// byte i/8. All bytes 0xFF decode to Valid false. A SizeBytes that is not
+// positive or a shorter payload fails with errors.ErrInvalidPayload. The
+// layout is documented at
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/types/composite.md
 func (b BITFIELD) Decode(payload []byte) (Value, error) {
 	if b.SizeBytes <= 0 || len(payload) < b.SizeBytes {
 		return Value{}, ebuserrors.ErrInvalidPayload
@@ -44,6 +54,12 @@ func (b BITFIELD) Decode(payload []byte) (Value, error) {
 	return Value{Value: bits, Valid: true}, nil
 }
 
+// Encode accepts a []bool of exactly SizeBytes*8 flags in Decode's order, a
+// []byte of exactly SizeBytes bytes (copied), or a non-negative integer
+// packed little-endian, which needs SizeBytes of at most 8 and a value that
+// fits. A uint is accepted only up to the largest int64 value (it goes through
+// the signed helper), while a uint64 is accepted over its full range. It fails with errors.ErrInvalidPayload for other inputs, for a
+// SizeBytes that is not positive and for a result that would be all 0xFF.
 func (b BITFIELD) Encode(value any) ([]byte, error) {
 	if b.SizeBytes <= 0 {
 		return nil, ebuserrors.ErrInvalidPayload
