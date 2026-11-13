@@ -19,6 +19,9 @@ const (
 type ArbitrationFailureReason string
 
 const (
+	// ArbitrationFailureReasonAddressCollision is the reason
+	// CollisionMonitor.RecordTX reports while a collision is active. The
+	// state clears when SetInitiator changes the initiator address.
 	ArbitrationFailureReasonAddressCollision ArbitrationFailureReason = "address_collision"
 )
 
@@ -27,10 +30,13 @@ type ErrArbitrationFailed struct {
 	Reason ArbitrationFailureReason
 }
 
+// Error formats the failure with its reason.
 func (e *ErrArbitrationFailed) Error() string {
 	return fmt.Sprintf("ebus: arbitration failed (%s)", e.Reason)
 }
 
+// Unwrap returns errors.ErrBusCollision from this module's errors package, so
+// errors.Is classifies the failure as a bus collision.
 func (e *ErrArbitrationFailed) Unwrap() error {
 	return ebuserrors.ErrBusCollision
 }
@@ -39,7 +45,13 @@ func (e *ErrArbitrationFailed) Unwrap() error {
 type CollisionReason string
 
 const (
-	CollisionReasonForeignSameSource  CollisionReason = "foreign_same_source"
+	// CollisionReasonForeignSameSource means a frame carried the monitor's
+	// initiator address as its source but matched no frame recorded with
+	// RecordTX within the echo window.
+	CollisionReasonForeignSameSource CollisionReason = "foreign_same_source"
+	// CollisionReasonObservedWhileMuted means a frame carried the monitor's
+	// initiator address as its source while the monitor was muted; recorded
+	// transmissions are not consulted.
 	CollisionReasonObservedWhileMuted CollisionReason = "observed_while_muted"
 )
 

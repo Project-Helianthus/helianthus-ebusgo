@@ -6,9 +6,14 @@ import aa22reflect "reflect"
 // Only AA22Proven is affirmative; a hypothesis is not qualification.
 type AA22Evidence uint8
 
+// Values above AA22Proven are cleared to AA22Unknown by AA22QueryCapabilities.
 const (
+	// AA22Unknown is the zero value: no claim is made.
 	AA22Unknown AA22Evidence = iota
+	// AA22Hypothesis is a claim not yet proven. It is not affirmative:
+	// AA22DeadlineSuitable, for one, requires AA22Proven.
 	AA22Hypothesis
+	// AA22Proven is the only affirmative claim.
 	AA22Proven
 )
 
@@ -16,13 +21,26 @@ const (
 // A local raw backend is distinct from ENS adapter framing.
 type AA22TransportKind uint8
 
+// Values above AA22KindEBUSDCommand are cleared to AA22KindUnknown by
+// AA22QueryCapabilities. A kind is reported only by an AA22CapabilityProvider;
+// TCPPlainTransport, UDPPlainTransport and EbusdTCPTransport do not implement
+// it, so AA22QueryCapabilities returns AA22KindUnknown for them. For the
+// adapter protocols see
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/tree/main/protocols
 const (
+	// AA22KindUnknown is the zero value: the backend is not identified.
 	AA22KindUnknown AA22TransportKind = iota
+	// AA22KindLocalRaw labels a local raw backend, without adapter framing.
 	AA22KindLocalRaw
+	// AA22KindENH labels an adapter spoken to with ENH framing.
 	AA22KindENH
+	// AA22KindENS labels an adapter spoken to with ENS framing.
 	AA22KindENS
+	// AA22KindTCP labels a plain byte stream over TCP.
 	AA22KindTCP
+	// AA22KindUDP labels plain bytes over UDP datagrams.
 	AA22KindUDP
+	// AA22KindEBUSDCommand labels the ebusd command port.
 	AA22KindEBUSDCommand
 )
 
@@ -30,9 +48,14 @@ const (
 // host-to-adapter framing. Raw symbols and escape-decoded logical bytes differ.
 type AA22Encoding uint8
 
+// Values above AA22EncodingLogical are cleared to AA22EncodingUnknown by
+// AA22QueryCapabilities.
 const (
+	// AA22EncodingUnknown is the zero value: the encoding is not claimed.
 	AA22EncodingUnknown AA22Encoding = iota
+	// AA22EncodingRaw labels a stream of raw bus symbols, not escape-decoded.
 	AA22EncodingRaw
+	// AA22EncodingLogical labels a stream of escape-decoded logical bytes.
 	AA22EncodingLogical
 )
 
