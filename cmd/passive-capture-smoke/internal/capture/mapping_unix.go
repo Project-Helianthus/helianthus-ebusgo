@@ -14,7 +14,7 @@ import (
 const (
 	// AccessWidth is the only load width the mapping serves.
 	AccessWidth uint64 = 4
-	// MaxMapLength matches the AA29 window bound; it is not a platform value.
+	// MaxMapLength matches the local GPIO window bound; it is not a platform value.
 	MaxMapLength uint64 = 1 << 16
 )
 

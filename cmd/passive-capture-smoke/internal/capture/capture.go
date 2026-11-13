@@ -1,9 +1,9 @@
-// Package capture holds the platform-neutral parts of the aa29-smoke
+// Package capture holds the platform-neutral parts of the passive-capture-smoke
 // passive-capture command: the owner-provisioned profile document, the
 // monotonic counter port, the bounded event recorder, the capture loop and the
 // line-oriented report. It opens no device and drives no line.
 //
-// Status: Hypothesis. A capture records what the AA25 engine decoded from the
+// Status: Hypothesis. A capture records what the wire engine decoded from the
 // sampled RX level; it is not a timing measurement, and physical timing, sample
 // jitter and the electrical frontend remain Unknown.
 package capture
@@ -43,7 +43,7 @@ var (
 	ErrLimits  = errors.New("aa29-smoke: capture limits invalid")
 )
 
-// GPIODocument mirrors the AA29 GPIO descriptor. It carries offsets inside
+// GPIODocument mirrors the local GPIO descriptor. It carries offsets inside
 // the mapped window and pin masks, never a physical address. The descriptor
 // role is implied by its position in the document.
 type GPIODocument struct {
@@ -59,14 +59,14 @@ type GPIODocument struct {
 	TXInverted    bool   `json:"tx_inverted"`
 }
 
-// CounterDocument mirrors the AA29 counter descriptor.
+// CounterDocument mirrors the local GPIO counter descriptor.
 type CounterDocument struct {
 	Hz uint64 `json:"hz"`
 }
 
-// ProfileDocument is the owner-provisioned AA29 platform profile in JSON
+// ProfileDocument is the owner-provisioned local GPIO platform profile in JSON
 // form. Decoding checks only the document shape; admission, qualification and
-// descriptor validity stay with the AA29 backend.
+// descriptor validity stay with the local GPIO backend.
 type ProfileDocument struct {
 	ProfileID           string          `json:"profile_id"`
 	Family              string          `json:"family"`
@@ -122,7 +122,7 @@ func ParseQualification(label string) (transport.AA22Evidence, error) {
 	return transport.AA22Unknown, fmt.Errorf("%w: unknown qualification %q", ErrProfile, label)
 }
 
-// KnownOrdering reports whether a document ordering label is one the AA29
+// KnownOrdering reports whether a document ordering label is one the local GPIO
 // descriptor can express: "unknown", "relaxed" or "device".
 func KnownOrdering(label string) bool {
 	return label == "unknown" || label == "relaxed" || label == "device"
@@ -152,13 +152,13 @@ func NewMonotonicCounter() *MonotonicCounter {
 	return &MonotonicCounter{base: time.Now()}
 }
 
-// AA29CounterHz reports the counter rate.
-func (counter *MonotonicCounter) AA29CounterHz() uint64 {
+// CounterHz reports the counter rate.
+func (counter *MonotonicCounter) CounterHz() uint64 {
 	return MonotonicHz
 }
 
-// AA29ReadCounter reads elapsed monotonic nanoseconds since the anchor.
-func (counter *MonotonicCounter) AA29ReadCounter() uint64 {
+// ReadCounter reads elapsed monotonic nanoseconds since the anchor.
+func (counter *MonotonicCounter) ReadCounter() uint64 {
 	return uint64(time.Since(counter.base))
 }
 
@@ -180,10 +180,10 @@ func BudgetTicks(duration time.Duration, hz uint64) (uint64, error) {
 	return ticks, nil
 }
 
-// Recorder is a fixed-capacity AA25 event sink. It allocates only at
+// Recorder is a fixed-capacity wire engine event sink. It allocates only at
 // construction; a full recorder refuses and counts every further event.
 type Recorder struct {
-	events  []localworker.AA25Event
+	events  []localworker.Event
 	refused uint64
 }
 
@@ -192,11 +192,11 @@ func NewRecorder(capacity int) (*Recorder, error) {
 	if capacity <= 0 || capacity > MaxEvents {
 		return nil, ErrLimits
 	}
-	return &Recorder{events: make([]localworker.AA25Event, 0, capacity)}, nil
+	return &Recorder{events: make([]localworker.Event, 0, capacity)}, nil
 }
 
-// AA25TryPublish records one event without blocking.
-func (recorder *Recorder) AA25TryPublish(event localworker.AA25Event) bool {
+// TryPublish records one event without blocking.
+func (recorder *Recorder) TryPublish(event localworker.Event) bool {
 	if len(recorder.events) == cap(recorder.events) {
 		recorder.refused++
 		return false
@@ -211,7 +211,7 @@ func (recorder *Recorder) Full() bool {
 }
 
 // Events returns the recorded events in publication order.
-func (recorder *Recorder) Events() []localworker.AA25Event {
+func (recorder *Recorder) Events() []localworker.Event {
 	return recorder.events
 }
 
@@ -220,9 +220,9 @@ func (recorder *Recorder) Refused() uint64 {
 	return recorder.refused
 }
 
-// Stepper is the part of the AA25 engine the capture loop drives.
+// Stepper is the part of the wire engine the capture loop drives.
 type Stepper interface {
-	AA25Step()
+	Step()
 }
 
 // StopReason says why a capture ended.
@@ -261,18 +261,18 @@ type Result struct {
 // Run steps the engine until the tick budget is spent, the recorder is
 // full, a stop is requested or the counter regresses. It never offers a
 // prepared response, so the engine it drives never transmits.
-func Run(engine Stepper, ticks localworker.AA25TickPort, recorder *Recorder, budgetTicks uint64, stop *atomic.Bool) Result {
+func Run(engine Stepper, ticks localworker.TickPort, recorder *Recorder, budgetTicks uint64, stop *atomic.Bool) Result {
 	var result Result
-	start := ticks.AA25NowTicks()
+	start := ticks.NowTicks()
 	prev := start
 	for {
 		if stop != nil && stop.Load() {
 			result.Stop = StopRequested
 			return result
 		}
-		engine.AA25Step()
+		engine.Step()
 		result.Steps++
-		now := ticks.AA25NowTicks()
+		now := ticks.NowTicks()
 		if now < prev {
 			result.Stop = StopTickRegression
 			return result
@@ -291,68 +291,68 @@ func Run(engine Stepper, ticks localworker.AA25TickPort, recorder *Recorder, bud
 }
 
 // KindName returns the report label for an engine event kind.
-func KindName(kind localworker.AA25EventKind) string {
+func KindName(kind localworker.EventKind) string {
 	switch kind {
-	case localworker.AA25EventRawSymbol:
+	case localworker.EventRawSymbol:
 		return "raw_symbol"
-	case localworker.AA25EventLogicalByte:
+	case localworker.EventLogicalByte:
 		return "logical_byte"
-	case localworker.AA25EventGap:
+	case localworker.EventGap:
 		return "gap"
-	case localworker.AA25EventFault:
+	case localworker.EventFault:
 		return "fault"
-	case localworker.AA25EventProvisional:
+	case localworker.EventProvisional:
 		return "provisional"
-	case localworker.AA25EventFrameValid:
+	case localworker.EventFrameValid:
 		return "frame_valid"
-	case localworker.AA25EventAdmitted:
+	case localworker.EventAdmitted:
 		return "admitted"
-	case localworker.AA25EventTXIntent:
+	case localworker.EventTXIntent:
 		return "tx_intent"
-	case localworker.AA25EventTXRelease:
+	case localworker.EventTXRelease:
 		return "tx_release"
-	case localworker.AA25EventTXComplete:
+	case localworker.EventTXComplete:
 		return "tx_complete"
-	case localworker.AA25EventLoss:
+	case localworker.EventLoss:
 		return "loss"
 	}
 	return fmt.Sprintf("kind_%d", kind)
 }
 
 // FaultName returns the report label for an engine fault.
-func FaultName(fault localworker.AA25Fault) string {
+func FaultName(fault localworker.Fault) string {
 	switch fault {
-	case localworker.AA25FaultNone:
+	case localworker.FaultNone:
 		return ""
-	case localworker.AA25FaultFalseStart:
+	case localworker.FaultFalseStart:
 		return "false_start"
-	case localworker.AA25FaultBadStop:
+	case localworker.FaultBadStop:
 		return "bad_stop"
-	case localworker.AA25FaultEscapeInvalid:
+	case localworker.FaultEscapeInvalid:
 		return "escape_invalid"
-	case localworker.AA25FaultSynInFrame:
+	case localworker.FaultSynInFrame:
 		return "syn_in_frame"
-	case localworker.AA25FaultAddressInvalid:
+	case localworker.FaultAddressInvalid:
 		return "address_invalid"
-	case localworker.AA25FaultBadCRC:
+	case localworker.FaultBadCRC:
 		return "bad_crc"
-	case localworker.AA25FaultTickRegression:
+	case localworker.FaultTickRegression:
 		return "tick_regression"
-	case localworker.AA25FaultStaleGeneration:
+	case localworker.FaultStaleGeneration:
 		return "stale_generation"
-	case localworker.AA25FaultRXBeforeResponse:
+	case localworker.FaultRXBeforeResponse:
 		return "rx_before_response"
-	case localworker.AA25FaultEchoMismatch:
+	case localworker.FaultEchoMismatch:
 		return "echo_mismatch"
-	case localworker.AA25FaultEchoMissing:
+	case localworker.FaultEchoMissing:
 		return "echo_missing"
-	case localworker.AA25FaultEchoUnsolicited:
+	case localworker.FaultEchoUnsolicited:
 		return "echo_unsolicited"
-	case localworker.AA25FaultTXLate:
+	case localworker.FaultTXLate:
 		return "tx_late"
-	case localworker.AA25FaultLengthInvalid:
+	case localworker.FaultLengthInvalid:
 		return "length_invalid"
-	case localworker.AA25FaultNackExhausted:
+	case localworker.FaultNackExhausted:
 		return "nack_exhausted"
 	}
 	return fmt.Sprintf("fault_%d", fault)
@@ -380,28 +380,28 @@ type EventRecord struct {
 }
 
 // Record converts one engine event, keeping every field.
-func Record(event localworker.AA25Event) EventRecord {
+func Record(event localworker.Event) EventRecord {
 	return EventRecord{
 		Record:      "event",
-		Kind:        KindName(event.AA25Kind),
-		Fault:       FaultName(event.AA25Fault),
-		Tick:        event.AA25Tick,
-		SampleIndex: event.AA25SampleIndex,
-		StartTick:   event.AA25StartTick,
-		Deadline:    event.AA25Deadline,
-		Missed:      event.AA25Missed,
-		Generation:  event.AA25Generation,
-		Raw:         event.AA25Raw,
-		Logical:     event.AA25Logical,
-		WasEscaped:  event.AA25WasEscaped,
-		Echo:        event.AA25Echo,
-		Level:       uint8(event.AA25Level),
-		Dissent:     event.AA25Dissent,
-		EdgePhase:   event.AA25EdgePhase,
+		Kind:        KindName(event.Kind),
+		Fault:       FaultName(event.Fault),
+		Tick:        event.Tick,
+		SampleIndex: event.SampleIndex,
+		StartTick:   event.StartTick,
+		Deadline:    event.Deadline,
+		Missed:      event.Missed,
+		Generation:  event.Generation,
+		Raw:         event.Raw,
+		Logical:     event.Logical,
+		WasEscaped:  event.WasEscaped,
+		Echo:        event.Echo,
+		Level:       uint8(event.Level),
+		Dissent:     event.Dissent,
+		EdgePhase:   event.EdgePhase,
 	}
 }
 
-// BackendCounters copies the AA29 backend counters the report checks.
+// BackendCounters copies the local GPIO backend counters the report checks.
 type BackendCounters struct {
 	StoredEdges   uint64 `json:"stored_edges"`
 	RefusedEdges  uint64 `json:"refused_edges"`
@@ -409,7 +409,7 @@ type BackendCounters struct {
 	LeaseExpiries uint64 `json:"lease_expiries"`
 }
 
-// EngineCounters copies the AA25 engine counters.
+// EngineCounters copies the wire engine counters.
 type EngineCounters struct {
 	Observations       uint64 `json:"observations"`
 	MissedSamples      uint64 `json:"missed_samples"`
@@ -421,17 +421,17 @@ type EngineCounters struct {
 	Withdrawals        uint64 `json:"withdrawals"`
 }
 
-// EngineCountersFrom copies every AA25 engine counter.
-func EngineCountersFrom(stats localworker.AA25Stats) EngineCounters {
+// EngineCountersFrom copies every wire engine counter.
+func EngineCountersFrom(stats localworker.EngineStats) EngineCounters {
 	return EngineCounters{
-		Observations:       stats.AA25Observations,
-		MissedSamples:      stats.AA25MissedSamples,
-		MaxObservationLate: stats.AA25MaxObservationLate,
-		TXEdges:            stats.AA25TXEdges,
-		EchoedSymbols:      stats.AA25EchoedSymbols,
-		EventsDropped:      stats.AA25EventsDropped,
-		ControlsApplied:    stats.AA25ControlsApplied,
-		Withdrawals:        stats.AA25Withdrawals,
+		Observations:       stats.Observations,
+		MissedSamples:      stats.MissedSamples,
+		MaxObservationLate: stats.MaxObservationLate,
+		TXEdges:            stats.TXEdges,
+		EchoedSymbols:      stats.EchoedSymbols,
+		EventsDropped:      stats.EventsDropped,
+		ControlsApplied:    stats.ControlsApplied,
+		Withdrawals:        stats.Withdrawals,
 	}
 }
 
@@ -471,7 +471,7 @@ func Seal(summary Summary) Summary {
 
 // WriteReport writes one JSON line per recorded event, then the sealed
 // summary line.
-func WriteReport(writer io.Writer, events []localworker.AA25Event, summary Summary) error {
+func WriteReport(writer io.Writer, events []localworker.Event, summary Summary) error {
 	encoder := json.NewEncoder(writer)
 	for _, event := range events {
 		if err := encoder.Encode(Record(event)); err != nil {

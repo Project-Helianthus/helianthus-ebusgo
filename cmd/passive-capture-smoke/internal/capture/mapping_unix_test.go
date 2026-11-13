@@ -44,32 +44,32 @@ func TestAA31MappingLoadsAlignedWordsReadOnly(t *testing.T) {
 	path := writeWindowFile(t, words)
 	mapping, err := MapReadOnly(path, 0, 16)
 	if err != nil {
-		t.Fatalf("aa31 map: %v", err)
+		t.Fatalf("map: %v", err)
 	}
 	if mapping.Length() != 16 || mapping.CharacterDevice() {
-		t.Fatalf("aa31 mapping length %d character device %v", mapping.Length(), mapping.CharacterDevice())
+		t.Fatalf("mapping length %d character device %v", mapping.Length(), mapping.CharacterDevice())
 	}
 	for index, want := range words {
 		if got := mapping.Load32(uint64(4 * index)); got != want {
-			t.Fatalf("aa31 load %d = %#x, want %#x", 4*index, got, want)
+			t.Fatalf("load %d = %#x, want %#x", 4*index, got, want)
 		}
 	}
 	for _, offset := range []uint64{1, 2, 3, 16, 20, ^uint64(0) - 3} {
 		if got := mapping.Load32(offset); got != 0 {
-			t.Fatalf("aa31 invalid load %d = %#x", offset, got)
+			t.Fatalf("invalid load %d = %#x", offset, got)
 		}
 	}
 	if mapping.InvalidLoads() != 6 {
-		t.Fatalf("aa31 invalid loads = %d", mapping.InvalidLoads())
+		t.Fatalf("invalid loads = %d", mapping.InvalidLoads())
 	}
 	if err := mapping.Unmap(); err != nil {
-		t.Fatalf("aa31 unmap: %v", err)
+		t.Fatalf("unmap: %v", err)
 	}
 	if err := mapping.Unmap(); err != nil || mapping.Length() != 0 {
-		t.Fatalf("aa31 second unmap = %v length %d", err, mapping.Length())
+		t.Fatalf("second unmap = %v length %d", err, mapping.Length())
 	}
 	if got := mapping.Load32(0); got != 0 || mapping.InvalidLoads() != 7 {
-		t.Fatalf("aa31 load after unmap = %#x invalid %d", got, mapping.InvalidLoads())
+		t.Fatalf("load after unmap = %#x invalid %d", got, mapping.InvalidLoads())
 	}
 }
 
@@ -97,12 +97,12 @@ func TestAA31MappingRefusesInvalidRequests(t *testing.T) {
 	}
 	for name, tc := range cases {
 		if mapping, err := MapReadOnly(tc.path, tc.offset, tc.length); !errors.Is(err, ErrMapping) || mapping != nil {
-			t.Fatalf("aa31 %s map = %v, %v", name, mapping, err)
+			t.Fatalf("%s map = %v, %v", name, mapping, err)
 		}
 	}
 	mapping, err := MapReadOnly(path, 0, 32)
 	if err != nil {
-		t.Fatalf("aa31 whole-file map: %v", err)
+		t.Fatalf("whole-file map: %v", err)
 	}
 	if err := mapping.Unmap(); err != nil {
 		t.Fatal(err)

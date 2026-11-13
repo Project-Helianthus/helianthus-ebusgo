@@ -47,7 +47,7 @@ func encode(t *testing.T, value any) []byte {
 	t.Helper()
 	source, err := json.Marshal(value)
 	if err != nil {
-		t.Fatalf("aa31 marshal: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
 	return source
 }
@@ -81,17 +81,17 @@ func TestAA31DecodeProfileKeepsEveryField(t *testing.T) {
 	base := testDocument()
 	decoded, err := DecodeProfile(bytes.NewReader(encode(t, base)))
 	if err != nil || decoded != base {
-		t.Fatalf("aa31 base decode = %+v, %v", decoded, err)
+		t.Fatalf("base decode = %+v, %v", decoded, err)
 	}
 	for name, mutate := range mutations {
 		want := testDocument()
 		mutate(&want)
 		if want == base {
-			t.Fatalf("aa31 mutation %s changed nothing", name)
+			t.Fatalf("mutation %s changed nothing", name)
 		}
 		got, err := DecodeProfile(bytes.NewReader(encode(t, want)))
 		if err != nil || got != want {
-			t.Fatalf("aa31 decode with %s = %+v, %v; want %+v", name, got, err, want)
+			t.Fatalf("decode with %s = %+v, %v; want %+v", name, got, err, want)
 		}
 	}
 }
@@ -105,7 +105,7 @@ func TestAA31DecodeProfileRejectsMalformedDocuments(t *testing.T) {
 		source := encode(t, document)
 		var generic map[string]any
 		if err := json.Unmarshal(source, &generic); err != nil {
-			t.Fatalf("aa31 unmarshal: %v", err)
+			t.Fatalf("unmarshal: %v", err)
 		}
 		generic[field] = value
 		return string(encode(t, generic))
@@ -128,11 +128,11 @@ func TestAA31DecodeProfileRejectsMalformedDocuments(t *testing.T) {
 	}
 	for name, source := range cases {
 		if _, err := DecodeProfile(strings.NewReader(source)); !errors.Is(err, ErrProfile) {
-			t.Fatalf("aa31 %s decode = %v, want AA31ErrProfile", name, err)
+			t.Fatalf("%s decode = %v, want ErrProfile", name, err)
 		}
 	}
 	if _, err := DecodeProfile(strings.NewReader(valid + "\n\t ")); err != nil {
-		t.Fatalf("aa31 trailing whitespace = %v", err)
+		t.Fatalf("trailing whitespace = %v", err)
 	}
 }
 
@@ -146,12 +146,12 @@ func TestAA31ParseQualificationMapsOnlyProvenAffirmatively(t *testing.T) {
 	}
 	for label, want := range cases {
 		if got, err := ParseQualification(label); err != nil || got != want {
-			t.Fatalf("aa31 qualification %q = %v, %v", label, got, err)
+			t.Fatalf("qualification %q = %v, %v", label, got, err)
 		}
 	}
 	for _, label := range []string{"", "PROVEN", "qualified", "proven "} {
 		if got, err := ParseQualification(label); !errors.Is(err, ErrProfile) || got == transport.AA22Proven {
-			t.Fatalf("aa31 qualification %q = %v, %v", label, got, err)
+			t.Fatalf("qualification %q = %v, %v", label, got, err)
 		}
 	}
 }
@@ -162,7 +162,7 @@ func TestAA31ParseDigestRoundTrips(t *testing.T) {
 	sum := sha256.Sum256([]byte("aa31.synthetic.digest"))
 	for _, text := range []string{testDigestText(), strings.ToUpper(testDigestText())} {
 		if got, err := ParseDigest(text); err != nil || got != sum {
-			t.Fatalf("aa31 digest %q = %x, %v", text, got, err)
+			t.Fatalf("digest %q = %x, %v", text, got, err)
 		}
 	}
 }
@@ -183,7 +183,7 @@ func TestAA31BudgetTicksIsBoundedAndExact(t *testing.T) {
 	}
 	for _, tc := range cases {
 		if got, err := BudgetTicks(tc.duration, tc.hz); err != nil || got != tc.want {
-			t.Fatalf("aa31 budget %v at %d Hz = %d, %v; want %d", tc.duration, tc.hz, got, err, tc.want)
+			t.Fatalf("budget %v at %d Hz = %d, %v; want %d", tc.duration, tc.hz, got, err, tc.want)
 		}
 	}
 	refused := []struct {
@@ -199,7 +199,7 @@ func TestAA31BudgetTicksIsBoundedAndExact(t *testing.T) {
 	}
 	for _, tc := range refused {
 		if _, err := BudgetTicks(tc.duration, tc.hz); !errors.Is(err, ErrLimits) {
-			t.Fatalf("aa31 budget %v at %d Hz = %v, want AA31ErrLimits", tc.duration, tc.hz, err)
+			t.Fatalf("budget %v at %d Hz = %v, want ErrLimits", tc.duration, tc.hz, err)
 		}
 	}
 }
@@ -209,7 +209,7 @@ func TestAA31BudgetTicksIsBoundedAndExact(t *testing.T) {
 func TestAA31RecorderIsBoundedAndCountsRefusals(t *testing.T) {
 	for _, capacity := range []int{0, -1, MaxEvents + 1} {
 		if _, err := NewRecorder(capacity); !errors.Is(err, ErrLimits) {
-			t.Fatalf("aa31 recorder capacity %d = %v", capacity, err)
+			t.Fatalf("recorder capacity %d = %v", capacity, err)
 		}
 	}
 	recorder, err := NewRecorder(2)
@@ -217,14 +217,14 @@ func TestAA31RecorderIsBoundedAndCountsRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index := uint64(1); index <= 5; index++ {
-		accepted := recorder.AA25TryPublish(localworker.AA25Event{AA25Kind: localworker.AA25EventRawSymbol, AA25Tick: index})
+		accepted := recorder.TryPublish(localworker.Event{Kind: localworker.EventRawSymbol, Tick: index})
 		if accepted != (index <= 2) {
-			t.Fatalf("aa31 publish %d accepted=%v", index, accepted)
+			t.Fatalf("publish %d accepted=%v", index, accepted)
 		}
 	}
 	events := recorder.Events()
-	if !recorder.Full() || len(events) != 2 || cap(events) != 2 || events[0].AA25Tick != 1 || events[1].AA25Tick != 2 || recorder.Refused() != 3 {
-		t.Fatalf("aa31 recorder = %+v refused %d", events, recorder.Refused())
+	if !recorder.Full() || len(events) != 2 || cap(events) != 2 || events[0].Tick != 1 || events[1].Tick != 2 || recorder.Refused() != 3 {
+		t.Fatalf("recorder = %+v refused %d", events, recorder.Refused())
 	}
 }
 
@@ -233,7 +233,7 @@ type fakeTicks struct {
 	reads  int
 }
 
-func (ticks *fakeTicks) AA25NowTicks() uint64 {
+func (ticks *fakeTicks) NowTicks() uint64 {
 	value := ticks.values[len(ticks.values)-1]
 	if ticks.reads < len(ticks.values) {
 		value = ticks.values[ticks.reads]
@@ -249,10 +249,10 @@ type fakeStepper struct {
 	onStep   func()
 }
 
-func (stepper *fakeStepper) AA25Step() {
+func (stepper *fakeStepper) Step() {
 	stepper.steps++
 	if stepper.publish {
-		stepper.recorder.AA25TryPublish(localworker.AA25Event{AA25Kind: localworker.AA25EventGap})
+		stepper.recorder.TryPublish(localworker.Event{Kind: localworker.EventGap})
 	}
 	if stepper.onStep != nil {
 		stepper.onStep()
@@ -274,14 +274,14 @@ func TestAA31RunStopsOnEveryBound(t *testing.T) {
 	ticks := &fakeTicks{values: []uint64{100, 140, 180, 199, 200, 900}}
 	result := Run(&fakeStepper{}, ticks, recorder, 100, nil)
 	if result != (Result{Steps: 4, ElapsedTicks: 100, Stop: StopBudget}) {
-		t.Fatalf("aa31 budget run = %+v", result)
+		t.Fatalf("budget run = %+v", result)
 	}
 
 	recorder = newRecorder(3)
 	result = Run(&fakeStepper{recorder: recorder, publish: true},
 		&fakeTicks{values: []uint64{10, 11, 12, 13}}, recorder, 1_000, nil)
 	if result != (Result{Steps: 3, ElapsedTicks: 3, Stop: StopRecorderFull}) {
-		t.Fatalf("aa31 full run = %+v", result)
+		t.Fatalf("full run = %+v", result)
 	}
 
 	var stop atomic.Bool
@@ -293,22 +293,22 @@ func TestAA31RunStopsOnEveryBound(t *testing.T) {
 	}
 	result = Run(stepper, &fakeTicks{values: []uint64{5, 6, 7}}, newRecorder(4), 1_000, &stop)
 	if result != (Result{Steps: 2, ElapsedTicks: 2, Stop: StopRequested}) {
-		t.Fatalf("aa31 requested run = %+v", result)
+		t.Fatalf("requested run = %+v", result)
 	}
 	stopped := &fakeStepper{}
 	if result = Run(stopped, &fakeTicks{values: []uint64{5}}, newRecorder(4), 1_000, &stop); result.Stop != StopRequested || stopped.steps != 0 {
-		t.Fatalf("aa31 pre-stopped run = %+v after %d steps", result, stopped.steps)
+		t.Fatalf("pre-stopped run = %+v after %d steps", result, stopped.steps)
 	}
 
 	result = Run(&fakeStepper{}, &fakeTicks{values: []uint64{50, 60, 40}}, newRecorder(4), 1_000, nil)
 	if result != (Result{Steps: 2, ElapsedTicks: 10, Stop: StopTickRegression}) {
-		t.Fatalf("aa31 regression run = %+v", result)
+		t.Fatalf("regression run = %+v", result)
 	}
 
 	// A reading below the previous one stops the run even when it stays above the start.
 	result = Run(&fakeStepper{}, &fakeTicks{values: []uint64{100, 140, 120, 200}}, newRecorder(4), 1_000, nil)
 	if result != (Result{Steps: 2, ElapsedTicks: 40, Stop: StopTickRegression}) {
-		t.Fatalf("aa31 regression above start run = %+v", result)
+		t.Fatalf("regression above start run = %+v", result)
 	}
 
 	names := map[string]bool{}
@@ -316,7 +316,7 @@ func TestAA31RunStopsOnEveryBound(t *testing.T) {
 		names[StopName(reason)] = true
 	}
 	if len(names) != 5 {
-		t.Fatalf("aa31 stop names collide: %v", names)
+		t.Fatalf("stop names collide: %v", names)
 	}
 }
 
@@ -324,46 +324,46 @@ func TestAA31RunStopsOnEveryBound(t *testing.T) {
 // value falling through to the numeric fallback.
 func TestAA31KindAndFaultNamesAreDistinct(t *testing.T) {
 	kinds := map[string]bool{}
-	for kind := localworker.AA25EventRawSymbol; kind <= localworker.AA25EventLoss; kind++ {
+	for kind := localworker.EventRawSymbol; kind <= localworker.EventLoss; kind++ {
 		name := KindName(kind)
 		if strings.HasPrefix(name, "kind_") || kinds[name] {
-			t.Fatalf("aa31 kind %d label %q", kind, name)
+			t.Fatalf("kind %d label %q", kind, name)
 		}
 		kinds[name] = true
 	}
-	if KindName(localworker.AA25EventLoss+1) != "kind_12" || KindName(0) != "kind_0" {
-		t.Fatal("aa31 unknown kinds must keep their number")
+	if KindName(localworker.EventLoss+1) != "kind_12" || KindName(0) != "kind_0" {
+		t.Fatal("unknown kinds must keep their number")
 	}
 	faults := map[string]bool{}
-	for fault := localworker.AA25FaultNone; fault <= localworker.AA25FaultNackExhausted; fault++ {
+	for fault := localworker.FaultNone; fault <= localworker.FaultNackExhausted; fault++ {
 		name := FaultName(fault)
-		if strings.HasPrefix(name, "fault_") || faults[name] || (name == "") != (fault == localworker.AA25FaultNone) {
-			t.Fatalf("aa31 fault %d label %q", fault, name)
+		if strings.HasPrefix(name, "fault_") || faults[name] || (name == "") != (fault == localworker.FaultNone) {
+			t.Fatalf("fault %d label %q", fault, name)
 		}
 		faults[name] = true
 	}
-	if FaultName(localworker.AA25FaultNackExhausted+1) != "fault_16" {
-		t.Fatal("aa31 unknown faults must keep their number")
+	if FaultName(localworker.FaultNackExhausted+1) != "fault_16" {
+		t.Fatal("unknown faults must keep their number")
 	}
 }
 
-func testEvent() localworker.AA25Event {
-	return localworker.AA25Event{
-		AA25Kind:        localworker.AA25EventFault,
-		AA25Fault:       localworker.AA25FaultBadCRC,
-		AA25Tick:        11,
-		AA25SampleIndex: 12,
-		AA25StartTick:   13,
-		AA25Deadline:    14,
-		AA25Missed:      15,
-		AA25Generation:  16,
-		AA25Raw:         0xA9,
-		AA25Logical:     0xAA,
-		AA25WasEscaped:  true,
-		AA25Echo:        true,
-		AA25Level:       localworker.AA25LevelHigh,
-		AA25Dissent:     3,
-		AA25EdgePhase:   [10]uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+func testEvent() localworker.Event {
+	return localworker.Event{
+		Kind:        localworker.EventFault,
+		Fault:       localworker.FaultBadCRC,
+		Tick:        11,
+		SampleIndex: 12,
+		StartTick:   13,
+		Deadline:    14,
+		Missed:      15,
+		Generation:  16,
+		Raw:         0xA9,
+		Logical:     0xAA,
+		WasEscaped:  true,
+		Echo:        true,
+		Level:       localworker.LevelHigh,
+		Dissent:     3,
+		EdgePhase:   [10]uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 	}
 }
 
@@ -371,22 +371,22 @@ func testEvent() localworker.AA25Event {
 // event field: kind, fault, tick, sample index, start tick, deadline, missed,
 // generation, raw, logical, was-escaped, echo, level, dissent and edge phase.
 func TestAA31RecordKeepsEveryEventField(t *testing.T) {
-	mutations := map[string]func(*localworker.AA25Event){
-		"kind":         func(e *localworker.AA25Event) { e.AA25Kind = localworker.AA25EventRawSymbol },
-		"fault":        func(e *localworker.AA25Event) { e.AA25Fault = localworker.AA25FaultBadStop },
-		"tick":         func(e *localworker.AA25Event) { e.AA25Tick++ },
-		"sample_index": func(e *localworker.AA25Event) { e.AA25SampleIndex++ },
-		"start_tick":   func(e *localworker.AA25Event) { e.AA25StartTick++ },
-		"deadline":     func(e *localworker.AA25Event) { e.AA25Deadline++ },
-		"missed":       func(e *localworker.AA25Event) { e.AA25Missed++ },
-		"generation":   func(e *localworker.AA25Event) { e.AA25Generation++ },
-		"raw":          func(e *localworker.AA25Event) { e.AA25Raw++ },
-		"logical":      func(e *localworker.AA25Event) { e.AA25Logical++ },
-		"was_escaped":  func(e *localworker.AA25Event) { e.AA25WasEscaped = false },
-		"echo":         func(e *localworker.AA25Event) { e.AA25Echo = false },
-		"level":        func(e *localworker.AA25Event) { e.AA25Level = localworker.AA25LevelLow },
-		"dissent":      func(e *localworker.AA25Event) { e.AA25Dissent++ },
-		"edge_phase":   func(e *localworker.AA25Event) { e.AA25EdgePhase[9]++ },
+	mutations := map[string]func(*localworker.Event){
+		"kind":         func(e *localworker.Event) { e.Kind = localworker.EventRawSymbol },
+		"fault":        func(e *localworker.Event) { e.Fault = localworker.FaultBadStop },
+		"tick":         func(e *localworker.Event) { e.Tick++ },
+		"sample_index": func(e *localworker.Event) { e.SampleIndex++ },
+		"start_tick":   func(e *localworker.Event) { e.StartTick++ },
+		"deadline":     func(e *localworker.Event) { e.Deadline++ },
+		"missed":       func(e *localworker.Event) { e.Missed++ },
+		"generation":   func(e *localworker.Event) { e.Generation++ },
+		"raw":          func(e *localworker.Event) { e.Raw++ },
+		"logical":      func(e *localworker.Event) { e.Logical++ },
+		"was_escaped":  func(e *localworker.Event) { e.WasEscaped = false },
+		"echo":         func(e *localworker.Event) { e.Echo = false },
+		"level":        func(e *localworker.Event) { e.Level = localworker.LevelLow },
+		"dissent":      func(e *localworker.Event) { e.Dissent++ },
+		"edge_phase":   func(e *localworker.Event) { e.EdgePhase[9]++ },
 	}
 	base := Record(testEvent())
 	want := EventRecord{
@@ -396,29 +396,29 @@ func TestAA31RecordKeepsEveryEventField(t *testing.T) {
 		EdgePhase: [10]uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 	}
 	if base != want {
-		t.Fatalf("aa31 record = %+v, want %+v", base, want)
+		t.Fatalf("record = %+v, want %+v", base, want)
 	}
 	for name, mutate := range mutations {
 		event := testEvent()
 		mutate(&event)
 		if Record(event) == base {
-			t.Fatalf("aa31 record ignores %s", name)
+			t.Fatalf("record ignores %s", name)
 		}
 	}
 }
 
 // Catches, per counter, a copy that drops or swaps one engine counter.
 func TestAA31EngineCountersKeepEveryField(t *testing.T) {
-	got := EngineCountersFrom(localworker.AA25Stats{
-		AA25Observations: 1, AA25MissedSamples: 2, AA25MaxObservationLate: 3, AA25TXEdges: 4,
-		AA25EchoedSymbols: 5, AA25EventsDropped: 6, AA25ControlsApplied: 7, AA25Withdrawals: 8,
+	got := EngineCountersFrom(localworker.EngineStats{
+		Observations: 1, MissedSamples: 2, MaxObservationLate: 3, TXEdges: 4,
+		EchoedSymbols: 5, EventsDropped: 6, ControlsApplied: 7, Withdrawals: 8,
 	})
 	want := EngineCounters{
 		Observations: 1, MissedSamples: 2, MaxObservationLate: 3, TXEdges: 4,
 		EchoedSymbols: 5, EventsDropped: 6, ControlsApplied: 7, Withdrawals: 8,
 	}
 	if got != want {
-		t.Fatalf("aa31 engine counters = %+v", got)
+		t.Fatalf("engine counters = %+v", got)
 	}
 }
 
@@ -427,7 +427,7 @@ func TestAA31EngineCountersKeepEveryField(t *testing.T) {
 func TestAA31SealDerivesPassiveFromEveryWriteIndicator(t *testing.T) {
 	clean := Seal(Summary{Passive: false, TimingEvidence: "proven", Engine: EngineCounters{Observations: 9}})
 	if !clean.Passive || clean.Record != "summary" || clean.TimingEvidence != "unknown" || clean.CaptureEvidence != "hypothesis" {
-		t.Fatalf("aa31 clean seal = %+v", clean)
+		t.Fatalf("clean seal = %+v", clean)
 	}
 	dirty := map[string]func(*Summary){
 		"engine_tx_edges":        func(s *Summary) { s.Engine.TXEdges = 1 },
@@ -441,7 +441,7 @@ func TestAA31SealDerivesPassiveFromEveryWriteIndicator(t *testing.T) {
 		summary := Summary{Passive: true}
 		mutate(&summary)
 		if Seal(summary).Passive {
-			t.Fatalf("aa31 seal ignores %s", name)
+			t.Fatalf("seal ignores %s", name)
 		}
 	}
 }
@@ -451,23 +451,23 @@ func TestAA31SealDerivesPassiveFromEveryWriteIndicator(t *testing.T) {
 func TestAA31WriteReportEmitsEventsThenSummary(t *testing.T) {
 	first := testEvent()
 	second := testEvent()
-	second.AA25Kind = localworker.AA25EventRawSymbol
-	second.AA25Tick = 99
+	second.Kind = localworker.EventRawSymbol
+	second.Tick = 99
 	var out bytes.Buffer
-	if err := WriteReport(&out, []localworker.AA25Event{first, second}, Summary{ProfileID: "aa31-synthetic-profile"}); err != nil {
+	if err := WriteReport(&out, []localworker.Event{first, second}, Summary{ProfileID: "aa31-synthetic-profile"}); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
 	if len(lines) != 3 {
-		t.Fatalf("aa31 report lines = %q", lines)
+		t.Fatalf("report lines = %q", lines)
 	}
 	var event EventRecord
 	if err := json.Unmarshal([]byte(lines[1]), &event); err != nil || event != Record(second) {
-		t.Fatalf("aa31 second event = %+v, %v", event, err)
+		t.Fatalf("second event = %+v, %v", event, err)
 	}
 	var summary Summary
 	if err := json.Unmarshal([]byte(lines[2]), &summary); err != nil || summary.Record != "summary" || !summary.Passive || summary.ProfileID != "aa31-synthetic-profile" {
-		t.Fatalf("aa31 summary = %+v, %v", summary, err)
+		t.Fatalf("summary = %+v, %v", summary, err)
 	}
 }
 
@@ -475,20 +475,20 @@ func TestAA31WriteReportEmitsEventsThenSummary(t *testing.T) {
 // run backwards.
 func TestAA31MonotonicCounterIsNanosecondsAndMonotonic(t *testing.T) {
 	counter := NewMonotonicCounter()
-	if counter.AA29CounterHz() != MonotonicHz || MonotonicHz != uint64(time.Second) {
-		t.Fatalf("aa31 counter rate = %d", counter.AA29CounterHz())
+	if counter.CounterHz() != MonotonicHz || MonotonicHz != uint64(time.Second) {
+		t.Fatalf("counter rate = %d", counter.CounterHz())
 	}
-	previous := counter.AA29ReadCounter()
+	previous := counter.ReadCounter()
 	for index := 0; index < 1_000; index++ {
-		now := counter.AA29ReadCounter()
+		now := counter.ReadCounter()
 		if now < previous {
-			t.Fatalf("aa31 counter regressed %d -> %d", previous, now)
+			t.Fatalf("counter regressed %d -> %d", previous, now)
 		}
 		previous = now
 	}
-	before := counter.AA29ReadCounter()
+	before := counter.ReadCounter()
 	time.Sleep(2 * time.Millisecond)
-	if elapsed := counter.AA29ReadCounter() - before; elapsed < uint64(2*time.Millisecond) {
-		t.Fatalf("aa31 counter advanced %d ticks across 2ms", elapsed)
+	if elapsed := counter.ReadCounter() - before; elapsed < uint64(2*time.Millisecond) {
+		t.Fatalf("counter advanced %d ticks across 2ms", elapsed)
 	}
 }

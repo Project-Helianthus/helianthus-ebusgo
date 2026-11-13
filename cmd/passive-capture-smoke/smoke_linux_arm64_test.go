@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Project-Helianthus/helianthus-ebusgo/cmd/aa29-smoke/internal/capture"
+	"github.com/Project-Helianthus/helianthus-ebusgo/cmd/passive-capture-smoke/internal/capture"
 	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
 )
 
@@ -62,14 +62,14 @@ func testDocument() capture.ProfileDocument {
 
 // sealed converts a document with a placeholder digest, then records the
 // digest of the converted profile, as an owner's qualification record would.
-func sealed(t *testing.T, document capture.ProfileDocument) transport.AA29PlatformProfile {
+func sealed(t *testing.T, document capture.ProfileDocument) transport.LocalGPIOPlatformProfile {
 	t.Helper()
 	document.QualificationDigest = strings.Repeat("0", 64)
 	converted, err := profile(document)
 	if err != nil {
-		t.Fatalf("aa31 convert: %v", err)
+		t.Fatalf("convert: %v", err)
 	}
-	converted.AA29QualificationDigest = transport.AA29ProfileDigest(converted)
+	converted.QualificationDigest = transport.LocalGPIOProfileDigest(converted)
 	return converted
 }
 
@@ -83,15 +83,15 @@ type waveWindow struct {
 	unmaps  int
 }
 
-func (current *waveWindow) AA29MappedLength() uint64     { return testLength }
-func (current *waveWindow) AA29MappedAccessWidth() uint8 { return 4 }
-func (current *waveWindow) AA29MappedOrdering() transport.AA29Ordering {
-	return transport.AA29OrderingDevice
+func (current *waveWindow) MappedLength() uint64     { return testLength }
+func (current *waveWindow) MappedAccessWidth() uint8 { return 4 }
+func (current *waveWindow) MappedOrdering() transport.LocalGPIOOrdering {
+	return transport.LocalGPIOOrderingDevice
 }
 
-// AA29Load32 frames each character as 20 idle bits, a start bit, eight data
+// Load32 frames each character as 20 idle bits, a start bit, eight data
 // bits LSB first and a stop bit.
-func (current *waveWindow) AA29Load32(offset uint64) uint32 {
+func (current *waveWindow) Load32(offset uint64) uint32 {
 	current.loads++
 	if offset != testRX {
 		return 0
@@ -110,8 +110,8 @@ func (current *waveWindow) AA29Load32(offset uint64) uint32 {
 	return 0
 }
 
-func (current *waveWindow) AA29Store32(uint64, uint32) { current.stores++ }
-func (current *waveWindow) AA29Unmap() error {
+func (current *waveWindow) Store32(uint64, uint32) { current.stores++ }
+func (current *waveWindow) Unmap() error {
 	current.unmaps++
 	return nil
 }
@@ -121,7 +121,7 @@ type waveMapper struct {
 	calls  int
 }
 
-func (current *waveMapper) AA29Map(transport.AA29GPIODescriptor) (transport.AA29Window, error) {
+func (current *waveMapper) Map(transport.LocalGPIODescriptor) (transport.LocalGPIOWindow, error) {
 	current.calls++
 	return current.window, nil
 }
@@ -135,8 +135,8 @@ type stepCounter struct {
 	now uint64
 }
 
-func (current *stepCounter) AA29CounterHz() uint64 { return testHz }
-func (current *stepCounter) AA29ReadCounter() uint64 {
+func (current *stepCounter) CounterHz() uint64 { return testHz }
+func (current *stepCounter) ReadCounter() uint64 {
 	current.now += testTickStep
 	return current.now
 }
@@ -157,13 +157,13 @@ func parseReport(t *testing.T, out string) ([]capture.EventRecord, capture.Summa
 	for _, line := range lines[:len(lines)-1] {
 		var event capture.EventRecord
 		if err := json.Unmarshal([]byte(line), &event); err != nil || event.Record != "event" {
-			t.Fatalf("aa31 event line %q: %v", line, err)
+			t.Fatalf("event line %q: %v", line, err)
 		}
 		events = append(events, event)
 	}
 	var summary capture.Summary
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &summary); err != nil || summary.Record != "summary" {
-		t.Fatalf("aa31 summary line: %v", err)
+		t.Fatalf("summary line: %v", err)
 	}
 	return events, summary
 }
@@ -179,10 +179,10 @@ func TestAA31BuildConstraintsPartitionBuilds(t *testing.T) {
 	} {
 		source, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatalf("aa31 read %s: %v", path, err)
+			t.Fatalf("read %s: %v", path, err)
 		}
 		if first, _, _ := strings.Cut(string(source), "\n"); first != want {
-			t.Fatalf("aa31 %s build line = %q, want %q", path, first, want)
+			t.Fatalf("%s build line = %q, want %q", path, first, want)
 		}
 	}
 }
@@ -196,7 +196,7 @@ func TestAA31ProductionNamesNoDevicePath(t *testing.T) {
 	}
 	ast.Inspect(file, func(node ast.Node) bool {
 		if literal, ok := node.(*ast.BasicLit); ok && strings.Contains(literal.Value, "/dev") {
-			t.Fatalf("aa31 production literal %s names a device path", literal.Value)
+			t.Fatalf("production literal %s names a device path", literal.Value)
 		}
 		return true
 	})
@@ -215,20 +215,20 @@ func TestAA31ProfileConvertsEveryField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBase := transport.AA29PlatformProfile{
-		AA29ProfileID:     "aa31-synthetic-profile",
-		AA29Family:        "aa31-synthetic-family",
-		AA29Qualification: transport.AA22Proven,
-		AA29GPIO: transport.AA29GPIODescriptor{
-			AA29Role: transport.AA29RoleGPIOControl, AA29MapLength: testLength, AA29AccessWidth: 4,
-			AA29Ordering: transport.AA29OrderingDevice, AA29RXLevelOffset: testRX, AA29TXSetOffset: 0x20,
-			AA29TXClearOffset: 0x30, AA29RXMask: testRXMask, AA29TXMask: 1 << 5,
+	wantBase := transport.LocalGPIOPlatformProfile{
+		ProfileID:     "aa31-synthetic-profile",
+		Family:        "aa31-synthetic-family",
+		Qualification: transport.AA22Proven,
+		GPIO: transport.LocalGPIODescriptor{
+			Role: transport.LocalGPIORoleGPIOControl, MapLength: testLength, AccessWidth: 4,
+			Ordering: transport.LocalGPIOOrderingDevice, RXLevelOffset: testRX, TXSetOffset: 0x20,
+			TXClearOffset: 0x30, RXMask: testRXMask, TXMask: 1 << 5,
 		},
-		AA29Counter:       transport.AA29CounterDescriptor{AA29Role: transport.AA29RoleCounter, AA29Hz: testHz},
-		AA29MaxLeaseTicks: 5_000,
+		Counter:       transport.LocalGPIOCounterDescriptor{Role: transport.LocalGPIORoleCounter, Hz: testHz},
+		MaxLeaseTicks: 5_000,
 	}
 	if baseProfile != wantBase {
-		t.Fatalf("aa31 base profile = %+v", baseProfile)
+		t.Fatalf("base profile = %+v", baseProfile)
 	}
 	mutations := map[string]func(*capture.ProfileDocument){
 		"profile_id":      func(d *capture.ProfileDocument) { d.ProfileID = "aa31-other-profile" },
@@ -247,32 +247,32 @@ func TestAA31ProfileConvertsEveryField(t *testing.T) {
 		"counter_hz":      func(d *capture.ProfileDocument) { d.Counter.Hz = 2 * testHz },
 		"max_lease_ticks": func(d *capture.ProfileDocument) { d.MaxLeaseTicks = 6_000 },
 	}
-	baseDigest := transport.AA29ProfileDigest(baseProfile)
+	baseDigest := transport.LocalGPIOProfileDigest(baseProfile)
 	for name, mutate := range mutations {
 		document := base
 		mutate(&document)
 		got, err := profile(document)
 		if err != nil {
-			t.Fatalf("aa31 convert with %s: %v", name, err)
+			t.Fatalf("convert with %s: %v", name, err)
 		}
-		if got == baseProfile || transport.AA29ProfileDigest(got) == baseDigest {
-			t.Fatalf("aa31 conversion ignores %s", name)
+		if got == baseProfile || transport.LocalGPIOProfileDigest(got) == baseDigest {
+			t.Fatalf("conversion ignores %s", name)
 		}
 	}
 	document := base
 	document.QualificationDigest = "01" + strings.Repeat("0", 62)
 	got, err := profile(document)
-	if err != nil || got.AA29QualificationDigest[0] != 0x01 || got.AA29QualificationDigest == baseProfile.AA29QualificationDigest {
-		t.Fatalf("aa31 conversion ignores qualification_digest: %+v, %v", got, err)
+	if err != nil || got.QualificationDigest[0] != 0x01 || got.QualificationDigest == baseProfile.QualificationDigest {
+		t.Fatalf("conversion ignores qualification_digest: %+v, %v", got, err)
 	}
 	for _, label := range []string{"unknown", "relaxed", "device"} {
 		document := base
 		document.GPIO.Ordering = label
 		got, _ := profile(document)
-		if want := map[string]transport.AA29Ordering{
-			"unknown": transport.AA29OrderingUnknown, "relaxed": transport.AA29OrderingRelaxed, "device": transport.AA29OrderingDevice,
-		}[label]; got.AA29GPIO.AA29Ordering != want {
-			t.Fatalf("aa31 ordering %q = %v", label, got.AA29GPIO.AA29Ordering)
+		if want := map[string]transport.LocalGPIOOrdering{
+			"unknown": transport.LocalGPIOOrderingUnknown, "relaxed": transport.LocalGPIOOrderingRelaxed, "device": transport.LocalGPIOOrderingDevice,
+		}[label]; got.GPIO.Ordering != want {
+			t.Fatalf("ordering %q = %v", label, got.GPIO.Ordering)
 		}
 	}
 }
@@ -287,7 +287,7 @@ func TestAA31CaptureDecodesWaveformPassively(t *testing.T) {
 	var out bytes.Buffer
 	code, err := runCapture(testRequest(t), mapper, counter, nil, &out)
 	if code != exitPassive || err != nil {
-		t.Fatalf("aa31 capture = %d, %v", code, err)
+		t.Fatalf("capture = %d, %v", code, err)
 	}
 	events, summary := parseReport(t, out.String())
 	symbols := 0
@@ -297,16 +297,16 @@ func TestAA31CaptureDecodesWaveformPassively(t *testing.T) {
 		}
 	}
 	if symbols == 0 {
-		t.Fatalf("aa31 capture decoded no symbol: %+v", events)
+		t.Fatalf("capture decoded no symbol: %+v", events)
 	}
 	if !summary.Passive || summary.Stop != "budget" || summary.Engine.TXEdges != 0 ||
 		summary.Backend != (capture.BackendCounters{}) || summary.WindowStores != 0 ||
 		summary.EventsRecorded != uint64(len(events)) || summary.CounterHz != testHz ||
 		summary.BudgetTicks != 100_000 || summary.ElapsedTicks < summary.BudgetTicks {
-		t.Fatalf("aa31 summary = %+v", summary)
+		t.Fatalf("summary = %+v", summary)
 	}
 	if mapper.calls != 1 || window.loads == 0 || window.stores != 0 || window.unmaps != 1 {
-		t.Fatalf("aa31 window calls=%d loads=%d stores=%d unmaps=%d", mapper.calls, window.loads, window.stores, window.unmaps)
+		t.Fatalf("window calls=%d loads=%d stores=%d unmaps=%d", mapper.calls, window.loads, window.stores, window.unmaps)
 	}
 }
 
@@ -315,10 +315,10 @@ func TestAA31CaptureDecodesWaveformPassively(t *testing.T) {
 func TestAA31CaptureRefusesUnadmittedProfileWithoutMapping(t *testing.T) {
 	cases := map[string]func(*request){
 		"hypothesis": func(r *request) {
-			r.profile.AA29Qualification = transport.AA22Hypothesis
-			r.profile.AA29QualificationDigest = transport.AA29ProfileDigest(r.profile)
+			r.profile.Qualification = transport.AA22Hypothesis
+			r.profile.QualificationDigest = transport.LocalGPIOProfileDigest(r.profile)
 		},
-		"stale_digest": func(r *request) { r.profile.AA29MaxLeaseTicks++ },
+		"stale_digest": func(r *request) { r.profile.MaxLeaseTicks++ },
 	}
 	for name, mutate := range cases {
 		counter := &stepCounter{}
@@ -327,8 +327,8 @@ func TestAA31CaptureRefusesUnadmittedProfileWithoutMapping(t *testing.T) {
 		mutate(&req)
 		var out bytes.Buffer
 		code, err := runCapture(req, mapper, counter, nil, &out)
-		if code != exitFailure || !errors.Is(err, transport.AA29ErrUnqualified) || mapper.calls != 0 || out.Len() != 0 {
-			t.Fatalf("aa31 %s capture = %d, %v, maps %d, out %q", name, code, err, mapper.calls, out.String())
+		if code != exitFailure || !errors.Is(err, transport.ErrLocalGPIOUnqualified) || mapper.calls != 0 || out.Len() != 0 {
+			t.Fatalf("%s capture = %d, %v, maps %d, out %q", name, code, err, mapper.calls, out.String())
 		}
 	}
 }
@@ -345,11 +345,11 @@ func TestAA31RegularFileWindowIsRefusedAndUnmapped(t *testing.T) {
 	mapper := &fileMapper{path: path}
 	var out bytes.Buffer
 	code, err := runCapture(req, mapper, &stepCounter{}, nil, &out)
-	if code != exitFailure || !errors.Is(err, transport.AA29ErrResourceMatch) || out.Len() != 0 {
-		t.Fatalf("aa31 regular-file capture = %d, %v, out %q", code, err, out.String())
+	if code != exitFailure || !errors.Is(err, transport.ErrLocalGPIOResourceMatch) || out.Len() != 0 {
+		t.Fatalf("regular-file capture = %d, %v, out %q", code, err, out.String())
 	}
-	if len(mapper.windows) != 1 || mapper.windows[0].AA29MappedLength() != 0 {
-		t.Fatalf("aa31 refused window still mapped: %d windows", len(mapper.windows))
+	if len(mapper.windows) != 1 || mapper.windows[0].MappedLength() != 0 {
+		t.Fatalf("refused window still mapped: %d windows", len(mapper.windows))
 	}
 }
 
@@ -361,20 +361,20 @@ func TestAA31WindowStoreTouchesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	mapper := &fileMapper{path: path}
-	port, err := mapper.AA29Map(transport.AA29GPIODescriptor{AA29MapLength: testLength})
+	port, err := mapper.Map(transport.LocalGPIODescriptor{MapLength: testLength})
 	if err != nil {
 		t.Fatal(err)
 	}
-	port.AA29Store32(testRX, ^uint32(0))
-	if port.AA29Load32(testRX) != 0 || mapper.storeAttempts() != 1 || port.AA29MappedOrdering() != transport.AA29OrderingRelaxed || port.AA29MappedAccessWidth() != 4 {
-		t.Fatal("aa31 window store reached memory or misreported the mapping")
+	port.Store32(testRX, ^uint32(0))
+	if port.Load32(testRX) != 0 || mapper.storeAttempts() != 1 || port.MappedOrdering() != transport.LocalGPIOOrderingRelaxed || port.MappedAccessWidth() != 4 {
+		t.Fatal("window store reached memory or misreported the mapping")
 	}
-	if err := port.AA29Unmap(); err != nil {
+	if err := port.Unmap(); err != nil {
 		t.Fatal(err)
 	}
 	source, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(source, make([]byte, testLength)) {
-		t.Fatalf("aa31 window file changed: %v", err)
+		t.Fatalf("window file changed: %v", err)
 	}
 }
 
@@ -387,26 +387,26 @@ func TestAA31ParseOptionsRequiresEveryResource(t *testing.T) {
 		profilePath: "aa31-p", windowPath: "aa31-w", responder: 0x15,
 		duration: defaultDuration, maxEvents: defaultMaxEvents,
 	}) {
-		t.Fatalf("aa31 options = %+v, %v", opts, err)
+		t.Fatalf("options = %+v, %v", opts, err)
 	}
 	opts, err = parseOptions(append(full, "-window-offset", "4096", "-duration", "2s", "-max-events", "9"), io.Discard)
 	if err != nil || opts.windowOffset != 4096 || opts.duration != 2*time.Second || opts.maxEvents != 9 {
-		t.Fatalf("aa31 explicit options = %+v, %v", opts, err)
+		t.Fatalf("explicit options = %+v, %v", opts, err)
 	}
 	for index := 0; index < len(full); index += 2 {
 		partial := append(append([]string{}, full[:index]...), full[index+2:]...)
 		if _, err := parseOptions(partial, io.Discard); !errors.Is(err, errUsage) {
-			t.Fatalf("aa31 options without %s = %v", full[index], err)
+			t.Fatalf("options without %s = %v", full[index], err)
 		}
 	}
 	for _, responder := range []string{"0x115", "x", "-1", "256"} {
 		args := append(append([]string{}, full[:4]...), "-responder", responder)
 		if _, err := parseOptions(args, io.Discard); !errors.Is(err, errUsage) {
-			t.Fatalf("aa31 responder %q = %v", responder, err)
+			t.Fatalf("responder %q = %v", responder, err)
 		}
 	}
 	if _, err := parseOptions(append(full, "stray"), io.Discard); !errors.Is(err, errUsage) {
-		t.Fatalf("aa31 stray argument = %v", err)
+		t.Fatalf("stray argument = %v", err)
 	}
 }
 
@@ -427,10 +427,10 @@ func TestAA31CaptureRefusesInvalidRequests(t *testing.T) {
 		var out bytes.Buffer
 		code, err := runCapture(req, &waveMapper{window: window}, counter, nil, &out)
 		if code != exitUsage || err == nil || out.Len() != 0 || window.stores != 0 {
-			t.Fatalf("aa31 %s capture = %d, %v", name, code, err)
+			t.Fatalf("%s capture = %d, %v", name, code, err)
 		}
 		if name == "initiator_responder" && window.unmaps != 1 {
-			t.Fatalf("aa31 refused engine left the window mapped (%d unmaps)", window.unmaps)
+			t.Fatalf("refused engine left the window mapped (%d unmaps)", window.unmaps)
 		}
 	}
 }
@@ -444,6 +444,6 @@ func TestAA31MainRefusesMalformedProfile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"-profile", path, "-window", path, "-responder", strconv.Itoa(int(testResponder))}, &stdout, &stderr)
 	if code != exitUsage || stdout.Len() != 0 || !strings.Contains(stderr.String(), "profile") {
-		t.Fatalf("aa31 main = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+		t.Fatalf("main = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
