@@ -14,6 +14,6 @@
 //   - emulation: deterministic simulated targets for tests.
 //   - localworker: offline, deterministic models of a local responder
 //     worker; it opens no device and provides no default transmission path.
-//     Injected ports can emit output through AA25WriteEdge and
-//     AA26EmitResponderSymbol.
+//     Injected ports can emit output through WriteEdge and
+//     EmitResponderSymbol.
 package ebusgo

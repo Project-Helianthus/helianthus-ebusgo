@@ -1,6 +1,6 @@
 //go:build !(linux && arm64 && aa29_local_gpio)
 
-// Command aa29-smoke is a passive capture over the AA29 local GPIO backend. It
+// Command passive-capture-smoke is a passive capture over the local GPIO backend. It
 // exists only in linux/arm64 builds with the aa29_local_gpio tag; every other
 // build refuses to run.
 package main

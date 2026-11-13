@@ -3,4 +3,4 @@ tinygo-check
 
 # Claude Code orchestrator-session artifacts (per-session tool/skills config, not repo-tracked)
 .claude/
-/aa29-smoke
+/passive-capture-smoke

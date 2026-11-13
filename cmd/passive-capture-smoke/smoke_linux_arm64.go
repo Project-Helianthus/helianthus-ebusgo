@@ -1,9 +1,9 @@
 //go:build linux && arm64 && aa29_local_gpio
 
-// Command aa29-smoke runs one bounded passive capture over the AA29 local GPIO
+// Command passive-capture-smoke runs one bounded passive capture over the local GPIO
 // backend and writes the decoded engine events as JSON lines.
 //
-// Status: Hypothesis. The command supplies the AA29 GPIO window and counter
+// Status: Hypothesis. The command supplies the local GPIO window and counter
 // ports: a read-only shared mapping of an owner-named file and the process
 // monotonic clock. It never arms the backend and never offers a prepared
 // response, and the window it maps has no write permission, so it cannot drive
@@ -11,10 +11,10 @@
 //
 // Usage:
 //
-//	aa29-smoke -profile FILE -window FILE [-window-offset N] -responder ADDR
+//	passive-capture-smoke -profile FILE -window FILE [-window-offset N] -responder ADDR
 //	           [-duration D] [-max-events N]
 //
-// The profile is an owner-provisioned AA29 platform profile in JSON form whose
+// The profile is an owner-provisioned local GPIO platform profile in JSON form whose
 // counter rate must be the monotonic counter rate. The window file and offset
 // are owner-provisioned; the command has no default for either.
 //
@@ -35,7 +35,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Project-Helianthus/helianthus-ebusgo/cmd/aa29-smoke/internal/capture"
+	"github.com/Project-Helianthus/helianthus-ebusgo/cmd/passive-capture-smoke/internal/capture"
 	"github.com/Project-Helianthus/helianthus-ebusgo/localworker"
 	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
 )
@@ -92,69 +92,69 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	return result, nil
 }
 
-func ordering(label string) transport.AA29Ordering {
+func ordering(label string) transport.LocalGPIOOrdering {
 	switch label {
 	case "relaxed":
-		return transport.AA29OrderingRelaxed
+		return transport.LocalGPIOOrderingRelaxed
 	case "device":
-		return transport.AA29OrderingDevice
+		return transport.LocalGPIOOrderingDevice
 	}
-	return transport.AA29OrderingUnknown
+	return transport.LocalGPIOOrderingUnknown
 }
 
 // profile converts a decoded document field for field. Roles are fixed by
-// position. Admission stays with AA29Open.
-func profile(document capture.ProfileDocument) (transport.AA29PlatformProfile, error) {
+// position. Admission stays with OpenLocalGPIO.
+func profile(document capture.ProfileDocument) (transport.LocalGPIOPlatformProfile, error) {
 	qualification, err := capture.ParseQualification(document.Qualification)
 	if err != nil {
-		return transport.AA29PlatformProfile{}, err
+		return transport.LocalGPIOPlatformProfile{}, err
 	}
 	digest, err := capture.ParseDigest(document.QualificationDigest)
 	if err != nil {
-		return transport.AA29PlatformProfile{}, err
+		return transport.LocalGPIOPlatformProfile{}, err
 	}
 	gpio := document.GPIO
-	return transport.AA29PlatformProfile{
-		AA29ProfileID:           document.ProfileID,
-		AA29Family:              document.Family,
-		AA29Qualification:       qualification,
-		AA29QualificationDigest: digest,
-		AA29GPIO: transport.AA29GPIODescriptor{
-			AA29Role:          transport.AA29RoleGPIOControl,
-			AA29MapLength:     gpio.MapLength,
-			AA29AccessWidth:   gpio.AccessWidth,
-			AA29Ordering:      ordering(gpio.Ordering),
-			AA29RXLevelOffset: gpio.RXLevelOffset,
-			AA29TXSetOffset:   gpio.TXSetOffset,
-			AA29TXClearOffset: gpio.TXClearOffset,
-			AA29RXMask:        gpio.RXMask,
-			AA29TXMask:        gpio.TXMask,
-			AA29RXInverted:    gpio.RXInverted,
-			AA29TXInverted:    gpio.TXInverted,
+	return transport.LocalGPIOPlatformProfile{
+		ProfileID:           document.ProfileID,
+		Family:              document.Family,
+		Qualification:       qualification,
+		QualificationDigest: digest,
+		GPIO: transport.LocalGPIODescriptor{
+			Role:          transport.LocalGPIORoleGPIOControl,
+			MapLength:     gpio.MapLength,
+			AccessWidth:   gpio.AccessWidth,
+			Ordering:      ordering(gpio.Ordering),
+			RXLevelOffset: gpio.RXLevelOffset,
+			TXSetOffset:   gpio.TXSetOffset,
+			TXClearOffset: gpio.TXClearOffset,
+			RXMask:        gpio.RXMask,
+			TXMask:        gpio.TXMask,
+			RXInverted:    gpio.RXInverted,
+			TXInverted:    gpio.TXInverted,
 		},
-		AA29Counter: transport.AA29CounterDescriptor{
-			AA29Role: transport.AA29RoleCounter,
-			AA29Hz:   document.Counter.Hz,
+		Counter: transport.LocalGPIOCounterDescriptor{
+			Role: transport.LocalGPIORoleCounter,
+			Hz:   document.Counter.Hz,
 		},
-		AA29MaxLeaseTicks: document.MaxLeaseTicks,
+		MaxLeaseTicks: document.MaxLeaseTicks,
 	}, nil
 }
 
-func loadProfile(path string) (transport.AA29PlatformProfile, error) {
+func loadProfile(path string) (transport.LocalGPIOPlatformProfile, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return transport.AA29PlatformProfile{}, err
+		return transport.LocalGPIOPlatformProfile{}, err
 	}
 	// The file is read-only; a close error cannot lose profile data.
 	defer func() { _ = file.Close() }()
 	document, err := capture.DecodeProfile(file)
 	if err != nil {
-		return transport.AA29PlatformProfile{}, err
+		return transport.LocalGPIOPlatformProfile{}, err
 	}
 	return profile(document)
 }
 
-// readOnlyWindow is the AA29 window port over a read-only mapping. It reports
+// readOnlyWindow is the local GPIO window port over a read-only mapping. It reports
 // device ordering only for a character device; a regular file never qualifies.
 // It has no store path: a store attempt is counted and touches no memory.
 type readOnlyWindow struct {
@@ -162,37 +162,37 @@ type readOnlyWindow struct {
 	storeAttempts uint64
 }
 
-func (current *readOnlyWindow) AA29MappedLength() uint64 {
+func (current *readOnlyWindow) MappedLength() uint64 {
 	return current.mapping.Length()
 }
 
-func (current *readOnlyWindow) AA29MappedAccessWidth() uint8 {
+func (current *readOnlyWindow) MappedAccessWidth() uint8 {
 	return uint8(capture.AccessWidth)
 }
 
-func (current *readOnlyWindow) AA29MappedOrdering() transport.AA29Ordering {
+func (current *readOnlyWindow) MappedOrdering() transport.LocalGPIOOrdering {
 	if current.mapping.CharacterDevice() {
-		return transport.AA29OrderingDevice
+		return transport.LocalGPIOOrderingDevice
 	}
-	return transport.AA29OrderingRelaxed
+	return transport.LocalGPIOOrderingRelaxed
 }
 
-func (current *readOnlyWindow) AA29Load32(offset uint64) uint32 {
+func (current *readOnlyWindow) Load32(offset uint64) uint32 {
 	return current.mapping.Load32(offset)
 }
 
-func (current *readOnlyWindow) AA29Store32(uint64, uint32) {
+func (current *readOnlyWindow) Store32(uint64, uint32) {
 	current.storeAttempts++
 }
 
-func (current *readOnlyWindow) AA29Unmap() error {
+func (current *readOnlyWindow) Unmap() error {
 	return current.mapping.Unmap()
 }
 
-// countingMapper is an AA29 mapping port that also reports store attempts
+// countingMapper is a local GPIO mapping port that also reports store attempts
 // on every window it has handed out.
 type countingMapper interface {
-	transport.AA29MappingPort
+	transport.LocalGPIOMappingPort
 	storeAttempts() uint64
 }
 
@@ -204,8 +204,8 @@ type fileMapper struct {
 	windows []*readOnlyWindow
 }
 
-func (current *fileMapper) AA29Map(descriptor transport.AA29GPIODescriptor) (transport.AA29Window, error) {
-	mapping, err := capture.MapReadOnly(current.path, current.offset, descriptor.AA29MapLength)
+func (current *fileMapper) Map(descriptor transport.LocalGPIODescriptor) (transport.LocalGPIOWindow, error) {
+	mapping, err := capture.MapReadOnly(current.path, current.offset, descriptor.MapLength)
 	if err != nil {
 		return nil, err
 	}
@@ -223,16 +223,16 @@ func (current *fileMapper) storeAttempts() uint64 {
 }
 
 type request struct {
-	profile   transport.AA29PlatformProfile
+	profile   transport.LocalGPIOPlatformProfile
 	responder byte
 	duration  time.Duration
 	maxEvents int
 }
 
-func closeBackend(backend *transport.AA29Backend) error {
+func closeBackend(backend *transport.LocalGPIOBackend) error {
 	var err error
 	for attempt := 0; attempt < closeAttempts; attempt++ {
-		if err = backend.AA29Close(); err == nil {
+		if err = backend.Close(); err == nil {
 			return nil
 		}
 	}
@@ -242,8 +242,8 @@ func closeBackend(backend *transport.AA29Backend) error {
 // runCapture opens the backend, runs one bounded passive capture, closes the
 // backend and writes the report. The report is written only for a capture that
 // ran; it states whether every passive invariant held.
-func runCapture(req request, mapping countingMapper, counter transport.AA29CounterPort, stop *atomic.Bool, out io.Writer) (int, error) {
-	budget, err := capture.BudgetTicks(req.duration, req.profile.AA29Counter.AA29Hz)
+func runCapture(req request, mapping countingMapper, counter transport.LocalGPIOCounterPort, stop *atomic.Bool, out io.Writer) (int, error) {
+	budget, err := capture.BudgetTicks(req.duration, req.profile.Counter.Hz)
 	if err != nil {
 		return exitUsage, err
 	}
@@ -251,43 +251,43 @@ func runCapture(req request, mapping countingMapper, counter transport.AA29Count
 	if err != nil {
 		return exitUsage, err
 	}
-	backend, err := transport.AA29Open(&req.profile, mapping, counter)
+	backend, err := transport.OpenLocalGPIO(&req.profile, mapping, counter)
 	if err != nil {
 		if backend != nil {
 			err = errors.Join(err, closeBackend(backend))
 		}
 		return exitFailure, err
 	}
-	engine, err := backend.AA29NewEngine(localworker.AA25Config{
-		AA25TickHz:           req.profile.AA29Counter.AA29Hz,
-		AA25ResponderAddress: req.responder,
+	engine, err := backend.NewEngine(localworker.EngineConfig{
+		TickHz:           req.profile.Counter.Hz,
+		ResponderAddress: req.responder,
 	}, recorder)
 	if err != nil {
 		code := exitFailure
-		if errors.Is(err, localworker.AA25ErrInvalidConfig) {
+		if errors.Is(err, localworker.ErrEngineInvalidConfig) {
 			code = exitUsage
 		}
 		return code, errors.Join(err, closeBackend(backend))
 	}
 	result := capture.Run(engine, backend, recorder, budget, stop)
 	closeErr := closeBackend(backend)
-	stats := backend.AA29Stats()
+	stats := backend.Stats()
 	summary := capture.Seal(capture.Summary{
-		ProfileID:      req.profile.AA29ProfileID,
-		Family:         req.profile.AA29Family,
-		CounterHz:      req.profile.AA29Counter.AA29Hz,
+		ProfileID:      req.profile.ProfileID,
+		Family:         req.profile.Family,
+		CounterHz:      req.profile.Counter.Hz,
 		BudgetTicks:    budget,
 		ElapsedTicks:   result.ElapsedTicks,
 		Steps:          result.Steps,
 		Stop:           capture.StopName(result.Stop),
 		EventsRecorded: uint64(len(recorder.Events())),
 		EventsRefused:  recorder.Refused(),
-		Engine:         capture.EngineCountersFrom(engine.AA25Stats()),
+		Engine:         capture.EngineCountersFrom(engine.Stats()),
 		Backend: capture.BackendCounters{
-			StoredEdges:   stats.AA29StoredEdges,
-			RefusedEdges:  stats.AA29RefusedEdges,
-			Releases:      stats.AA29Releases,
-			LeaseExpiries: stats.AA29LeaseExpiries,
+			StoredEdges:   stats.StoredEdges,
+			RefusedEdges:  stats.RefusedEdges,
+			Releases:      stats.Releases,
+			LeaseExpiries: stats.LeaseExpiries,
 		},
 		WindowStores: mapping.storeAttempts(),
 	})
