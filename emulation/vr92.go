@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// Fixture identity of DefaultVR92Profile and PresetVR92IdentifyOnlyProfile:
+// manufacturer byte, five-character device identifier, and software and
+// hardware versions sent high byte first. NewVR92Target uses them for
+// fields the profile leaves unset, with the same rules as VR90Profile.
 const (
 	DefaultVR92Manufacturer = byte(0xB5)
 	DefaultVR92DeviceID     = "VR_92"
@@ -21,8 +25,12 @@ var (
 	}
 )
 
+// VR92MappedCommand is the same type as VR90MappedCommand.
 type VR92MappedCommand = VR90MappedCommand
 
+// VR92Profile has the fields and rules of VR90Profile with the DefaultVR92
+// identity, except that ScanID has no default: enabling
+// EnableB509Discovery with a blank ScanID is invalid.
 type VR92Profile struct {
 	// Address is the eBUS target address for this device. Required - must be
 	// set explicitly. Address is installation-specific; there is no safe default.
@@ -38,6 +46,9 @@ type VR92Profile struct {
 	Timing              TimingConstraints
 }
 
+// DefaultVR92Profile returns the fixture identity and timing of the preset
+// with no address, no scan identifier, scan-identifier answers disabled and
+// no mapped commands. Set Address before passing it to NewVR92Target.
 func DefaultVR92Profile() VR92Profile {
 	return VR92Profile{
 		Manufacturer:  DefaultVR92Manufacturer,
@@ -49,6 +60,11 @@ func DefaultVR92Profile() VR92Profile {
 	}
 }
 
+// NewVR92Target applies the DefaultVR92 defaults and builds the target
+// with NewVR90Target, so the target's name and rules are those of a VR90
+// target. It fails like NewVR90Target and also with
+// ErrInvalidConfiguration when scan-identifier answers are enabled without
+// a ScanID.
 func NewVR92Target(profile VR92Profile) (*Target, error) {
 	normalized, err := normalizeVR92Profile(profile)
 	if err != nil {

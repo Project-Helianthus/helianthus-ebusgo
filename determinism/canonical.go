@@ -48,6 +48,10 @@ func CanonicalClone(value any) (any, error) {
 	return out, nil
 }
 
+// CanonicalHash returns the SHA-256 digest of CanonicalJSON(value) as 64
+// lowercase hex characters. It fails with the CanonicalJSON error, which
+// wraps errors.ErrInvalidPayload, when value is not JSON-encodable. Map key
+// order does not change the digest; JSON number spelling does.
 func CanonicalHash(value any) (string, error) {
 	canonical, err := CanonicalJSON(value)
 	if err != nil {

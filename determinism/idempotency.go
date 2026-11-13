@@ -8,11 +8,19 @@ import (
 )
 
 var (
+	// ErrIdempotencyConflict is returned by IdempotencyStore.Lookup when a
+	// live entry exists for the key but was stored under a different
+	// fingerprint; the stored result is not returned.
 	ErrIdempotencyConflict = errors.New("determinism: idempotency key reused with different fingerprint")
-	ErrInvalidKey          = errors.New("determinism: idempotency key must not be empty")
-	ErrInvalidFingerprint  = errors.New("determinism: idempotency fingerprint must not be empty")
+	// ErrInvalidKey is returned when a key is empty after trimming spaces.
+	ErrInvalidKey = errors.New("determinism: idempotency key must not be empty")
+	// ErrInvalidFingerprint is returned when a fingerprint is empty after
+	// trimming spaces.
+	ErrInvalidFingerprint = errors.New("determinism: idempotency fingerprint must not be empty")
 )
 
+// DefaultIdempotencyTTL is the entry lifetime NewIdempotencyStore uses when
+// it is given a TTL that is zero or negative.
 const DefaultIdempotencyTTL = 30 * time.Second
 
 type idempotencyEntry struct {
@@ -30,6 +38,9 @@ type IdempotencyStore struct {
 	entries map[string]idempotencyEntry
 }
 
+// NewIdempotencyStore returns an empty store whose entries expire ttl after
+// they are stored; a ttl that is zero or negative selects
+// DefaultIdempotencyTTL. The store reads the wall clock.
 func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
 	if ttl <= 0 {
 		ttl = DefaultIdempotencyTTL
@@ -41,6 +52,12 @@ func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
 	}
 }
 
+// Lookup returns a copy of the result stored under key and true when a live
+// entry exists with the same fingerprint, and nil, false, nil when there is
+// none. Key and fingerprint are trimmed first; an empty one fails with
+// ErrInvalidKey or ErrInvalidFingerprint, and a live entry with another
+// fingerprint fails with ErrIdempotencyConflict. A stored empty result comes
+// back as nil with true. Lookup first evicts every expired entry.
 func (s *IdempotencyStore) Lookup(key string, fingerprint string) ([]byte, bool, error) {
 	key, fingerprint, err := normalizeLookupInputs(key, fingerprint)
 	if err != nil {
@@ -62,6 +79,11 @@ func (s *IdempotencyStore) Lookup(key string, fingerprint string) ([]byte, bool,
 	return cloneBytes(entry.value), true, nil
 }
 
+// Store records a copy of value under the trimmed key and fingerprint and
+// restarts the entry's TTL. It replaces any entry under the same key, even
+// one with another fingerprint, so callers that must not overwrite a
+// conflicting result check Lookup first. It fails only with ErrInvalidKey or
+// ErrInvalidFingerprint, and then stores nothing.
 func (s *IdempotencyStore) Store(key string, fingerprint string, value []byte) error {
 	key, fingerprint, err := normalizeLookupInputs(key, fingerprint)
 	if err != nil {
@@ -81,6 +103,8 @@ func (s *IdempotencyStore) Store(key string, fingerprint string, value []byte) e
 	return nil
 }
 
+// Delete removes the entry under the trimmed key, whatever its fingerprint.
+// An empty or unknown key is a no-op.
 func (s *IdempotencyStore) Delete(key string) {
 	trimmed := strings.TrimSpace(key)
 	if trimmed == "" {
@@ -91,6 +115,7 @@ func (s *IdempotencyStore) Delete(key string) {
 	s.mu.Unlock()
 }
 
+// Len evicts expired entries and returns the number of live ones.
 func (s *IdempotencyStore) Len() int {
 	now := s.now()
 	s.mu.Lock()

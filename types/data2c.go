@@ -26,14 +26,22 @@ var (
 // Encoding rounds to nearest using math.Round (ties away from zero) and requires exact fit.
 type DATA2c struct{}
 
+// Size returns 2, the encoded width in bytes.
 func (DATA2c) Size() int {
 	return data2cSize
 }
 
+// ReplacementValue returns a new slice holding 0x00 0x80, the DATA2c
+// "no data" value 0x8000 in little-endian order.
 func (DATA2c) ReplacementValue() []byte {
 	return []byte{0x00, 0x80}
 }
 
+// Decode reads the first two bytes as a little-endian int16 and returns it
+// divided by 16 as a float64. 0x8000 decodes to Valid false; a payload
+// shorter than two bytes fails with errors.ErrInvalidPayload. The wire
+// format is documented at
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/types/primitives.md
 func (DATA2c) Decode(payload []byte) (Value, error) {
 	if len(payload) < data2cSize {
 		return Value{}, ebuserrors.ErrInvalidPayload
@@ -48,6 +56,11 @@ func (DATA2c) Decode(payload []byte) (Value, error) {
 	return Value{Value: value, Valid: true}, nil
 }
 
+// Encode multiplies an integer or float by 16 and writes the result as a
+// little-endian int16. The value must be finite, lie from -32767/16 to
+// 32767/16 and be a multiple of 1/16 within a tolerance of 1e-9 after
+// scaling; anything else fails with errors.ErrInvalidPayload rather than
+// being rounded.
 func (DATA2c) Encode(value any) ([]byte, error) {
 	f, ok := toFloat64(value)
 	if !ok {

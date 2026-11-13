@@ -10,11 +10,21 @@ import (
 )
 
 const (
+	// DefaultVR90Manufacturer is the fixture manufacturer byte that
+	// DefaultVR90Profile and NewVR90Target use.
 	DefaultVR90Manufacturer = byte(0xB5)
-	DefaultVR90DeviceID     = "B7V00"
-	DefaultVR90Software     = uint16(0x0422)
-	DefaultVR90Hardware     = uint16(0x5503)
-	DefaultVR90ScanID       = "21231600202609140953035469N6"
+	// DefaultVR90DeviceID is the fixture five-character device identifier
+	// that DefaultVR90Profile and NewVR90Target use.
+	DefaultVR90DeviceID = "B7V00"
+	// DefaultVR90Software is the fixture software version, sent high byte
+	// first, used when a VR90Profile sets no identity field.
+	DefaultVR90Software = uint16(0x0422)
+	// DefaultVR90Hardware is the fixture hardware version, sent high byte
+	// first, used when a VR90Profile sets no identity field.
+	DefaultVR90Hardware = uint16(0x5503)
+	// DefaultVR90ScanID is the fixture scan identifier that NewVR90Target
+	// uses when VR90Profile.ScanID is blank.
+	DefaultVR90ScanID = "21231600202609140953035469N6"
 
 	vr90B509ScanIDSelectorStart = byte(0x24)
 	vr90B509ScanIDSelectorEnd   = byte(0x27)
@@ -31,6 +41,22 @@ var (
 	}
 )
 
+// VR90Profile describes a preset target that answers the identification
+// request like an IdentifyOnlyProfile and, optionally, scan-identifier
+// reads and caller-mapped commands. Address is required. A zero
+// Manufacturer or blank DeviceID takes the DefaultVR90 value; Software and
+// Hardware take theirs only when none of Manufacturer, DeviceID, Software
+// and Hardware is set, so a profile that overrides any identity field keeps
+// zero versions as zero. ResponseDelay and Timing default as for
+// IdentifyOnlyProfile, and the response delay applies to every rule.
+//
+// With EnableB509Discovery the target also answers primary 0xB5, secondary
+// 0x09 requests with one data byte from 0x24 to 0x27. It trims ScanID
+// (DefaultVR90ScanID when blank), cuts or space-pads it to 32 bytes and
+// answers selector 0x24+n with a 0x00 byte followed by bytes 8n to 8n+7.
+// That window layout belongs to this fixture and is not evidence of
+// the wire layout, which is documented with its open questions at
+// https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/vaillant/ebus-vaillant-b509.md
 type VR90Profile struct {
 	// Address is the eBUS target address for this device. Required - must be
 	// set explicitly. Address is installation-specific; there is no safe default.
@@ -46,6 +72,13 @@ type VR90Profile struct {
 	Timing              TimingConstraints
 }
 
+// VR90MappedCommand adds a fixed answer to a preset target. It matches
+// requests with Primary and Secondary and, when set, an exact payload or a
+// payload prefix; setting both is invalid. ResponseData must not be empty
+// and is the answer's data, unchanged. A blank Name defaults to one derived
+// from the command bytes and the command's index. Mapped commands are
+// tried after the identification and scan-identifier rules, so they cannot
+// override them. The constructors copy every slice.
 type VR90MappedCommand struct {
 	Name      string
 	Primary   byte
@@ -59,6 +92,9 @@ type VR90MappedCommand struct {
 	ResponseData  []byte
 }
 
+// DefaultVR90Profile returns the fixture identity and timing of the preset
+// with no address, scan-identifier answers disabled and no mapped commands.
+// Set Address before passing it to NewVR90Target.
 func DefaultVR90Profile() VR90Profile {
 	return VR90Profile{
 		Manufacturer:  DefaultVR90Manufacturer,
@@ -71,6 +107,12 @@ func DefaultVR90Profile() VR90Profile {
 	}
 }
 
+// NewVR90Target normalizes profile as VR90Profile describes and returns a
+// target named after its address with the rules "identify", then the
+// scan-identifier rule when enabled, then one rule per mapped command in
+// order. It fails with ErrInvalidConfiguration for a zero address, invalid
+// timing bounds or an invalid mapped command, and with ErrTimingConstraint
+// when the response delay is outside the timing.
 func NewVR90Target(profile VR90Profile) (*Target, error) {
 	normalized, err := normalizeVR90Profile(profile)
 	if err != nil {
