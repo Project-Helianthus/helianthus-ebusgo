@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Split the blocking START arbitration of the ENH transport into steps and
+  move it, the asynchronous START request and the arbitration and post-grant
+  window helpers to `transport/enh_arbitration.go`. `StartArbitration` now
+  runs the START request write (the write lock is still released right after
+  it), the per-read message handling (RECEIVED only advances the escape
+  decoder, RESETTED still reconnects in place), a pure classifier for
+  STARTED, FAILED and the adapter error answers, and the completion step,
+  which opens the post-grant window only on a grant. The INIT handshake,
+  `Reconnect`, the state reset and the escape and post-grant counter
+  accessors move unchanged to `transport/enh_lifecycle.go`, which brings
+  `transport/enh_transport.go` under 1,000 lines. Each new step has its own
+  test. Behavior is unchanged: lock scopes, the order of connection calls,
+  constants, error texts, sentinels, queued events, counters and the public
+  API stay as they were.
+
 - Share the ENH stream observation between the steady-state read and the
   INFO exchange, and split the INFO exchange out of
   `transport/enh_transport.go`. `transport/enh_stream_observation.go` holds
