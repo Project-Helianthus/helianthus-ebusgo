@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Split the per-byte echo path of the bus into named steps in
+  `protocol/bus_echo.go`: `sendSymbolWithEcho` and `sendRawWithEcho` move out
+  of `protocol/bus.go`, and `sendRawWithEcho` now runs the echo write, the
+  echo read, the three SYN-intrusion guards, the payload-0xAA AUTO-SYN
+  absorption and the value-mismatch classification as separate functions,
+  each with its own unit test. Behavior is unchanged: the transport-call
+  order, the echo-wait phase, error texts, sentinels, observer events,
+  counters and the public API stay as they were.
+
 - Rename the work-item-coded transport capability descriptor to behavior
   names directly, with no alias and no migration step; behavior, wire output
   and build tags are unchanged:
