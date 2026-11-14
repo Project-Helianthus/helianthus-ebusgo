@@ -164,8 +164,10 @@ const (
 	// ObserverLogical is one unescaped byte; Escaped marks a byte that
 	// arrived as an escape pair.
 	ObserverLogical
-	// ObserverClosed is the last event of a transaction: Reason says why it
-	// closed and Lost counts the events the full ring could not hold.
+	// ObserverClosed ends a transaction: Reason says why it closed and Lost
+	// counts the earlier events the full ring could not hold. Like every
+	// event it is best-effort: when the ring is full at close it is dropped
+	// and counted in ObserverDropped, so no terminal event may arrive.
 	ObserverClosed
 )
 
