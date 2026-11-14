@@ -171,6 +171,9 @@ func (key RegistrationKey) matches(other RegistrationKey) bool {
 // has native phase support and independent evidence.
 type FailureAction uint8
 
+// Failure actions. FailureUnspecified and FailureNACK are refused as
+// ErrUnsupported for every failure class; FailureSilence is the only
+// admitted action.
 const (
 	FailureUnspecified FailureAction = iota
 	FailureSilence
@@ -206,6 +209,8 @@ type Registration struct {
 // RegistrationState is the lifecycle of one registration key.
 type RegistrationState uint8
 
+// Registration states. A key is RegistrationAbsent when the registry holds
+// no record for it, and RegistrationActive while it may publish plans.
 const (
 	RegistrationAbsent RegistrationState = iota
 	RegistrationActive
@@ -257,6 +262,8 @@ type WireKey struct {
 // Operation classifies an entry. Only reads can be installed.
 type Operation uint8
 
+// Entry operations. Only OperationRead is installed; any other value is
+// refused as ErrUnsupported.
 const (
 	OperationUnspecified Operation = iota
 	OperationRead
@@ -266,6 +273,10 @@ const (
 // Phase names the native transaction phase an entry may answer in.
 type Phase uint8
 
+// Transaction phases in wire order. Their values are the phase byte of the
+// IPC record envelope, where PhaseEnded is the largest valid value and
+// PhaseNone marks a record without a phase. A plan entry may only answer in
+// PhaseResponse; any other allowed phase is refused as ErrUnsupported.
 const (
 	PhaseNone Phase = iota
 	PhaseRequest
@@ -337,7 +348,11 @@ func (validity PlanValidity) check(now ClockReading) error {
 // SlotState is the ownership of one pool slot. Only the host moves it.
 type SlotState uint8
 
+// Slot states in lifecycle order. Within one incarnation a slot only moves
+// forward, possibly skipping states; a release starts the next incarnation at
+// SlotFree.
 const (
+	// SlotInvalid is reported for an index outside the pool.
 	SlotInvalid SlotState = iota
 	// SlotFree is host-owned, holds nothing and can start a new incarnation.
 	SlotFree
@@ -370,7 +385,9 @@ type SlotCounts struct {
 // a weaker one so a re-delivered notice can only tighten the worker's view.
 type RetireReason uint8
 
+// Retire reasons in ascending strength.
 const (
+	// RetireNone is a slot that has not left publication.
 	RetireNone RetireReason = iota
 	// RetireSuperseded stops new selection; a selected transaction may finish.
 	RetireSuperseded

@@ -55,6 +55,10 @@ const (
 // zero value marks an absent descriptor.
 type LocalGPIOResourceRole uint8
 
+// Resource roles. A GPIO descriptor must carry LocalGPIORoleGPIOControl and a
+// counter descriptor LocalGPIORoleCounter, or admission refuses the profile.
+// The values enter LocalGPIOProfileDigest, so renumbering one invalidates
+// every qualification digest.
 const (
 	LocalGPIORoleNone LocalGPIOResourceRole = iota
 	LocalGPIORoleGPIOControl
@@ -65,6 +69,10 @@ const (
 // uncached access is admitted for GPIO control registers.
 type LocalGPIOOrdering uint8
 
+// Access orderings. LocalGPIOOrderingDevice is the only one admitted, both in
+// the profile and for the mapped window; the others exist so that an unknown
+// or relaxed mapping can be stated and refused. The values enter
+// LocalGPIOProfileDigest.
 const (
 	LocalGPIOOrderingUnknown LocalGPIOOrdering = iota
 	LocalGPIOOrderingRelaxed
@@ -339,7 +347,7 @@ func localGPIORetainWindow(window LocalGPIOWindow, counter LocalGPIOCounterPort)
 	return backend
 }
 
-// LocalGPIOStats returns a snapshot of the bounded counters.
+// Stats returns a snapshot of the bounded counters.
 func (backend *LocalGPIOBackend) Stats() LocalGPIOStats {
 	return backend.stats
 }

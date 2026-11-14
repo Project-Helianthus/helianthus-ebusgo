@@ -111,6 +111,10 @@ func (config ResponderConfig) validate() (uint64, bool) {
 // CloseReason states why a transaction released its wire authority.
 type CloseReason uint8
 
+// Close reasons. CloseNone means no reason to close; every other value ends
+// the selected transaction once and is counted in ResponderStats.Closed.
+// CloseReasonCount is not a reason: it sizes that counter array and must
+// stay last.
 const (
 	CloseNone CloseReason = iota
 	// CloseCompleted: the initiator acknowledged the response.
@@ -152,9 +156,18 @@ const (
 // ObserverKind identifies an observer event.
 type ObserverKind uint8
 
+// Observer event kinds; zero is not a kind.
 const (
+	// ObserverRaw is one raw symbol of the selected transaction, with Echo
+	// set for a symbol the responder drove itself.
 	ObserverRaw ObserverKind = iota + 1
+	// ObserverLogical is one unescaped byte; Escaped marks a byte that
+	// arrived as an escape pair.
 	ObserverLogical
+	// ObserverClosed ends a transaction: Reason says why it closed and Lost
+	// counts the earlier events the full ring could not hold. Like every
+	// event it is best-effort: when the ring is full at close it is dropped
+	// and counted in ObserverDropped, so no terminal event may arrive.
 	ObserverClosed
 )
 
@@ -307,7 +320,7 @@ func (responder *Responder) reading(tick uint64) ClockReading {
 	return ClockReading{Domain: responder.config.ClockDomain, Tick: Tick(tick)}
 }
 
-// ResponderStats returns a snapshot of the counters.
+// Stats returns a snapshot of the counters.
 func (responder *Responder) Stats() ResponderStats {
 	return responder.stats
 }
