@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Split the transaction and retry path of the bus out of `protocol/bus.go`.
+  `protocol/bus_transaction.go` holds the byte reads, the symbol decoder and
+  `sendTransaction`, which now runs the telegram build, the source-inclusion
+  decision, the command phase (send until ACK, with one retransmission after
+  a first NACK that includes the source) and the response phase (length,
+  data and CRC reads, ACK or NACK answer) as separate functions.
+  `protocol/bus_retry.go` holds `sendWithRetries`, the reconnect tier, the
+  retry policy, arbitration, the collision-recovery helpers, `shouldRetry`,
+  `waitForSyn` and the error wrapping; the two copies of the collision
+  backoff and of the adapter-reset delay are one helper each, and the
+  collision-recovery token is still fetched before the retry decision after
+  a failed arbitration and after the retry event after a failed
+  transaction. Each step has its own unit test. Behavior is unchanged: the
+  transport-call order, constants, error texts, sentinels, observer events,
+  counters and the public API stay as they were.
+
 - Split the per-byte echo path of the bus into named steps in
   `protocol/bus_echo.go`: `sendSymbolWithEcho` and `sendRawWithEcho` move out
   of `protocol/bus.go`, and `sendRawWithEcho` now runs the echo write, the
