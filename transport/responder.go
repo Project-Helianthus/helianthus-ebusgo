@@ -2,9 +2,8 @@
 //
 // This file defines the `ResponderTransport` interface, the transport-level
 // capability that a transport must expose to participate in the ebus_standard
-// responder lane per decision doc
-// `helianthus-execution-plans/ebus-standard-l7-services-w16-26.implementing/
-// decisions/m4b2-responder-go-no-go.md` §6.1 (option_go_transport_scoped).
+// responder lane, under the transport-scoped responder decision
+// (option_go_transport_scoped).
 //
 // Capability semantics:
 //   - ENH / ENS transports GO (they expose the raw byte write path and own

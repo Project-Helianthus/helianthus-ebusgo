@@ -115,7 +115,7 @@ func localGPIOTestProfile() LocalGPIOPlatformProfile {
 	profile := LocalGPIOPlatformProfile{
 		ProfileID:     "aa29-synthetic-profile",
 		Family:        "aa29-synthetic-family",
-		Qualification: AA22Proven,
+		Qualification: EvidenceProven,
 		GPIO: LocalGPIODescriptor{
 			Role:          LocalGPIORoleGPIOControl,
 			MapLength:     localGPIOTestLength,
@@ -258,20 +258,20 @@ func TestAA29OpenAdmitsQualifiedProfileAndStartsPassive(t *testing.T) {
 	if fix.backend.armed {
 		t.Fatal("backend starts armed")
 	}
-	want := AA22Capabilities{
-		AA22Kind:                       AA22KindLocalRaw,
-		AA22Encoding:                   AA22EncodingRaw,
-		AA22PhysicalArbitration:        AA22Unknown,
-		AA22AutonomousPreparedResponse: AA22Hypothesis,
-		AA22ObservedEcho:               AA22Hypothesis,
-		AA22CaptureTimestamps:          AA22Hypothesis,
-		AA22QualifiedTiming:            AA22Unknown,
+	want := Capabilities{
+		Kind:                       KindLocalRaw,
+		Encoding:                   EncodingRaw,
+		PhysicalArbitration:        EvidenceUnknown,
+		AutonomousPreparedResponse: EvidenceHypothesis,
+		ObservedEcho:               EvidenceHypothesis,
+		CaptureTimestamps:          EvidenceHypothesis,
+		QualifiedTiming:            EvidenceUnknown,
 	}
-	got := AA22QueryCapabilities(fix.backend)
+	got := QueryCapabilities(fix.backend)
 	if got != want {
 		t.Fatalf("capabilities = %+v, want %+v", got, want)
 	}
-	if got.AA22DeadlineSuitable() {
+	if got.DeadlineSuitable() {
 		t.Fatal("backend claims deadline suitability")
 	}
 }
@@ -284,7 +284,7 @@ func TestAA29OpenRejectsMissingProfileWithoutMapping(t *testing.T) {
 // Catches: accepting Unknown, Hypothesis or an out-of-range evidence value as
 // qualification, even with an internally consistent digest.
 func TestAA29OpenRejectsUnqualifiedProfileWithoutMapping(t *testing.T) {
-	for _, evidence := range []AA22Evidence{AA22Unknown, AA22Hypothesis, AA22Proven + 1} {
+	for _, evidence := range []CapabilityEvidence{EvidenceUnknown, EvidenceHypothesis, EvidenceProven + 1} {
 		profile := localGPIOTestProfile()
 		profile.Qualification = evidence
 		profile = localGPIOSeal(profile)
@@ -356,7 +356,7 @@ func TestAA29QualificationDigestCoversEveryProfileField(t *testing.T) {
 	}{
 		{"ProfileID", true, func(p *LocalGPIOPlatformProfile) { p.ProfileID += "x" }},
 		{"Family", true, func(p *LocalGPIOPlatformProfile) { p.Family += "x" }},
-		{"Qualification", false, func(p *LocalGPIOPlatformProfile) { p.Qualification = AA22Hypothesis }},
+		{"Qualification", false, func(p *LocalGPIOPlatformProfile) { p.Qualification = EvidenceHypothesis }},
 		{"GPIO.Role", false, func(p *LocalGPIOPlatformProfile) { p.GPIO.Role = LocalGPIORoleCounter }},
 		{"GPIO.MapLength", true, func(p *LocalGPIOPlatformProfile) { p.GPIO.MapLength += 4 }},
 		{"GPIO.AccessWidth", false, func(p *LocalGPIOPlatformProfile) { p.GPIO.AccessWidth = 8 }},
@@ -775,7 +775,7 @@ func TestAA29CloseDisarmsUnmapsAndStaysClosed(t *testing.T) {
 	if len(fix.window.loads) != loads || fix.counter.reads != reads || len(fix.window.stores) != 2 {
 		t.Fatal("closed backend touched the window or counter")
 	}
-	if caps := AA22QueryCapabilities(backend); caps != (AA22Capabilities{}) {
+	if caps := QueryCapabilities(backend); caps != (Capabilities{}) {
 		t.Fatalf("closed capabilities = %+v", caps)
 	}
 	if err := backend.arm(localGPIOTestLease(profile)); !errors.Is(err, ErrLocalGPIOClosed) {
@@ -890,7 +890,7 @@ func TestAA29OpenPreservesUnmapFailures(t *testing.T) {
 	mapper := &localGPIOFakeMapper{window: mismatched}
 	counter := &localGPIOFakeCounter{hz: localGPIOTestHz}
 	mismatchBackend, err := OpenLocalGPIO(&profile, mapper, counter)
-	if mismatchBackend == nil || mismatchBackend.AA22TransportCapabilities() != (AA22Capabilities{}) ||
+	if mismatchBackend == nil || mismatchBackend.TransportCapabilities() != (Capabilities{}) ||
 		!errors.Is(err, ErrLocalGPIOResourceMatch) || !errors.Is(err, unmapCause) || mismatched.unmaps != 1 {
 		t.Fatalf("mismatched window with failing unmap = (%v, %v) unmaps=%d", mismatchBackend, err, mismatched.unmaps)
 	}
@@ -919,7 +919,7 @@ func TestAA29OpenPreservesUnmapFailures(t *testing.T) {
 func TestAA29CapabilitiesQueryRacesCloseSafely(t *testing.T) {
 	fix := localGPIOOpenFixture(t, localGPIOTestProfile())
 	backend := fix.backend
-	if backend.AA22TransportCapabilities().AA22Kind != AA22KindLocalRaw {
+	if backend.TransportCapabilities().Kind != KindLocalRaw {
 		t.Fatalf("open backend must report LocalRaw")
 	}
 	var group sync.WaitGroup
@@ -927,14 +927,14 @@ func TestAA29CapabilitiesQueryRacesCloseSafely(t *testing.T) {
 	go func() {
 		defer group.Done()
 		for index := 0; index < 64; index++ {
-			_ = backend.AA22TransportCapabilities()
+			_ = backend.TransportCapabilities()
 		}
 	}()
 	if err := backend.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	group.Wait()
-	if backend.AA22TransportCapabilities() != (AA22Capabilities{}) {
+	if backend.TransportCapabilities() != (Capabilities{}) {
 		t.Fatalf("closed backend must claim nothing")
 	}
 }

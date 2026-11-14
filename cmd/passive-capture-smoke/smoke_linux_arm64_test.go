@@ -218,7 +218,7 @@ func TestAA31ProfileConvertsEveryField(t *testing.T) {
 	wantBase := transport.LocalGPIOPlatformProfile{
 		ProfileID:     "aa31-synthetic-profile",
 		Family:        "aa31-synthetic-family",
-		Qualification: transport.AA22Proven,
+		Qualification: transport.EvidenceProven,
 		GPIO: transport.LocalGPIODescriptor{
 			Role: transport.LocalGPIORoleGPIOControl, MapLength: testLength, AccessWidth: 4,
 			Ordering: transport.LocalGPIOOrderingDevice, RXLevelOffset: testRX, TXSetOffset: 0x20,
@@ -315,7 +315,7 @@ func TestAA31CaptureDecodesWaveformPassively(t *testing.T) {
 func TestAA31CaptureRefusesUnadmittedProfileWithoutMapping(t *testing.T) {
 	cases := map[string]func(*request){
 		"hypothesis": func(r *request) {
-			r.profile.Qualification = transport.AA22Hypothesis
+			r.profile.Qualification = transport.EvidenceHypothesis
 			r.profile.QualificationDigest = transport.LocalGPIOProfileDigest(r.profile)
 		},
 		"stale_digest": func(r *request) { r.profile.MaxLeaseTicks++ },

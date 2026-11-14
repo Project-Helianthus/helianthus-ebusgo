@@ -139,10 +139,10 @@ func TestAA31DecodeProfileRejectsMalformedDocuments(t *testing.T) {
 // Catches: a qualification label mapping onto the wrong evidence level, which
 // would let a hypothesis profile reach admission as proven.
 func TestAA31ParseQualificationMapsOnlyProvenAffirmatively(t *testing.T) {
-	cases := map[string]transport.AA22Evidence{
-		"unknown":    transport.AA22Unknown,
-		"hypothesis": transport.AA22Hypothesis,
-		"proven":     transport.AA22Proven,
+	cases := map[string]transport.CapabilityEvidence{
+		"unknown":    transport.EvidenceUnknown,
+		"hypothesis": transport.EvidenceHypothesis,
+		"proven":     transport.EvidenceProven,
 	}
 	for label, want := range cases {
 		if got, err := ParseQualification(label); err != nil || got != want {
@@ -150,7 +150,7 @@ func TestAA31ParseQualificationMapsOnlyProvenAffirmatively(t *testing.T) {
 		}
 	}
 	for _, label := range []string{"", "PROVEN", "qualified", "proven "} {
-		if got, err := ParseQualification(label); !errors.Is(err, ErrProfile) || got == transport.AA22Proven {
+		if got, err := ParseQualification(label); !errors.Is(err, ErrProfile) || got == transport.EvidenceProven {
 			t.Fatalf("qualification %q = %v, %v", label, got, err)
 		}
 	}

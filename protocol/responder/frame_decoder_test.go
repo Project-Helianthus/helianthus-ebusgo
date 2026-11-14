@@ -1,7 +1,4 @@
 // M4c1 RED — PR-B: FrameDecoder / LocalResponderDispatcher absence.
-//
-// See `helianthus-execution-plans/ebus-standard-l7-services-w16-26.implementing/
-// decisions/m4b2-responder-go-no-go.md` §6.1.
 
 package responder
 

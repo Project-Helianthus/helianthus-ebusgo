@@ -3,9 +3,8 @@
 // final-ACK FSM, and a timing harness measuring received-frame-CRC →
 // responder-ACK-emit latency.
 //
-// M4c1 PR-B: GREEN-phase implementation per decision doc
-// `helianthus-execution-plans/ebus-standard-l7-services-w16-26.implementing/
-// decisions/m4b2-responder-go-no-go.md` §6.1.
+// M4c1 PR-B: GREEN-phase implementation under the transport-scoped
+// responder decision.
 //
 // Scope (PR-B):
 //   - FrameDecoder       — inbound frame parser (header + CRC validation)

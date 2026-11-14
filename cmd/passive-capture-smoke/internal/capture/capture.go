@@ -108,18 +108,18 @@ func DecodeProfile(reader io.Reader) (ProfileDocument, error) {
 	return document, nil
 }
 
-// ParseQualification maps a document qualification label onto AA22
+// ParseQualification maps a document qualification label onto capability
 // evidence. Only "proven" is affirmative; the backend refuses the rest.
-func ParseQualification(label string) (transport.AA22Evidence, error) {
+func ParseQualification(label string) (transport.CapabilityEvidence, error) {
 	switch label {
 	case "unknown":
-		return transport.AA22Unknown, nil
+		return transport.EvidenceUnknown, nil
 	case "hypothesis":
-		return transport.AA22Hypothesis, nil
+		return transport.EvidenceHypothesis, nil
 	case "proven":
-		return transport.AA22Proven, nil
+		return transport.EvidenceProven, nil
 	}
-	return transport.AA22Unknown, fmt.Errorf("%w: unknown qualification %q", ErrProfile, label)
+	return transport.EvidenceUnknown, fmt.Errorf("%w: unknown qualification %q", ErrProfile, label)
 }
 
 // KnownOrdering reports whether a document ordering label is one the local GPIO

@@ -1,8 +1,7 @@
 // M4c1 RED — responder transport primitives.
 //
-// These tests describe the end-state contract for PR-A of M4c1 per decision
-// doc `helianthus-execution-plans/ebus-standard-l7-services-w16-26.implementing/
-// decisions/m4b2-responder-go-no-go.md` §6.1. They are expected to FAIL until
+// These tests describe the end-state contract for PR-A of M4c1 under the
+// transport-scoped responder decision. They are expected to FAIL until
 // the implementation lands (TDD strict — RED before GREEN).
 //
 // The tests are written to COMPILE against the current tree (no missing
