@@ -860,6 +860,11 @@ func TestENHStreamStateTableInfoCleanupPrecedesWriteUnlock(t *testing.T) {
 				go func() {
 					close(waiting)
 					tr.writeMu.Lock()
+					// The cleanup writes these fields; reading them under the
+					// write lock makes any cleanup that runs after the unlock
+					// a data race that the race detector reports whatever the
+					// scheduling, in addition to the state comparison below.
+					_, _ = tr.deferredErr, len(tr.pendingEvents)
 					observed = seen{
 						awaiting:     tr.awaitingStart.Load(),
 						startWindow:  tr.arbitrationDeadline.Load(),
