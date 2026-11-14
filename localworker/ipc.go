@@ -1007,7 +1007,8 @@ const (
 	// FenceDataFull is a worker data lane that had no room for a record.
 	FenceDataFull
 	// FenceControlSaturated is a control lane with no room left outside its
-	// reserved slot.
+	// reserved slot, or a worker whose bounded table of refused plan
+	// references is full when another refusal must be recorded.
 	FenceControlSaturated
 	// FenceControlDeadline is an unread backlog on the endpoint's outgoing
 	// control lane that made no progress for the whole control service budget.

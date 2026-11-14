@@ -134,7 +134,8 @@ const (
 	// EventTXComplete reports that every response symbol was driven and echoed.
 	EventTXComplete
 	// EventLoss replaces events the sink refused; Missed is the total dropped
-	// count. It is offered once per step until the sink accepts it.
+	// count. It is offered again after RX and after TX within a step, so up to
+	// two attempts per step, until the sink accepts it.
 	EventLoss
 )
 
