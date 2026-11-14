@@ -98,30 +98,59 @@ var (
 // LaneKind names the four lanes by their documented descriptor value.
 type LaneKind uint32
 
+// Lane kinds. The values are written into the descriptor table, so they are
+// part of the layout; zero is no lane. Each lane has exactly one producer and
+// accepts only the record kinds listed for it.
 const (
+	// LaneHostControl carries RecordPublish, RecordRevoke and RecordStop from
+	// the host; the worker drains it before every output decision.
 	LaneHostControl LaneKind = iota + 1
+	// LaneWorkerControl carries RecordAcknowledge and RecordGap from the worker.
 	LaneWorkerControl
+	// LaneHostData carries RecordCommand from the host.
 	LaneHostData
+	// LaneWorkerData carries RecordRaw and RecordCompletion from the worker.
 	LaneWorkerData
 )
 
 // RecordKind is the slot envelope kind.
 type RecordKind uint32
 
+// Record kinds as stored in the slot envelope; zero is malformed. A record
+// whose identity, capture, arena, status or direction fields do not match the
+// shape of its kind is refused as ErrRecord.
 const (
+	// RecordPublish offers a plan that lives in the arena at ArenaOffset.
 	RecordPublish RecordKind = iota + 1
+	// RecordRevoke withdraws one exact plan reference.
 	RecordRevoke
+	// RecordAcknowledge states with StatusRetired that the worker no longer
+	// refers to a revoked plan.
 	RecordAcknowledge
+	// RecordGap is the worker's first fence cause; it carries capture fields
+	// and no identity.
 	RecordGap
+	// RecordStop is the host's exact stop for the stream; it also
+	// acknowledges a raised gap.
 	RecordStop
+	// RecordCommand hands one owned command, with token and deadlines, to the
+	// worker.
 	RecordCommand
+	// RecordRaw is one observed raw octet; it carries a full selection or, for
+	// an unselected observation, only its transaction ordinal.
 	RecordRaw
+	// RecordCompletion ends the active command with a status other than
+	// StatusPending.
 	RecordCompletion
 )
 
 // Status is the slot envelope status.
 type Status uint32
 
+// Slot envelope statuses; a value above StatusRetired is malformed. Every
+// record carries StatusPending except RecordAcknowledge, which carries
+// StatusRetired, and RecordCompletion, which carries the status the worker
+// reports and never StatusPending.
 const (
 	StatusPending Status = iota
 	StatusAccepted
@@ -132,6 +161,9 @@ const (
 // Direction is the slot envelope direction.
 type Direction uint8
 
+// Slot envelope directions. Every record except RecordRaw carries
+// DirectionControl; a raw observation is either received or an echo of the
+// worker's own transmission.
 const (
 	DirectionControl Direction = iota
 	DirectionReceive
@@ -967,17 +999,35 @@ func attachLanes(mem []byte, layout *Layout, limits IPCLimits, worker bool) [lan
 // FenceReason states why an endpoint closed output decisions.
 type FenceReason uint8
 
+// Fence reasons. Only the first cause is kept; FenceNone means output
+// decisions are open.
 const (
+	// FenceNone is an open endpoint.
 	FenceNone FenceReason = iota
+	// FenceDataFull is a worker data lane that had no room for a record.
 	FenceDataFull
+	// FenceControlSaturated is a control lane with no room left outside its
+	// reserved slot.
 	FenceControlSaturated
+	// FenceControlDeadline is an unread backlog on the endpoint's outgoing
+	// control lane that made no progress for the whole control service budget.
 	FenceControlDeadline
+	// FenceWorkerGap is a gap record the host consumed from the worker.
 	FenceWorkerGap
+	// FenceDiscontinuity is a capture sequence that repeats or skips an
+	// ordinal the host cannot account for.
 	FenceDiscontinuity
+	// FenceCorruption is a lane index, descriptor or record that failed
+	// validation.
 	FenceCorruption
+	// FenceCounter is a sequence or lane counter that would wrap.
 	FenceCounter
+	// FenceClock is a clock regression, a zero tick or an impossible capture
+	// time.
 	FenceClock
+	// FenceStop is the exact stop for the stream.
 	FenceStop
+	// FenceWorkerTerminated is supervisor proof that the worker process is gone.
 	FenceWorkerTerminated
 )
 

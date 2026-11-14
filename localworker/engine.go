@@ -13,6 +13,9 @@ import (
 	"math/bits"
 )
 
+// Engine timing and capacity constants. The exported rates are nominal
+// model values in bits and samples per second (ten samples per bit); the
+// engine places them on the injected tick counter and qualifies no tolerance.
 const (
 	// NominalBaud and NominalSampleRate are nominal model rates.
 	NominalBaud       uint64 = 2400
@@ -53,6 +56,7 @@ const (
 // Level is a digital bus level. The idle (recessive) level is high.
 type Level uint8
 
+// The two bus levels; LevelLow is the dominant level that drives a start bit.
 const (
 	LevelLow Level = iota
 	LevelHigh
@@ -100,39 +104,83 @@ type EngineConfig struct {
 // EventKind identifies an engine event.
 type EventKind uint8
 
+// Engine event kinds. The zero value is not a kind, so a zero Event is never
+// mistaken for an observation.
 const (
+	// EventRawSymbol is one received character before unescaping; Echo marks a
+	// character the engine itself was driving.
 	EventRawSymbol EventKind = iota + 1
+	// EventLogicalByte is one unescaped byte of the current frame.
 	EventLogicalByte
+	// EventGap reports Missed observations that cannot be reconstructed; the
+	// frame is dropped and admission is withdrawn.
 	EventGap
+	// EventFault carries a Fault in the Fault field.
 	EventFault
+	// EventProvisional reports that the destination matched the responder
+	// address and pinned Generation; nothing is scheduled yet.
 	EventProvisional
+	// EventFrameValid reports a request whose CRC matched.
 	EventFrameValid
+	// EventAdmitted reports a scheduled response for Generation; Deadline is
+	// the absolute tick of its first edge.
 	EventAdmitted
+	// EventTXIntent reports one edge written to the TX port at Tick for the
+	// scheduled Deadline; it is never an observed symbol.
 	EventTXIntent
+	// EventTXRelease reports the single release of a line left low when a
+	// response was aborted.
 	EventTXRelease
+	// EventTXComplete reports that every response symbol was driven and echoed.
 	EventTXComplete
+	// EventLoss replaces events the sink refused; Missed is the total dropped
+	// count. It is offered once per step until the sink accepts it.
 	EventLoss
 )
 
 // Fault classifies an EventFault.
 type Fault uint8
 
+// Engine faults. Framing faults drop the current frame; response faults
+// also resynchronize reception and withdraw admission.
 const (
+	// FaultNone is the zero value carried by every event that is not EventFault.
 	FaultNone Fault = iota
+	// FaultFalseStart is a start bit that read high at its centre.
 	FaultFalseStart
+	// FaultBadStop is a stop bit that read low; reception resynchronizes.
 	FaultBadStop
+	// FaultEscapeInvalid is an escape prefix followed by an undefined suffix.
 	FaultEscapeInvalid
+	// FaultSynInFrame is a SYN inside a frame; it also opens a new frame.
 	FaultSynInFrame
+	// FaultAddressInvalid is an escaped source or destination address, or the
+	// responder address sent by a source that is not an initiator.
 	FaultAddressInvalid
+	// FaultBadCRC is a request whose CRC did not match; the pin is released.
 	FaultBadCRC
+	// FaultTickRegression is a tick counter that moved backwards; it is
+	// reported once per regression.
 	FaultTickRegression
+	// FaultStaleGeneration is an offer whose generation is not newer than the
+	// last accepted one; the offer is ignored.
 	FaultStaleGeneration
+	// FaultRXBeforeResponse is a start bit received while an admitted
+	// response was still waiting for its first edge.
 	FaultRXBeforeResponse
+	// FaultEchoMismatch is an echoed bit that differs from the bit driven.
 	FaultEchoMismatch
+	// FaultEchoMissing is a driven character whose echo did not arrive within
+	// the echo allowance.
 	FaultEchoMissing
+	// FaultEchoUnsolicited is an echoed character beyond those driven so far.
 	FaultEchoUnsolicited
+	// FaultTXLate is an edge due more than the configured tolerance ago, or a
+	// response schedule that does not fit in the tick counter range.
 	FaultTXLate
+	// FaultLengthInvalid is a request data length above the protocol maximum.
 	FaultLengthInvalid
+	// FaultNackExhausted is a second NACK after the single retransmission.
 	FaultNackExhausted
 )
 
@@ -425,7 +473,7 @@ func scheduleFits(reserve, anchor uint64) bool {
 	return anchor <= ^uint64(0)-reserve
 }
 
-// EngineStats returns a snapshot of the bounded counters.
+// Stats returns a snapshot of the bounded counters.
 func (engine *Engine) Stats() EngineStats {
 	return engine.stats
 }
