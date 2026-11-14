@@ -28,7 +28,7 @@
     method `AA22TransportCapabilities` → `TransportCapabilities` (also on
     `LocalGPIOBackend`), `AA22QueryCapabilities` → `QueryCapabilities`,
     method `AA22DeadlineSuitable` → `DeadlineSuitable`;
-  - package comments no longer point at the retired plans repository.
+  - package comments no longer cite external planning documents.
   `scripts/rename_capability_names.py` reproduces the rename.
 
 - Rename the externally visible work-item-coded strings of the local worker,

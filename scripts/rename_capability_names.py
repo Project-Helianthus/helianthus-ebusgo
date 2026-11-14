@@ -4,7 +4,7 @@
 The opt-in transport capability descriptor carried the work-item code AA22 in
 its file names, in every exported identifier, in its struct fields and method
 names, in its import aliases and in its locals. A few package comments still
-pointed at the retired plans repository. This script renames the descriptor to
+cited external planning documents. This script renames the descriptor to
 behavior names, drops those references and changes nothing else:
 
 * transport/aa22_capabilities.go and its test move to
@@ -21,13 +21,13 @@ behavior names, drops those references and changes nothing else:
   work-item tag of test messages goes;
 * the local GPIO backend, the passive-capture smoke command and their tests
   follow the new names;
-* comments that pointed at the retired plans repository describe the decision
+* comments that cited external planning documents describe the decision
   instead or are removed; no code changes in those files;
 * gofmt is applied and one CHANGELOG entry is added.
 
 Behavior, wire output, build tags and every other exported name are unchanged.
-The work-item code guard test that the rename satisfies is part of the test
-file and is carried over unchanged.
+The work-item code guard test that the rename satisfies is not in the
+pre-rename tree; the script adds it (GUARD_PREFIX) to the renamed test file.
 
 It runs offline, needs only Python 3 and gofmt, and refuses to run unless the
 tree is in the pre-rename state. Usage: rename_capability_names.py [ROOT]
@@ -143,6 +143,89 @@ LOCALS = {
     },
 }
 
+GUARD_PREFIX = """import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// workItemCode matches a two-letter work-item code followed by its number at
+// the start of a name or of a word inside it, for example XY12Name, ErrXY12 or
+// xy12_name.go, while plain counts such as Uint32 or arm64 stay accepted.
+var workItemCode = regexp.MustCompile(`(^|[a-z0-9_])[A-Z]{2}[0-9]{2}|(^|_)[a-z]{2}[0-9]{2}`)
+
+// TestNoWorkItemCodeInExportedNamesOrFiles lists every Go file name of the
+// package and every exported name its production files declare (types,
+// functions, methods, constants, variables, struct fields and interface
+// methods, under every build constraint) and fails on a work-item code.
+func TestNoWorkItemCodeInExportedNamesOrFiles(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSet := token.NewFileSet()
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || filepath.Ext(name) != ".go" {
+			continue
+		}
+		if workItemCode.MatchString(name) {
+			t.Errorf("file name %s carries a work-item code", name)
+		}
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fileSet, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			var idents []*ast.Ident
+			switch n := node.(type) {
+			case *ast.FuncDecl:
+				idents = append(idents, n.Name)
+			case *ast.TypeSpec:
+				idents = append(idents, n.Name)
+			case *ast.ValueSpec:
+				idents = append(idents, n.Names...)
+			case *ast.Field:
+				idents = append(idents, n.Names...)
+			}
+			for _, ident := range idents {
+				if !ident.IsExported() {
+					continue
+				}
+				checked++
+				if workItemCode.MatchString(ident.Name) {
+					t.Errorf("exported name %s in %s carries a work-item code", ident.Name, name)
+				}
+			}
+			return true
+		})
+	}
+	if checked == 0 {
+		t.Fatal("no exported name was checked")
+	}
+	for _, accepted := range []string{"Uint32", "IsV31", "local_gpio_linux_arm64.go", "Sum256"} {
+		if workItemCode.MatchString(accepted) {
+			t.Fatalf("%s is not a work-item code", accepted)
+		}
+	}
+	for _, rejected := range []string{"XY12Name", "ErrXY12", "xy12_name.go", "name_xy12.go"} {
+		if !workItemCode.MatchString(rejected) {
+			t.Fatalf("%s carries a work-item code", rejected)
+		}
+	}
+}
+
+"""
+
 # Exact substitutions applied before the identifier rename.
 SOURCE_SUBS = {
     OLD_SOURCE: [
@@ -150,7 +233,7 @@ SOURCE_SUBS = {
         ("only by an AA22CapabilityProvider;", "only by a AA22CapabilityProvider;"),
     ],
     OLD_TEST: [
-        ('\taa22testing "testing"\n', '\t"testing"\n'),
+        ('import aa22testing "testing"\n\n', GUARD_PREFIX),
         ('panic("aa22 query attempted emission")', 'panic("query attempted emission")'),
     ]
     + [
@@ -163,7 +246,7 @@ SOURCE_SUBS = {
 }
 SUB_COUNTS = {(OLD_TEST, 'Fatalf("aa22 '): 6, (OLD_TEST, 'Fatal("aa22 '): 3}
 
-# Comments that pointed at the retired plans repository: (file, pattern,
+# Comments that cited external planning documents: (file, pattern,
 # replacement). Patterns match the quoted document path without spelling it.
 PLAN_PATH = r"`[a-z-]+/[a-z0-9.-]+/\n// [^`]+`"
 COMMENT_SUBS = [
@@ -239,7 +322,7 @@ CHANGELOG_ENTRY = """\
     method `AA22TransportCapabilities` → `TransportCapabilities` (also on
     `LocalGPIOBackend`), `AA22QueryCapabilities` → `QueryCapabilities`,
     method `AA22DeadlineSuitable` → `DeadlineSuitable`;
-  - package comments no longer point at the retired plans repository.
+  - package comments no longer cite external planning documents.
   `scripts/rename_capability_names.py` reproduces the rename.
 
 """
