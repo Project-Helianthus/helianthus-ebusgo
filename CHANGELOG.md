@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Share the ENH stream observation between the steady-state read and the
+  INFO exchange, and split the INFO exchange out of
+  `transport/enh_transport.go`. `transport/enh_stream_observation.go` holds
+  the steady-state fill with its RESETTED and parse-error handling, one
+  RECEIVED, STARTED and FAILED handler each (the arrival filters, escape
+  decode and post-grant window that both read paths carried as identical
+  copies), and the queue and escape-feed helpers. `transport/enh_info.go`
+  holds `RequestInfo`, its failure cleanup, the request write, the batch
+  handling and the INFO payload collector; the failure path still cleans up
+  before it releases the write lock and then the read lock. Each unit has
+  its own test. Behavior is unchanged: lock scopes, the order of connection
+  calls, constants, error texts, sentinels, queued events, counters and the
+  public API stay as they were.
+
 - Split the transaction and retry path of the bus out of `protocol/bus.go`.
   `protocol/bus_transaction.go` holds the byte reads, the symbol decoder and
   `sendTransaction`, which now runs the telegram build, the source-inclusion
