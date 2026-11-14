@@ -142,8 +142,8 @@ const (
 // Fault classifies an EventFault.
 type Fault uint8
 
-// Engine faults. Framing faults drop the current frame; response faults
-// also resynchronize reception and withdraw admission.
+// Engine faults. The effect of each fault on the current frame, reception
+// and admission differs; the comment on each name states what it raises.
 const (
 	// FaultNone is the zero value carried by every event that is not EventFault.
 	FaultNone Fault = iota

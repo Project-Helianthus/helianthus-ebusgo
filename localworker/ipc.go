@@ -999,8 +999,10 @@ func attachLanes(mem []byte, layout *Layout, limits IPCLimits, worker bool) [lan
 // FenceReason states why an endpoint closed output decisions.
 type FenceReason uint8
 
-// Fence reasons. Only the first cause is kept; FenceNone means output
-// decisions are open.
+// Fence reasons. FenceNone means output decisions are open. On the worker
+// side the first cause is kept. On the host a consumed FenceWorkerGap
+// replaces an earlier host cause; any other cause is kept only if the host
+// was still open.
 const (
 	// FenceNone is an open endpoint.
 	FenceNone FenceReason = iota
