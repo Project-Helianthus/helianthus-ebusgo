@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Rename the work-item-coded transport capability descriptor to behavior
+  names directly, with no alias and no migration step; behavior, wire output
+  and build tags are unchanged:
+  - files: `transport/aa22_capabilities.go` → `transport/capability_evidence.go`
+    and `transport/aa22_capabilities_test.go` →
+    `transport/capability_evidence_test.go`;
+  - evidence: `AA22Evidence` → `CapabilityEvidence`, `AA22Unknown` →
+    `EvidenceUnknown`, `AA22Hypothesis` → `EvidenceHypothesis`, `AA22Proven`
+    → `EvidenceProven`;
+  - backend kind: `AA22TransportKind` → `BackendKind`, `AA22KindUnknown` →
+    `KindUnknown`, `AA22KindLocalRaw` → `KindLocalRaw`, `AA22KindENH` →
+    `KindENH`, `AA22KindENS` → `KindENS`, `AA22KindTCP` → `KindTCP`,
+    `AA22KindUDP` → `KindUDP`, `AA22KindEBUSDCommand` → `KindEBUSDCommand`;
+  - stream encoding: `AA22Encoding` (type) → `StreamEncoding`,
+    `AA22EncodingUnknown` → `EncodingUnknown`, `AA22EncodingRaw` →
+    `EncodingRaw`, `AA22EncodingLogical` → `EncodingLogical`;
+  - descriptor: `AA22Capabilities` → `Capabilities` with fields `AA22Kind` →
+    `Kind`, `AA22Encoding` → `Encoding`, `AA22PhysicalArbitration` →
+    `PhysicalArbitration`, `AA22AutonomousPreparedResponse` →
+    `AutonomousPreparedResponse`, `AA22ObservedEcho` → `ObservedEcho`,
+    `AA22CaptureTimestamps` → `CaptureTimestamps`, `AA22QualifiedTiming` →
+    `QualifiedTiming`;
+  - provider and queries: `AA22CapabilityProvider` → `CapabilityProvider`,
+    method `AA22TransportCapabilities` → `TransportCapabilities` (also on
+    `LocalGPIOBackend`), `AA22QueryCapabilities` → `QueryCapabilities`,
+    method `AA22DeadlineSuitable` → `DeadlineSuitable`;
+  - package comments no longer cite external planning documents.
+  `scripts/rename_capability_names.py` reproduces the rename.
+
 - Rename the externally visible work-item-coded strings of the local worker,
   the local GPIO transport and the passive-capture smoke command directly,
   with no alias, no dual acceptance and no migration step:

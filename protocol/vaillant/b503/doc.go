@@ -1,9 +1,7 @@
-// Package b503 is the M1_DECODER deliverable for cruise-run
-// Project-Helianthus/helianthus-execution-plans#19 (plan
-// vaillant-b503-namespace-w17-26, canonical SHA 896a82e7).
+// Package b503 decodes and encodes the Vaillant B503 error and
+// service-message namespace.
 //
-// Scope and design are locked by decisions AD01..AD05 in
-// `helianthus-execution-plans/vaillant-b503-namespace-w17-26.locked/10-scope-decisions.md`:
+// Scope and design are locked by decisions AD01..AD05:
 //
 //   - AD01: this package is a parallel top-level namespace under
 //     `protocol/vaillant/b503`; it does not share code with
@@ -27,8 +25,4 @@
 // here lives in helianthus-docs-ebus:
 //
 //	protocols/vaillant/ebus-vaillant-b503.md
-//
-// Canonical plan SHA-256:
-//
-//	896a82e720b33eefb449ea532570e0a962bfa76504519996825f13d92ec9bb28
 package b503

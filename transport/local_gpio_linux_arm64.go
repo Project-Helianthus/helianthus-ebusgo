@@ -95,13 +95,13 @@ type LocalGPIOCounterDescriptor struct {
 }
 
 // LocalGPIOPlatformProfile is owner-provisioned. Qualification must be
-// AA22Proven and QualificationDigest must equal LocalGPIOProfileDigest of the
+// EvidenceProven and QualificationDigest must equal LocalGPIOProfileDigest of the
 // same profile, so a qualification record covers exactly these contents. The
 // profile qualifies the resource description only; it is not a timing claim.
 type LocalGPIOPlatformProfile struct {
 	ProfileID           string
 	Family              string
-	Qualification       AA22Evidence
+	Qualification       CapabilityEvidence
 	QualificationDigest [sha256.Size]byte
 	GPIO                LocalGPIODescriptor
 	Counter             LocalGPIOCounterDescriptor
@@ -241,7 +241,7 @@ func localGPIOAdmit(profile *LocalGPIOPlatformProfile) ([sha256.Size]byte, error
 	if profile == nil {
 		return [sha256.Size]byte{}, ErrLocalGPIOProfileMissing
 	}
-	if profile.Qualification != AA22Proven {
+	if profile.Qualification != EvidenceProven {
 		return [sha256.Size]byte{}, ErrLocalGPIOUnqualified
 	}
 	digest := LocalGPIOProfileDigest(*profile)
@@ -344,22 +344,22 @@ func (backend *LocalGPIOBackend) Stats() LocalGPIOStats {
 	return backend.stats
 }
 
-// AA22TransportCapabilities reports a local raw backend. Arbitration and
+// TransportCapabilities reports a local raw backend. Arbitration and
 // qualified timing stay Unknown; the remaining claims are Hypothesis, because
 // profile admission qualifies resources, not wire behavior. A closed backend
 // claims nothing.
-func (backend *LocalGPIOBackend) AA22TransportCapabilities() AA22Capabilities {
+func (backend *LocalGPIOBackend) TransportCapabilities() Capabilities {
 	if backend.closed.Load() {
-		return AA22Capabilities{}
+		return Capabilities{}
 	}
-	return AA22Capabilities{
-		AA22Kind:                       AA22KindLocalRaw,
-		AA22Encoding:                   AA22EncodingRaw,
-		AA22PhysicalArbitration:        AA22Unknown,
-		AA22AutonomousPreparedResponse: AA22Hypothesis,
-		AA22ObservedEcho:               AA22Hypothesis,
-		AA22CaptureTimestamps:          AA22Hypothesis,
-		AA22QualifiedTiming:            AA22Unknown,
+	return Capabilities{
+		Kind:                       KindLocalRaw,
+		Encoding:                   EncodingRaw,
+		PhysicalArbitration:        EvidenceUnknown,
+		AutonomousPreparedResponse: EvidenceHypothesis,
+		ObservedEcho:               EvidenceHypothesis,
+		CaptureTimestamps:          EvidenceHypothesis,
+		QualifiedTiming:            EvidenceUnknown,
 	}
 }
 
