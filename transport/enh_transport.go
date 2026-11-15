@@ -307,6 +307,14 @@ func (t *ENHTransport) ArbitrationSendsSource() bool {
 	return t.arbitrationSendsSource
 }
 
+// ReadByte returns the next logical bus byte with escaping already removed.
+// Non-byte stream events (arbitration started or failed) are discarded; use
+// ReadEvent to observe them. On a reconnecting transport (created with
+// WithDialFunc) each adapter reset is reported once as ErrAdapterReset; in
+// adapter-direct mode a reset is queued as StreamEventReset and observable
+// only through ReadEvent, so ReadByte skips it. A read that exceeds the read
+// timeout wraps ErrTimeout, and a closed or failed connection wraps
+// ErrTransportClosed. Concurrent calls are serialized.
 func (t *ENHTransport) ReadByte() (byte, error) {
 	b, _, err := t.readByteAndFlag()
 	return b, err
