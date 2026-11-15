@@ -21,11 +21,23 @@ var (
 	errCommandAckLoopExhausted = fmt.Errorf("command ack loop exited without ack: %w", ebuserrors.ErrTimeout)
 )
 
+// RetryPolicy bounds how often Bus.Send repeats one request after a retryable
+// failure. TimeoutRetries is the budget shared by collision, adapter-reset and
+// CRC-mismatch failures (collisions under a context deadline are bounded by
+// the deadline instead); a plain timeout is never retried because no device
+// answered. NACKRetries is the budget for negative acknowledgements. Both
+// budgets count extra attempts, so zero means one attempt only, and both are
+// reset after a successful transport reconnect.
 type RetryPolicy struct {
 	TimeoutRetries int
 	NACKRetries    int
 }
 
+// BusConfig configures a Bus. InitiatorTarget and InitiatorInitiator select
+// the RetryPolicy by frame type; any other frame type gets a zero policy.
+// Observer, when non-nil, is called synchronously from the bus run loop under
+// the BusObserver contract. NewBus copies the value, so later changes to the
+// caller's BusConfig do not affect a running Bus.
 type BusConfig struct {
 	InitiatorTarget    RetryPolicy
 	InitiatorInitiator RetryPolicy
@@ -41,6 +53,9 @@ type BusConfig struct {
 	ReconnectDelay time.Duration
 }
 
+// DefaultBusConfig returns the configuration NewBus callers start from: one
+// NACK retry and no timeout-class retries for both addressed frame types, up
+// to 3 reconnect attempts 2s apart, and no observer.
 func DefaultBusConfig() BusConfig {
 	return BusConfig{
 		InitiatorTarget: RetryPolicy{
