@@ -18,18 +18,18 @@
 
 Those belong in:
 - `helianthus-ebusreg` (registry/provider layer),
-- `helianthus-ebusgateway` (gateway runtime and live-bus smoke path).
+- `helianthus-gateway` (gateway runtime and live-bus smoke path).
 
 ## Status and maturity
 
 - **Maturity:** active foundation library with stable core test coverage and ongoing incremental feature work.
 - **Current posture:** suitable for contributor onboarding, protocol experimentation, and CI-validated low-level changes.
-- **Operational note:** this repo focuses on deterministic library/runtime behavior; live-bus rollout validation is performed in `helianthus-ebusgateway`.
+- **Operational note:** this repo focuses on deterministic library/runtime behavior; live-bus rollout validation is performed in `helianthus-gateway`.
 
 ## How this fits in the Helianthus chain
 
 ```text
-helianthus-ebusgo  ->  helianthus-ebusreg  ->  helianthus-ebusgateway  ->  integrations/add-ons
+helianthus-ebusgo  ->  helianthus-ebusreg  ->  helianthus-gateway  ->  integrations/add-ons
  (transport+bus)       (registry+schemas)      (runtime/API/smoke)
 ```
 

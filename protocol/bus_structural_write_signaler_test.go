@@ -25,7 +25,7 @@ import (
 //
 // These tests pin the bus-side behavior. The gateway-side consumer of
 // the signal (echo_tracker.go's expected-escape provenance) lives in
-// helianthus-ebusgateway and is tested separately there.
+// helianthus-gateway and is tested separately there.
 
 // signalerTestTransport implements RawTransport, EscapeAware,
 // EscapeFlaggedReader, AND StructuralWriteSignaler. It records every
