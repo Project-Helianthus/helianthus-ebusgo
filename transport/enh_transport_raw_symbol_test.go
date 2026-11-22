@@ -11,7 +11,7 @@ import (
 	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
 )
 
-// Issue helianthus-ebusgateway#1003: a proxy that forwards the ENH symbol
+// Issue helianthus-gateway#1003: a proxy that forwards the ENH symbol
 // stream to downstream ENH clients needs every observed RECEIVED symbol in
 // order, and an escape lead before its suffix exists. These tests drive a
 // real ENHTransport over net.Pipe and write each adapter chunk only after the

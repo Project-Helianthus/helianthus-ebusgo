@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Issue helianthus-ebusgateway#1003: under raw capture a control event at
+// Issue helianthus-gateway#1003: under raw capture a control event at
 // the queue bound evicts the oldest raw item together with the logical item
 // it completed, so a later reader never pairs a raw symbol with an unrelated
 // logical item.

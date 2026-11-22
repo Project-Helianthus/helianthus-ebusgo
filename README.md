@@ -18,18 +18,18 @@
 
 Those belong in:
 - `helianthus-ebusreg` (registry/provider layer),
-- `helianthus-ebusgateway` (gateway runtime and live-bus smoke path).
+- `helianthus-gateway` (gateway runtime and live-bus smoke path).
 
 ## Status and maturity
 
 - **Maturity:** active foundation library with stable core test coverage and ongoing incremental feature work.
 - **Current posture:** suitable for contributor onboarding, protocol experimentation, and CI-validated low-level changes.
-- **Operational note:** this repo focuses on deterministic library/runtime behavior; live-bus rollout validation is performed in `helianthus-ebusgateway`.
+- **Operational note:** this repo focuses on deterministic library/runtime behavior; live-bus rollout validation is performed in `helianthus-gateway`.
 
 ## How this fits in the Helianthus chain
 
 ```text
-helianthus-ebusgo  ->  helianthus-ebusreg  ->  helianthus-ebusgateway  ->  integrations/add-ons
+helianthus-ebusgo  ->  helianthus-ebusreg  ->  helianthus-gateway  ->  integrations/add-ons
  (transport+bus)       (registry+schemas)      (runtime/API/smoke)
 ```
 
@@ -38,7 +38,7 @@ helianthus-ebusgo  ->  helianthus-ebusreg  ->  helianthus-ebusgateway  ->  integ
 ### 1) Clone and baseline checks
 
 ```bash
-git clone https://github.com/d3vi1/helianthus-ebusgo.git
+git clone https://github.com/Project-Helianthus/helianthus-ebusgo.git
 cd helianthus-ebusgo
 go test ./...
 go vet ./...
@@ -176,10 +176,10 @@ such measurements. The gateway owns Prometheus names, rendering and wiring.
 
 ### Key protocol docs
 
-- eBUS overview: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
-- ENH framing: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
-- ENS framing: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
-- ebusd TCP behavior: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
+- eBUS overview: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
+- ENH framing: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh.md
+- ENS framing: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ens.md
+- ebusd TCP behavior: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
 
 ### Local project pointers
 
@@ -193,4 +193,4 @@ such measurements. The gateway owns Prometheus names, rendering and wiring.
 - Keep PR scope aligned to issue acceptance criteria.
 - Include closing keyword in PR body (example: `Fixes #72`).
 - Track roadmap, bugs, and enhancements in GitHub Issues:
-  - https://github.com/d3vi1/helianthus-ebusgo/issues
+  - https://github.com/Project-Helianthus/helianthus-ebusgo/issues
