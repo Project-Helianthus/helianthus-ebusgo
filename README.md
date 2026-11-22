@@ -38,7 +38,7 @@ helianthus-ebusgo  ->  helianthus-ebusreg  ->  helianthus-gateway  ->  integrati
 ### 1) Clone and baseline checks
 
 ```bash
-git clone https://github.com/d3vi1/helianthus-ebusgo.git
+git clone https://github.com/Project-Helianthus/helianthus-ebusgo.git
 cd helianthus-ebusgo
 go test ./...
 go vet ./...
@@ -176,10 +176,10 @@ such measurements. The gateway owns Prometheus names, rendering and wiring.
 
 ### Key protocol docs
 
-- eBUS overview: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
-- ENH framing: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/enh.md
-- ENS framing: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ens.md
-- ebusd TCP behavior: https://github.com/d3vi1/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
+- eBUS overview: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebus-overview.md
+- ENH framing: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/enh.md
+- ENS framing: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ens.md
+- ebusd TCP behavior: https://github.com/Project-Helianthus/helianthus-docs-ebus/blob/main/protocols/ebusd-tcp.md
 
 ### Local project pointers
 
@@ -193,4 +193,4 @@ such measurements. The gateway owns Prometheus names, rendering and wiring.
 - Keep PR scope aligned to issue acceptance criteria.
 - Include closing keyword in PR body (example: `Fixes #72`).
 - Track roadmap, bugs, and enhancements in GitHub Issues:
-  - https://github.com/d3vi1/helianthus-ebusgo/issues
+  - https://github.com/Project-Helianthus/helianthus-ebusgo/issues
