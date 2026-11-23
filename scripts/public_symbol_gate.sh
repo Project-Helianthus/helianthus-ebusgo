@@ -27,6 +27,20 @@ type goPackage struct {
 	ImportPath string
 	Dir        string
 	GoFiles    []string
+	Imports    []string
+}
+
+// vendorNeutralRoots are the directories whose packages must not import a driver, SemReg, host or vendor package.
+var vendorNeutralRoots = []string{"adaptermux", "engine", "localworker", "protocol/responder", "transport"}
+
+// forbiddenImportPrefixes are import paths that a vendor-neutral transport package must not use.
+var forbiddenImportPrefixes = []string{
+	"github.com/Project-Helianthus/helianthus-ebusreg",
+	"github.com/Project-Helianthus/helianthus-semreg",
+	"github.com/Project-Helianthus/helianthus-ebusgateway",
+	"github.com/Project-Helianthus/helianthus-gateway",
+	"github.com/Project-Helianthus/helianthus-matter-binding",
+	"github.com/Project-Helianthus/helianthus-ebusgo/protocol/vaillant",
 }
 
 type publicSymbol struct {
@@ -40,6 +54,11 @@ func main() {
 	packages, err := listPackages()
 	if err != nil {
 		fatalf("public symbol gate: %v", err)
+	}
+
+	if err := checkVendorNeutralImports(packages); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	symbols, err := collectPublicSymbols(packages)
@@ -72,6 +91,56 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func checkVendorNeutralImports(packages []goPackage) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("public symbol gate: %v", err)
+	}
+	for _, pkg := range packages {
+		rel, err := filepath.Rel(cwd, pkg.Dir)
+		if err != nil {
+			return fmt.Errorf("public symbol gate: %v", err)
+		}
+		rel = filepath.ToSlash(rel)
+		if !inVendorNeutralRoot(rel) {
+			continue
+		}
+		for _, imp := range pkg.Imports {
+			if isForbiddenImport(imp) {
+				return fmt.Errorf("public symbol gate: vendor-neutral path imports %s (%s)", imp, pkg.ImportPath)
+			}
+		}
+	}
+	return nil
+}
+
+func inVendorNeutralRoot(rel string) bool {
+	for _, root := range vendorNeutralRoots {
+		if rel == root || strings.HasPrefix(rel, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func isForbiddenImport(imp string) bool {
+	for _, prefix := range forbiddenImportPrefixes {
+		if strings.HasPrefix(imp, prefix) {
+			return true
+		}
+	}
+	// Any other helianthus-*reg registry module.
+	const modulePrefix = "github.com/Project-Helianthus/helianthus-"
+	if !strings.HasPrefix(imp, modulePrefix) {
+		return false
+	}
+	module := strings.TrimPrefix(imp, modulePrefix)
+	if idx := strings.IndexByte(module, '/'); idx >= 0 {
+		module = module[:idx]
+	}
+	return strings.HasSuffix(module, "reg")
 }
 
 func listPackages() ([]goPackage, error) {
