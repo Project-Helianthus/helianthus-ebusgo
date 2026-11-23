@@ -2,12 +2,146 @@ package scripts
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// copyRepositoryForGate copies the repository working tree, without VCS metadata or scratch output.
+func copyRepositoryForGate(t *testing.T, dst string) {
+	t.Helper()
+	src, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		top := strings.SplitN(rel, string(filepath.Separator), 2)[0]
+		if top == ".git" || top == ".tmp" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runPublicSymbolGate(t *testing.T, root string) (string, int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "scripts/public_symbol_gate.sh")
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("public symbol gate timed out: %v; output: %s", ctx.Err(), output)
+	}
+	if err == nil {
+		return string(output), 0
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("public symbol gate: %v; output: %s", err, output)
+	}
+	return string(output), exitErr.ExitCode()
+}
+
+func TestPublicSymbolGateVendorNeutralImports(t *testing.T) {
+	const module = "github.com/Project-Helianthus/helianthus-ebusgo"
+	const forbidden = module + "/protocol/vaillant/b503"
+	const probe = module + "/engine/probe"
+	want := "public symbol gate: vendor-neutral path imports " + forbidden + " (" + probe + ")"
+
+	clean := t.TempDir()
+	copyRepositoryForGate(t, clean)
+	if output, status := runPublicSymbolGate(t, clean); status != 0 {
+		t.Fatalf("unmodified copy: exit %d, want 0; output: %s", status, output)
+	}
+
+	probed := t.TempDir()
+	copyRepositoryForGate(t, probed)
+	if err := os.MkdirAll(filepath.Join(probed, "engine", "probe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := "package probe\n\nimport _ \"" + forbidden + "\"\n"
+	if err := os.WriteFile(filepath.Join(probed, "engine", "probe", "probe.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, status := runPublicSymbolGate(t, probed)
+	if status != 1 {
+		t.Fatalf("probed copy: exit %d, want 1; output: %s", status, output)
+	}
+	if !strings.Contains(output, want) {
+		t.Fatalf("probed copy output %q does not contain %q", output, want)
+	}
+
+	// A production file excluded by build constraints must still be checked: go list omits its imports.
+	constrained := t.TempDir()
+	copyRepositoryForGate(t, constrained)
+	const constrainedSource = "//go:build local_gpio\n\npackage transport\n\nimport _ \"" + forbidden + "\"\n"
+	if err := os.WriteFile(filepath.Join(constrained, "transport", "probe_local_gpio.go"), []byte(constrainedSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, status = runPublicSymbolGate(t, constrained)
+	wantConstrained := "public symbol gate: vendor-neutral path imports " + forbidden + " (" + module + "/transport)"
+	if status != 1 {
+		t.Fatalf("build-constrained probe: exit %d, want 1; output: %s", status, output)
+	}
+	if !strings.Contains(output, wantConstrained) {
+		t.Fatalf("build-constrained probe output %q does not contain %q", output, wantConstrained)
+	}
+
+	// A package whose every production file is excluded by build constraints is omitted by go list entirely.
+	allConstrained := t.TempDir()
+	copyRepositoryForGate(t, allConstrained)
+	if err := os.MkdirAll(filepath.Join(allConstrained, "engine", "gpioprobe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const gpioSource = "//go:build local_gpio\n\npackage gpioprobe\n\nimport _ \"" + forbidden + "\"\n"
+	if err := os.WriteFile(filepath.Join(allConstrained, "engine", "gpioprobe", "probe.go"), []byte(gpioSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, status = runPublicSymbolGate(t, allConstrained)
+	wantAllConstrained := "public symbol gate: vendor-neutral path imports " + forbidden + " (" + module + "/engine/gpioprobe)"
+	if status != 1 {
+		t.Fatalf("fully build-constrained probe: exit %d, want 1; output: %s", status, output)
+	}
+	if !strings.Contains(output, wantAllConstrained) {
+		t.Fatalf("fully build-constrained probe output %q does not contain %q", output, wantAllConstrained)
+	}
+}
 
 func q03ClassificationBlock(t *testing.T) string {
 	t.Helper()
@@ -67,6 +201,12 @@ func TestQ03FilenameBoundary(t *testing.T) {
 		{"latest_before_readme", "transport/latest.go\nREADME.md", "1"},
 		{"both_with_readme", "README.md\ntransport/latest.go\nprotocol/contest.go", "1"},
 		{"unrelated_only", "README.md\nscripts/unrelated.sh", "0"},
+		{"transport_engine_cache", "transport/engine_cache.go", "0"},
+		{"transport_responder_timing", "transport/responder_timing.go", "0"},
+		{"protocol_responder_frame", "protocol/responder/frame.go", "0"},
+		{"adaptermux_mux", "adaptermux/mux.go", "0"},
+		{"engine_scheduler", "engine/scheduler.go", "0"},
+		{"engine_cache_with_latest", "transport/engine_cache.go\ntransport/latest.go", "1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
