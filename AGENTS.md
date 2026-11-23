@@ -15,7 +15,7 @@ Public protocol references:
 
 - One focused issue and one PR at a time. Branches use `issue/<number>-<slug>` and start from a clean `origin/main` worktree.
 - Preserve public API and framing compatibility unless the issue explicitly changes them. Partial failures must not cause callers to discard valid state they still own.
-- Run `./scripts/ci_local.sh` before pushing. For a transport or protocol-code change, provide the applicable T01..T88 transport-matrix result; unexpected fail or xpass blocks the PR unless the owner records an override reason.
+- Run `./scripts/ci_local.sh` before pushing. For a transport or protocol-code change, record the applicable T01..T88 adapter-matrix result, including not-run, failed or unexpected outcomes. Board decision D23 (2026-11-21, [issue #247](https://github.com/Project-Helianthus/helianthus-ebusgo/issues/247)) says "the adapter matrix is a recorded level, never a merge condition." Unrelated CI validation failures still block.
 - Review the exact PR HEAD in a fresh context. Fix valid P0-P2 findings and re-review the new HEAD; P3-P4 are triaged without blocking.
 - Use squash merge only after CI and fresh exact-HEAD review are clear. Verify remote `main` and stop at the requested boundary.
 - Stop for explicit action-time confirmation before credential handling, real installation writes, live-device mutation, or destructive/irreversible operations.
