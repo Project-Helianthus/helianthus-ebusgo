@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -27,7 +28,9 @@ type goPackage struct {
 	ImportPath string
 	Dir        string
 	GoFiles    []string
-	Imports    []string
+	// IgnoredGoFiles are excluded by build constraints, so go list omits their imports from Imports.
+	IgnoredGoFiles []string
+	Imports        []string
 }
 
 // vendorNeutralRoots are the directories whose packages must not import a driver, SemReg, host or vendor package.
@@ -112,8 +115,39 @@ func checkVendorNeutralImports(packages []goPackage) error {
 				return fmt.Errorf("public symbol gate: vendor-neutral path imports %s (%s)", imp, pkg.ImportPath)
 			}
 		}
+		for _, name := range pkg.IgnoredGoFiles {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			imports, err := fileImports(filepath.Join(pkg.Dir, name))
+			if err != nil {
+				return fmt.Errorf("public symbol gate: %v", err)
+			}
+			for _, imp := range imports {
+				if isForbiddenImport(imp) {
+					return fmt.Errorf("public symbol gate: vendor-neutral path imports %s (%s)", imp, pkg.ImportPath)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+// fileImports returns the import paths of one Go file, including files excluded by build constraints.
+func fileImports(path string) ([]string, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var imports []string
+	for _, spec := range file.Imports {
+		imp, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		imports = append(imports, imp)
+	}
+	return imports, nil
 }
 
 func inVendorNeutralRoot(rel string) bool {
