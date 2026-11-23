@@ -12,11 +12,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,7 +132,56 @@ func checkVendorNeutralImports(packages []goPackage) error {
 			}
 		}
 	}
+	return checkVendorNeutralFiles(cwd)
+}
+
+// checkVendorNeutralFiles checks every production file under the vendor-neutral roots, independently of the
+// package list: go list omits a package whose files are all excluded by build constraints.
+func checkVendorNeutralFiles(cwd string) error {
+	modulePath, err := currentModulePath()
+	if err != nil {
+		return err
+	}
+	for _, root := range vendorNeutralRoots {
+		err := filepath.WalkDir(filepath.Join(cwd, filepath.FromSlash(root)), func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			imports, err := fileImports(path)
+			if err != nil {
+				return err
+			}
+			dir, err := filepath.Rel(cwd, filepath.Dir(path))
+			if err != nil {
+				return err
+			}
+			pkgPath := modulePath + "/" + filepath.ToSlash(dir)
+			for _, imp := range imports {
+				if isForbiddenImport(imp) {
+					return fmt.Errorf("public symbol gate: vendor-neutral path imports %s (%s)", imp, pkgPath)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("public symbol gate: %v", err)
+		}
+	}
 	return nil
+}
+
+func currentModulePath() (string, error) {
+	out, err := exec.Command("go", "list", "-m").Output()
+	if err != nil {
+		return "", fmt.Errorf("public symbol gate: go list -m failed: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // fileImports returns the import paths of one Go file, including files excluded by build constraints.

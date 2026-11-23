@@ -122,6 +122,25 @@ func TestPublicSymbolGateVendorNeutralImports(t *testing.T) {
 	if !strings.Contains(output, wantConstrained) {
 		t.Fatalf("build-constrained probe output %q does not contain %q", output, wantConstrained)
 	}
+
+	// A package whose every production file is excluded by build constraints is omitted by go list entirely.
+	allConstrained := t.TempDir()
+	copyRepositoryForGate(t, allConstrained)
+	if err := os.MkdirAll(filepath.Join(allConstrained, "engine", "gpioprobe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const gpioSource = "//go:build local_gpio\n\npackage gpioprobe\n\nimport _ \"" + forbidden + "\"\n"
+	if err := os.WriteFile(filepath.Join(allConstrained, "engine", "gpioprobe", "probe.go"), []byte(gpioSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, status = runPublicSymbolGate(t, allConstrained)
+	wantAllConstrained := "public symbol gate: vendor-neutral path imports " + forbidden + " (" + module + "/engine/gpioprobe)"
+	if status != 1 {
+		t.Fatalf("fully build-constrained probe: exit %d, want 1; output: %s", status, output)
+	}
+	if !strings.Contains(output, wantAllConstrained) {
+		t.Fatalf("fully build-constrained probe output %q does not contain %q", output, wantAllConstrained)
+	}
 }
 
 func q03ClassificationBlock(t *testing.T) string {
