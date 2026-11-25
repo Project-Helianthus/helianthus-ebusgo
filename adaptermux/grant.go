@@ -611,10 +611,49 @@ func failedStartResult(d startWriteDecision, initiator byte, err error) startRes
 	return startResult{granted: false, initiator: initiator, err: err}
 }
 
+// noteBidHandedToGrant records that this grant step's RequestStart has
+// returned. The blocking StartArbitration path does not call it.
+func (m *Mux) noteBidHandedToGrant(g *grantAttempt) {
+	if g == nil || g.req == nil {
+		return
+	}
+	m.handoffMu.Lock()
+	if m.handedReq == nil {
+		m.handedReq = make(map[uint64]*startRequest)
+	}
+	m.handedReq[g.sessionID] = g.req
+	m.handoffMu.Unlock()
+}
+
+// clearBidHandoff drops a session's hand-off. A later bid is not in flight
+// until its own RequestStart returns.
+func (m *Mux) clearBidHandoff(sessionID uint64) {
+	m.handoffMu.Lock()
+	delete(m.handedReq, sessionID)
+	m.handoffMu.Unlock()
+}
+
+// BidHandedToGrant reports whether the grant step whose snapshot included
+// this session's START has returned from RequestStart, and that START is
+// still the in-flight bid. It releases stateMu before taking handoffMu.
+func (m *Mux) BidHandedToGrant(sessionID uint64) bool {
+	m.stateMu.Lock()
+	var pending *startRequest
+	if m.pendingStart != nil {
+		pending = m.pendingStart.req
+	}
+	m.stateMu.Unlock()
+	m.handoffMu.Lock()
+	stored := m.handedReq[sessionID]
+	m.handoffMu.Unlock()
+	return stored != nil && pending == stored
+}
+
 // requestGrantStart writes the START through the non-blocking RequestStart.
 func (m *Mux) requestGrantStart(g *grantAttempt, requester arbitrationRequester) {
 	m.logger.Printf("adaptermux: RequestStart(0x%02X) sent for session %d", g.initiator, g.sessionID)
 	err := requester.RequestStart(g.initiator)
+	m.noteBidHandedToGrant(g)
 	if err == nil {
 		m.settleLocalLosses(g, nil)
 		return

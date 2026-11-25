@@ -181,6 +181,11 @@ type session struct {
 
 	// wg waits for reader, writer, and handleStart goroutines to finish.
 	wg sync.WaitGroup
+
+	// extHold is the first byte of a mux session-extension command
+	// whose second byte has not arrived. Read only on readLoop.
+	extHold    byte
+	extHolding bool
 }
 
 // rawTCPDiagnosticThreshold is the number of consecutive SEND-rejections
@@ -228,13 +233,18 @@ type sessionFrame struct {
 type sessionFrameKind uint8
 
 const (
-	sessionFrameReceived  sessionFrameKind = iota // ENHResReceived(byte)
-	sessionFrameStarted                           // ENHResStarted
-	sessionFrameFailed                            // ENHResFailed
-	sessionFrameResetted                          // ENHResResetted
-	sessionFrameErrorEBUS                         // ENHResErrorEBUS
-	sessionFrameErrorHost                         // ENHResErrorHost
-	sessionFrameInfo                              // ENHResInfo(byte)
+	sessionFrameReceived    sessionFrameKind = iota // ENHResReceived(byte)
+	sessionFrameStarted                             // ENHResStarted
+	sessionFrameFailed                              // ENHResFailed
+	sessionFrameResetted                            // ENHResResetted
+	sessionFrameErrorEBUS                           // ENHResErrorEBUS
+	sessionFrameErrorHost                           // ENHResErrorHost
+	sessionFrameInfo                                // ENHResInfo(byte)
+	sessionFrameTargeted                            // TARGETED
+	sessionFrameUntargeted                          // UNTARGETED
+	sessionFrameSlot                                // SLOT
+	sessionFrameSlotEnd                             // SLOT_END
+	sessionFrameTargetError                         // TARGET_ERROR
 )
 
 // AddSession registers an external TCP connection as an ENH session.
@@ -352,6 +362,9 @@ func (m *Mux) RemoveSession(id uint64) {
 	m.sessionPacers.Delete(id)
 
 	if ok {
+		if m.responder != nil {
+			m.responder.dropSession(id)
+		}
 		m.releaseSessionGrant(sess)
 		m.arb.cancelStart(id)
 		m.cancelPendingStart(id)
@@ -497,13 +510,35 @@ func (s *session) readLoop() {
 		// AM23: reset parser if arbitration completed (enh.md:128).
 		if s.parserResetNeeded.CompareAndSwap(true, false) {
 			parser.Reset()
+			s.extHold = 0
+			s.extHolding = false
 		}
 
-		messages, parseErr := parser.Parse(buf[:n])
+		frames, rest, hold, holding, bad := peelSessionExtension(buf[:n], s.extHold, s.extHolding)
+		s.extHold, s.extHolding = hold, holding
+		if bad {
+			s.deliverErrorHost()
+			parser.Reset()
+			s.extHold = 0
+			s.extHolding = false
+			continue
+		}
+		if s.mux.responder != nil {
+			for _, fr := range frames {
+				s.mux.responder.command(s, fr.cmd, fr.data)
+			}
+		}
+		if len(rest) == 0 {
+			continue
+		}
+
+		messages, parseErr := parser.Parse(rest)
 		if parseErr != nil {
 			s.mux.logger.Printf("adaptermux: session %d parse error: %v", s.id, parseErr)
 			s.deliverErrorHost() // AM10: notify client of parse error
 			parser.Reset()       // recover parser state (MEDIUM-4 fix)
+			s.extHold = 0
+			s.extHolding = false
 			continue
 		}
 
@@ -532,6 +567,13 @@ func (s *session) handleMessage(msg transport.ENHMessage) {
 
 // handleSend processes a SEND command from the client.
 func (s *session) handleSend(data byte) {
+	// A local target answer occupies the wire. Reject before the owner
+	// check so the grant counter does not move for a byte that is not sent.
+	if s.mux.responderWindowOpen() {
+		s.mux.noteResponderWindowSend()
+		s.deliverErrorHost()
+		return
+	}
 	// STARTED can already be visible while completeArbitrationGrant holds
 	// stateMu. Wait for that commit before checking ownership, and release
 	// the lock before any potentially blocking send or transport operation.
@@ -605,7 +647,7 @@ func (s *session) handleSend(data byte) {
 	case err := <-result:
 		if err != nil {
 			s.mux.logger.Printf("adaptermux: session %d SEND error: %v", s.id, err)
-			if errors.Is(err, errNotBusOwner) || errors.Is(err, errNotConnected) || errors.Is(err, errAdapterWrite) {
+			if errors.Is(err, errNotBusOwner) || errors.Is(err, errNotConnected) || errors.Is(err, errAdapterWrite) || errors.Is(err, errResponderWindow) {
 				s.deliverErrorHost()
 			} else {
 				s.deliverError()
@@ -804,7 +846,8 @@ func (s *session) writeLoop() {
 		}
 		// ModeOff retains its FIFO, zero-pacer path. Snapshot only frames
 		// already available, so a producer cannot keep the writer draining.
-		if pacer := s.mux.SessionPacer(s.id); pacer != nil {
+		// A session that holds a target is not paced from its first TARGETED.
+		if pacer := s.mux.SessionPacer(s.id); pacer != nil && !s.mux.sessionHoldsTarget(s.id) {
 			// Look ahead only far enough to detect a symbol backlog. Never
 			// drain a full channel into a second buffer while TCP is stalled.
 			for n := len(s.sendCh); n > 0 && len(pending) <= maxSessionPacerBacklog; n-- {
@@ -968,6 +1011,22 @@ func (s *session) writeFrame(frame sessionFrame) error {
 	case sessionFrameInfo:
 		encoded := transport.EncodeENH(transport.ENHResInfo, frame.payload)
 		buf = encoded[:]
+
+	case sessionFrameTargeted:
+		encoded := transport.EncodeENH(transport.ENHCommand(extNibbleTarget), frame.payload)
+		buf = encoded[:]
+	case sessionFrameUntargeted:
+		encoded := transport.EncodeENH(transport.ENHCommand(extNibbleUntarget), frame.payload)
+		buf = encoded[:]
+	case sessionFrameSlot:
+		encoded := transport.EncodeENH(transport.ENHCommand(extNibbleBegin), frame.payload)
+		buf = encoded[:]
+	case sessionFrameSlotEnd:
+		encoded := transport.EncodeENH(transport.ENHCommand(extNibbleStage), frame.payload)
+		buf = encoded[:]
+	case sessionFrameTargetError:
+		encoded := transport.EncodeENH(transport.ENHCommand(extNibbleTargetError), frame.payload)
+		buf = encoded[:]
 	}
 
 	if len(buf) == 0 {
@@ -978,7 +1037,7 @@ func (s *session) writeFrame(frame sessionFrame) error {
 	// drained without sleeps and rebases the cadence on actual egress.
 	// STARTED/FAILED bypass scheduling; every ENH frame remains one Write.
 	var flushPacer *v8classifier.Pacer
-	if s.mux != nil && s.mux.v8 != nil {
+	if s.mux != nil && s.mux.v8 != nil && !s.mux.sessionHoldsTarget(s.id) {
 		if pacer := s.mux.SessionPacer(s.id); pacer != nil {
 			if s.flushBacklog {
 				flushPacer = pacer

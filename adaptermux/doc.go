@@ -193,4 +193,14 @@
 // re-bidding and abandoned wins. Unknown: live scanner latency and physical
 // transport qualification; these require the declared transport gate and smoke
 // evidence and are not established by unit fixtures.
+//
+// A session that sends TARGET registers one admissible destination and, for a
+// transaction addressed to it, receives SLOT and SLOT_END on its ordinary
+// stream. The multiplexer answers that transaction through SendResponderBytes
+// with no START: the committed buffer begins with ACK 0x00, and the one
+// retransmission after a negative acknowledgement omits that byte. Sessions
+// that never send TARGET keep the stream they had before registration existed.
+// The responder counters and BidHandedToGrant are the added diagnostics.
+// Cells PX09, PX10 and PX11 stay an unqualified recorded level: response
+// timing is not a hardware measurement.
 package adaptermux
