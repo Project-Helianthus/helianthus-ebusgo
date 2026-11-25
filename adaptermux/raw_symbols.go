@@ -124,10 +124,17 @@ func (m *Mux) onRawSymbol(symbol byte, logical transport.StreamEvent) map[*start
 // session, owner included (F-18 echo contract), as one ENH RECEIVED.
 func (m *Mux) deliverRawToSessions(symbol byte) {
 	m.sessionsMu.Lock()
-	defer m.sessionsMu.Unlock()
+	sessions := make([]*session, 0, len(m.sessions))
 	for _, sess := range m.sessions {
+		sessions = append(sessions, sess)
+	}
+	m.sessionsMu.Unlock()
+	for _, sess := range sessions {
 		sess.deliverReceived(symbol)
 	}
+	// Session delivery took sessionsMu. Observe after releasing it: a SLOT
+	// notice enqueues on the same lock.
+	m.observeResponderSymbol(symbol, true, false)
 }
 
 // Write normalization (independent of receive normalization).
@@ -286,6 +293,9 @@ func (m *Mux) armGatewayLeadWait(lead, suffix byte) *gatewayLeadWait {
 // A retired pair can never be acknowledged by a symbol observed after it.
 func (m *Mux) retireGatewayLeadWait(err error) {
 	m.arb.fenceLifecycle()
+	if m.responder != nil {
+		m.responder.endStream(m)
+	}
 	if w := m.gatewayLeadWait.Swap(nil); w != nil {
 		w.result <- gatewayLeadOutcome{err: err}
 	}

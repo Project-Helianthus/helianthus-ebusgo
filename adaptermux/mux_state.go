@@ -534,3 +534,12 @@ func decideFailedWinnerByte(t *muxTransition, ev muxEvent) {
 	// pending. (Codex P2 round 5 + round 8 on PR #620.)
 	t.passive = true
 }
+
+// sessionHoldsTarget reports whether the session currently answers a
+// registered destination. It does not change arbitration phases.
+func (m *Mux) sessionHoldsTarget(id uint64) bool {
+	if m == nil || m.responder == nil {
+		return false
+	}
+	return m.responder.sessionHolds(id)
+}

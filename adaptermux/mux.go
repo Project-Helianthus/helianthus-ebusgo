@@ -619,6 +619,14 @@ type Mux struct {
 	// ("sync: WaitGroup misuse") or leak. The mutex is narrow and only
 	// held across the guard read and the wg.Add/goroutine launch.
 	closeMu sync.Mutex
+
+	// responder is the local-target registration and answer path.
+	responder *responder
+	// handedReq records the startRequest whose RequestStart call has
+	// returned. BidHandedToGrant is true only while that request is still
+	// the in-flight bid.
+	handoffMu sync.Mutex
+	handedReq map[uint64]*startRequest
 }
 
 // activeEventKind tags active-path channel events.
@@ -705,6 +713,8 @@ func New(cfg Config) *Mux {
 		mux.stepMemory = NewAdapterStepMemory()
 	}
 	mux.externalAbandonAfter = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	mux.responder = newResponder()
+	mux.handedReq = make(map[uint64]*startRequest)
 	// Phase 3 Step B3.2: instantiate the v8 classifier only when a
 	// non-Off mode is configured. ModeOff is equivalent to a nil
 	// classifier (both yield a no-op Observe path); leaving it nil
@@ -2119,6 +2129,9 @@ func (m *Mux) requestStartForSession(sessionID uint64, initiator byte) <-chan st
 		}
 		return ch
 	}
+	// A replacement is a different bid. It is not in flight until its own
+	// RequestStart returns, so the previous hand-off must not stay true.
+	m.clearBidHandoff(sessionID)
 	// Step 1: cancel any in-flight grant for THIS session. The
 	// arbitrator's replace path (inside requestStart) only sees
 	// pendingExternal/pendingGateway entries; once an entry has
@@ -2803,6 +2816,11 @@ func (m *Mux) sendLoop() {
 		case <-m.ctx.Done():
 			return
 		case req := <-m.activeSendCh:
+			if m.responderWindowOpen() {
+				m.noteResponderWindowSend()
+				req.result <- errResponderWindow
+				continue
+			}
 			if req.sessionID == gatewaySessionID {
 				// Arm after sendLoop accepts the request but before doSend
 				// writes to the adapter. That closes the immediate-echo

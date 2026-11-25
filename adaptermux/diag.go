@@ -962,6 +962,25 @@ func (m *Mux) recordSynDiagLocked(
 	})
 }
 
+// ResponderDiag is the responder-path counters.
+type ResponderDiag struct {
+	Late         uint64
+	StageDiscard uint64
+	Stale        uint64
+	WindowSend   uint64
+	Nack         uint64
+	Retransmit   uint64
+	Competing    uint64
+}
+
+// ResponderDiagnostics returns the responder-path counters.
+func (m *Mux) ResponderDiagnostics() ResponderDiag {
+	if m == nil || m.responder == nil {
+		return ResponderDiag{}
+	}
+	return m.responder.diagnostics()
+}
+
 // MarkSchemaError flags the most recent (or current) gateway transaction
 // as having failed because the payload did not match the expected
 // schema. Called by the gateway-side parse path when a candidate frame

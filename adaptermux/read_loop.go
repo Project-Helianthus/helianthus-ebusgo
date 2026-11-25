@@ -362,4 +362,9 @@ func (m *Mux) applyWinnerByte(t muxTransition, winner byte, losers []*startReque
 // false when the raw view already delivered the symbol to the sessions.
 func (m *Mux) onStreamSymbol(ev muxEvent, deliverToSessions bool, bids map[*startRequest]chan startResult) {
 	m.onLogicalReceivedForBids(ev.data, ev.escaped, deliverToSessions, bids)
+	// The raw view already observed a symbol it delivered. A logical-only
+	// byte is already decoded, so 0xA9 and 0xAA here are data.
+	if deliverToSessions {
+		m.observeResponderSymbol(ev.data, false, ev.kind == muxEventSYN)
+	}
 }
