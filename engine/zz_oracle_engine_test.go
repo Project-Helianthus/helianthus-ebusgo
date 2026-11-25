@@ -665,7 +665,7 @@ func oracleRecordReconstructor(t *testing.T) {
 		event := requirePassiveClassifiedEvent(t, subscription, PassiveClassifiedEventBroadcastFrame)
 		return payload, []PassiveClassifiedEvent{event}, reconstructor
 	})
-	oracleReconstructorCase(t, "reconstructor/master-master.json", "TestPassiveTransactionReconstructor_ClassifiesMasterMaster", oracleReconSpec{}, func() ([]byte, []PassiveClassifiedEvent, *PassiveTransactionReconstructor) {
+	oracleReconstructorCase(t, "reconstructor/initiator-initiator.json", "TestPassiveTransactionReconstructor_ClassifiesMasterMaster", oracleReconSpec{}, func() ([]byte, []PassiveClassifiedEvent, *PassiveTransactionReconstructor) {
 		reconstructor, subscription := oracleReconstructor()
 		frame := protocol.Frame{Source: 0x30, Target: 0x10, Primary: 0x01, Secondary: 0x02, Data: []byte{0x03}}
 		payload := append(requestFrameBytes(frame), protocol.SymbolAck, protocol.SymbolSyn)
@@ -1147,7 +1147,7 @@ func oracleRecordObserveFirst(t *testing.T) {
 		Output: oracleOutput{Decisions: []any{oracleFlags(DefaultObserveFirstFeatureFlags())}},
 	})
 	clamped := NormalizeObserveFirstFeatureFlags(false, true, true, ObserveFirstExternalWritePolicyInvalidateOnly)
-	oracleWrite(t, "observe-first-flags/master-off.json", oracleCase{
+	oracleWrite(t, "observe-first-flags/enabled-off.json", oracleCase{
 		Component: "observe_first_flags", Source: "observe_first_flags.go", Stimulus: "TestNormalizeObserveFirstFeatureFlags_MasterOffClampsUnsafeSubFlags",
 		Input:  oracleInput{Qualifiers: map[string]any{"enabled": false, "state_direct": true, "config_direct": true, "policy": string(ObserveFirstExternalWritePolicyInvalidateOnly)}},
 		Output: oracleOutput{Decisions: []any{oracleFlags(clamped)}},

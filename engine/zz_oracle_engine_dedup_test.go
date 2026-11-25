@@ -285,20 +285,20 @@ func oracleDedupOverflow(t *testing.T) {
 	request, _ := directTransactionPair()
 	setKnownLocalAddress(deduplicator, request.Source)
 	base := time.Unix(0, 0)
-	master := PassiveClassifiedEvent{Kind: PassiveClassifiedEventMasterFrame, FrameType: protocol.FrameTypeInitiatorInitiator, Request: protocol.Frame{Source: 0x10, Target: request.Source, Primary: 0x01, Secondary: 0x02, Data: []byte{0x03}}, HasRequest: true, ObservedAt: base}
+	initiatorFrame := PassiveClassifiedEvent{Kind: PassiveClassifiedEventMasterFrame, FrameType: protocol.FrameTypeInitiatorInitiator, Request: protocol.Frame{Source: 0x10, Target: request.Source, Primary: 0x01, Secondary: 0x02, Data: []byte{0x03}}, HasRequest: true, ObservedAt: base}
 	resetsBefore := expvarIntValue(observeFirstDedupEpochResetTotal)
-	deduplicator.OnPassiveClassifiedEvent(master)
-	second := master
+	deduplicator.OnPassiveClassifiedEvent(initiatorFrame)
+	second := initiatorFrame
 	second.ObservedAt = base.Add(10 * time.Millisecond)
 	deduplicator.OnPassiveClassifiedEvent(second)
 	event := requireAdjudicatedEvent(t, subscription, DedupDispositionDiscontinuity)
 	oracleWrite(t, "deduplicator/critical-subscriber-overflow.json", oracleCase{
 		Component: "active_passive_deduplicator", Source: "active_passive_deduplicator.go", Stimulus: "TestActivePassiveDeduplicator_CriticalSubscriberOverflowAdvancesEpoch",
 		Input: oracleInput{
-			Bytes:      hex.EncodeToString(master.Request.Data),
+			Bytes:      hex.EncodeToString(initiatorFrame.Request.Data),
 			Qualifiers: map[string]any{"subscriber_capacity": 1, "frames": 2, "frame_type": "initiator_initiator"},
 			Clock:      map[string]any{"base": base.UTC().Format(time.RFC3339Nano), "second_offset_ns": int64(10 * time.Millisecond)},
-			State:      map[string]any{"initial_health": oracleDedupInitialHealth, "local_address": hex.EncodeToString([]byte{request.Source}), "submissions": []any{oraclePassiveSubmission(master, base), oraclePassiveSubmission(second, base)}},
+			State:      map[string]any{"initial_health": oracleDedupInitialHealth, "local_address": hex.EncodeToString([]byte{request.Source}), "submissions": []any{oraclePassiveSubmission(initiatorFrame, base), oraclePassiveSubmission(second, base)}},
 		},
 		Output: oracleOutput{Decisions: []any{oracleAdjudicated(event)}, Counters: map[string]any{"epoch_reset_total_delta": expvarIntValue(observeFirstDedupEpochResetTotal) - resetsBefore}},
 	})
