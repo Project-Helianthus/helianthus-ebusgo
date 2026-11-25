@@ -1,0 +1,40 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchActivationSetUnionSemanticsAndObservationSummary",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "active": "b524:15:06:03:00:000f",
+      "inactive": "b509:08:0200",
+      "miss": "b524:15:06:03:00:0022"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "active_sources": [
+          "poller",
+          "tooling"
+        ],
+        "active_state": "active",
+        "inactive_state": "inactive",
+        "miss_state": "catalog_miss",
+        "remaining_sources": [
+          "tooling"
+        ]
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "active_total": 1,
+      "catalog_miss_total": 1,
+      "inactive_total": 1
+    }
+  }
+}

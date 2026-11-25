@@ -1,0 +1,28 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "passive_bus_tap",
+  "source": "passive_bus_tap.go",
+  "stimulus": "TestStartPassiveBusTapRejectsEbusdTCP/ebusd",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "address_class": "loopback-direct",
+      "network": "tcp",
+      "protocol": "ebusd"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "passive transport unsupported on ebusd-tcp: ebus: payload does not match expected schema",
+        "invalid_payload": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

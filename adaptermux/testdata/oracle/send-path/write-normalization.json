@@ -1,0 +1,200 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "adaptermux",
+  "source": "internal/adaptermux/raw_symbols.go",
+  "stimulus": "TestRawContinuity_WriteNormalizationIsIndependentOfReceiveFlag",
+  "input": {
+    "bytes": "a9aaaaa9a9a9a9aa",
+    "qualifiers": {
+      "external_session": 7,
+      "gateway_session": 0,
+      "owner_initiator": "10",
+      "scenarios": [
+        {
+          "protocol": "enh",
+          "scenario": "enh-logical-both-ways",
+          "sends": [
+            {
+              "data": "a9",
+              "session": 0,
+              "structural": false
+            },
+            {
+              "data": "aa",
+              "session": 0,
+              "structural": false
+            },
+            {
+              "data": "aa",
+              "session": 0,
+              "structural": true
+            },
+            {
+              "data": "a9",
+              "session": 7,
+              "structural": false
+            }
+          ],
+          "upstream_reads_logical": true
+        },
+        {
+          "protocol": "ens",
+          "scenario": "ens-logical-both-ways",
+          "sends": [
+            {
+              "data": "a9",
+              "session": 0,
+              "structural": false
+            }
+          ],
+          "upstream_reads_logical": true
+        },
+        {
+          "protocol": "enh",
+          "scenario": "raw-receive-side",
+          "sends": [
+            {
+              "data": "a9",
+              "session": 0,
+              "structural": false
+            }
+          ],
+          "upstream_reads_logical": false
+        },
+        {
+          "protocol": "plain",
+          "scenario": "send-side-not-raw-symbol",
+          "sends": [
+            {
+              "data": "a9",
+              "session": 0,
+              "structural": false
+            },
+            {
+              "data": "aa",
+              "session": 0,
+              "structural": false
+            }
+          ],
+          "upstream_reads_logical": true
+        }
+      ]
+    },
+    "clock": {},
+    "state": {
+      "upstream": "write recorder without a raw view; ownership confirmed for the sending session before each send"
+    }
+  },
+  "output": {
+    "symbols_written": [
+      "a900",
+      "a901",
+      "aa",
+      "a9",
+      "a900",
+      "a9",
+      "a9",
+      "aa"
+    ],
+    "decisions": [
+      {
+        "active_reads_are_logical": true,
+        "active_transport_bytes_are_unescaped": true,
+        "protocol": "enh",
+        "scenario": "enh-logical-both-ways",
+        "sends": [
+          {
+            "data": "a9",
+            "error": "",
+            "session": 0,
+            "structural": false,
+            "upstream_writes": "a900"
+          },
+          {
+            "data": "aa",
+            "error": "",
+            "session": 0,
+            "structural": false,
+            "upstream_writes": "a901"
+          },
+          {
+            "data": "aa",
+            "error": "",
+            "session": 0,
+            "structural": true,
+            "upstream_writes": "aa"
+          },
+          {
+            "data": "a9",
+            "error": "",
+            "session": 7,
+            "structural": false,
+            "upstream_writes": "a9"
+          }
+        ],
+        "upstream_reads_logical": true
+      },
+      {
+        "active_reads_are_logical": true,
+        "active_transport_bytes_are_unescaped": true,
+        "protocol": "ens",
+        "scenario": "ens-logical-both-ways",
+        "sends": [
+          {
+            "data": "a9",
+            "error": "",
+            "session": 0,
+            "structural": false,
+            "upstream_writes": "a900"
+          }
+        ],
+        "upstream_reads_logical": true
+      },
+      {
+        "active_reads_are_logical": false,
+        "active_transport_bytes_are_unescaped": false,
+        "protocol": "enh",
+        "scenario": "raw-receive-side",
+        "sends": [
+          {
+            "data": "a9",
+            "error": "",
+            "session": 0,
+            "structural": false,
+            "upstream_writes": "a9"
+          }
+        ],
+        "upstream_reads_logical": false
+      },
+      {
+        "active_reads_are_logical": true,
+        "active_transport_bytes_are_unescaped": false,
+        "protocol": "plain",
+        "scenario": "send-side-not-raw-symbol",
+        "sends": [
+          {
+            "data": "a9",
+            "error": "",
+            "session": 0,
+            "structural": false,
+            "upstream_writes": "a9"
+          },
+          {
+            "data": "aa",
+            "error": "",
+            "session": 0,
+            "structural": false,
+            "upstream_writes": "aa"
+          }
+        ],
+        "upstream_reads_logical": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "scenarios": 4,
+      "sends": 8
+    }
+  }
+}

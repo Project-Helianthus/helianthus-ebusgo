@@ -1,0 +1,99 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27ParseChildArgvAcceptsOnlyTheExactPlan/positive",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "executable": "/opt/gateway/bin/gateway"
+    },
+    "clock": {},
+    "state": {
+      "abi": 1,
+      "args": [
+        "--internal-ebus-local-worker",
+        "build=501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+        "executable=59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+        "abi=1",
+        "worker=3",
+        "stream=5",
+        "registration=7",
+        "token=11",
+        "control=152",
+        "mapping=4096",
+        "gc=off",
+        "memlimit=64MiB",
+        "lease-ms=100"
+      ],
+      "generation": {
+        "registration": 7,
+        "stream": 5,
+        "token": 11,
+        "worker": 3
+      },
+      "layout": [
+        {
+          "role": 1,
+          "size": 152
+        },
+        {
+          "role": 2,
+          "size": 4096
+        }
+      ],
+      "lease_ms": 100,
+      "runtime_gc": "off",
+      "runtime_memory": "64MiB"
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "argv": [
+          "/opt/gateway/bin/gateway",
+          "--internal-ebus-local-worker",
+          "build=501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+          "executable=59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+          "abi=1",
+          "worker=3",
+          "stream=5",
+          "registration=7",
+          "token=11",
+          "control=152",
+          "mapping=4096",
+          "gc=off",
+          "memlimit=64MiB",
+          "lease-ms=100"
+        ],
+        "build_hex": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+        "descriptor_layout": [
+          {
+            "role": 1,
+            "size": 152
+          },
+          {
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "error": "",
+        "executable_hex": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+        "generation": {
+          "registration": 7,
+          "stream": 5,
+          "token": 11,
+          "worker": 3
+        },
+        "identity_matches": true,
+        "lease_ms": 100,
+        "runtime_gc": "off",
+        "runtime_memory": "64MiB"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

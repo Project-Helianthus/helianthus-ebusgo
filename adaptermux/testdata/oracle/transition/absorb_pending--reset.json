@@ -1,0 +1,76 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "adaptermux",
+  "source": "internal/adaptermux/mux.go",
+  "stimulus": "TestMuxTransitionCharacterization/absorb_pending/reset",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "fixture": "absorb_pending",
+      "input": "reset",
+      "upstream": "async"
+    },
+    "clock": {
+      "deadline": "fires only when the input is start_deadline",
+      "timers": "held"
+    },
+    "state": {
+      "absorb": 1,
+      "bids": "",
+      "blocking_call": false,
+      "gateway_txn": false,
+      "local_losers": "",
+      "owner": "",
+      "phase": "",
+      "recovery": "at_syn",
+      "regrant_fence": true,
+      "resync_owed": 0,
+      "retired_selection": true,
+      "start": "",
+      "start_blocking": false,
+      "start_response": false
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "effect_classes": [
+          "muxModelEffectPassiveReset",
+          "muxModelEffectActiveError",
+          "muxModelEffectSessionReset",
+          "muxModelEffectSessionReset"
+        ],
+        "effects": [
+          "passive: reset",
+          "active: error ebus: adapter reset during operation",
+          "session 1: RESETTED 0x00",
+          "session 2: RESETTED 0x00"
+        ],
+        "state": {
+          "absorb": 0,
+          "bids": "",
+          "blocking_call": false,
+          "gateway_txn": false,
+          "local_losers": "",
+          "owner": "",
+          "phase": "",
+          "recovery": "reset",
+          "regrant_fence": false,
+          "resync_owed": 0,
+          "retired_selection": false,
+          "start": "",
+          "start_blocking": false,
+          "start_response": false
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [
+      "passive: reset",
+      "session 1: RESETTED 0x00",
+      "session 2: RESETTED 0x00"
+    ],
+    "counters": {}
+  }
+}

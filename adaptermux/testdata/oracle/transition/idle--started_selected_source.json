@@ -1,0 +1,62 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "adaptermux",
+  "source": "internal/adaptermux/mux.go",
+  "stimulus": "TestMuxTransitionCharacterization/idle/started_selected_source",
+  "input": {
+    "bytes": "31",
+    "qualifiers": {
+      "fixture": "idle",
+      "input": "started_selected_source",
+      "upstream": "async"
+    },
+    "clock": {
+      "deadline": "fires only when the input is start_deadline",
+      "timers": "held"
+    },
+    "state": {
+      "absorb": 0,
+      "bids": "",
+      "blocking_call": false,
+      "gateway_txn": false,
+      "local_losers": "",
+      "owner": "",
+      "phase": "",
+      "recovery": "",
+      "regrant_fence": false,
+      "resync_owed": 0,
+      "retired_selection": false,
+      "start": "",
+      "start_blocking": false,
+      "start_response": false
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "effect_classes": [],
+        "effects": null,
+        "state": {
+          "absorb": 0,
+          "bids": "",
+          "blocking_call": false,
+          "gateway_txn": false,
+          "local_losers": "",
+          "owner": "",
+          "phase": "",
+          "recovery": "",
+          "regrant_fence": false,
+          "resync_owed": 0,
+          "retired_selection": false,
+          "start": "",
+          "start_blocking": false,
+          "start_response": false
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

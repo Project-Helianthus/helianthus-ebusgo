@@ -1,0 +1,48 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestB555WatchKeyCanonicalDisambiguatesMalformedProgramSelectors",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "malformed_selector": {
+        "has_slot": false,
+        "has_weekday": false,
+        "hc": "00",
+        "opcode": "a4",
+        "slot": "03",
+        "target": "15",
+        "weekday": "06",
+        "zone": "02"
+      },
+      "valid_selector": {
+        "has_slot": false,
+        "has_weekday": false,
+        "hc": "00",
+        "opcode": "a4",
+        "slot": "00",
+        "target": "15",
+        "weekday": "00",
+        "zone": "02"
+      }
+    },
+    "clock": {},
+    "state": {
+      "valid": "b555:15:a4:02:00:ff:ff"
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "aliases_valid": false,
+        "catalog_hit": false,
+        "malformed": "b555:15:a4:02:00:ff:ff:raw:0:06:0:03"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

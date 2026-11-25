@@ -1,0 +1,26 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/mode.go",
+  "stimulus": "TestParseMode/empty",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "text": ""
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "",
+        "mode": "off"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

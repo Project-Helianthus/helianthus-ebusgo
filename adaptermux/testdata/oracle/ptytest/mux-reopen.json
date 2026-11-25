@@ -1,0 +1,36 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "ptytest",
+  "source": "internal/adaptermux/serial.go",
+  "stimulus": "TestMuxSerial_ReopensThePathAfterTheDeviceWentAway",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "device": "synthetic-pty-link",
+      "protocol": "ens"
+    },
+    "clock": {
+      "reconnect_initial": "40ms",
+      "reconnect_max": "80ms"
+    },
+    "state": {
+      "distinct_replacement": true
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "backoff_doubled": true,
+        "baud": 115200,
+        "first_failure_is_reconnect": true,
+        "reconnected": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "baud": 115200
+    }
+  }
+}

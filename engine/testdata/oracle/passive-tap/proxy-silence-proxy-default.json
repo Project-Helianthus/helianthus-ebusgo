@@ -1,0 +1,33 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "passive_bus_tap",
+  "source": "passive_bus_tap.go",
+  "stimulus": "TestPassiveBusTap_ProxyLikeEndpointDoesNotReconnectOnReadTimeoutSilence/proxy-default",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "address_class": "proxy-default",
+      "network": "tcp",
+      "protocol": "ens"
+    },
+    "clock": {
+      "absence_ns": 60000000,
+      "read_timeout_ns": 20000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "connect_count": 1,
+        "connected": true,
+        "disconnect_count": 0,
+        "endpoint_state": "connected"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

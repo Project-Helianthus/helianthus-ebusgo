@@ -1,0 +1,51 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "shadow_cache",
+  "source": "shadow_cache.go",
+  "stimulus": "TestShadowCacheDegradesWhenStaticPinnedFootprintExceedsBudget",
+  "input": {
+    "bytes": "01",
+    "qualifiers": {
+      "canonical": "b509:08:0200",
+      "source": "passive"
+    },
+    "clock": {
+      "now": "1970-01-01T00:01:40Z"
+    },
+    "state": {
+      "activated_keys": [
+        "b509:08:0200",
+        "b509:08:0201",
+        "b509:08:0202"
+      ],
+      "activation_source": "poller",
+      "capacity": 8,
+      "catalog_keys": [
+        "b509:08:0200",
+        "b509:08:0201",
+        "b509:08:0202"
+      ],
+      "pinned_capacity": 3,
+      "write_confirm_pinned_cap": 1
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "accepted": false,
+        "generation": 0,
+        "reason": "policy_reject"
+      }
+    ],
+    "cache": {
+      "enabled": false,
+      "evictable_entries": 0,
+      "pinned_budget_degraded": true,
+      "pinned_entries": 0,
+      "total_entries": 0
+    },
+    "observations": [],
+    "counters": {}
+  }
+}

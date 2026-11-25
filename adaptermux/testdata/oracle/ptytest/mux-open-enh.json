@@ -1,0 +1,30 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "ptytest",
+  "source": "internal/adaptermux/serial.go",
+  "stimulus": "TestMuxSerial_StartOpensDeviceAtTheProtocolSpeed/enh",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "device": "synthetic-pty",
+      "protocol": "enh"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "baud": 9600,
+        "baud_matches_protocol": true,
+        "serial_connection": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "baud": 9600
+    }
+  }
+}

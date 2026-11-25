@@ -1,0 +1,231 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_family_policy",
+  "source": "observe_first_family_policy.go",
+  "stimulus": "TestObserveFirstFamilyPolicy_B524StateDefaultRequiresActiveDescriptorBackedStateRead",
+  "input": {
+    "bytes": "060003011c00060003011c00060003011c00030100060103011c00060003011c00",
+    "qualifiers": {
+      "cases": [
+        {
+          "name": "catalog-miss",
+          "observation": {
+            "has_descriptor": false,
+            "state": "catalog_miss"
+          },
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response_class": "value-bearing"
+        },
+        {
+          "name": "inactive-descriptor",
+          "observation": {
+            "descriptor": {
+              "correlation_policy": "request_response",
+              "direct_apply_policy": "state_default",
+              "key": "b524:15:06:03:01:001c",
+              "semantic_class": "state"
+            },
+            "has_descriptor": true,
+            "state": "inactive"
+          },
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response_class": "value-bearing"
+        },
+        {
+          "name": "config-descriptor",
+          "observation": {
+            "descriptor": {
+              "correlation_policy": "request_response",
+              "direct_apply_policy": "state_default",
+              "key": "b524:15:06:03:01:001c",
+              "semantic_class": "config"
+            },
+            "has_descriptor": true,
+            "state": "active"
+          },
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response_class": "value-bearing"
+        },
+        {
+          "name": "timer-read",
+          "observation": {
+            "descriptor": {
+              "correlation_policy": "request_response",
+              "direct_apply_policy": "state_default",
+              "key": "b524:15:03:03:01:0000",
+              "semantic_class": "state"
+            },
+            "has_descriptor": true,
+            "state": "active"
+          },
+          "request": {
+            "data": "030100",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response_class": "value-bearing"
+        },
+        {
+          "name": "write",
+          "observation": {
+            "descriptor": {
+              "correlation_policy": "request_response",
+              "direct_apply_policy": "state_default",
+              "key": "b524:15:06:03:01:001c",
+              "semantic_class": "state"
+            },
+            "has_descriptor": true,
+            "state": "active"
+          },
+          "request": {
+            "data": "060103011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "10",
+            "target": "15"
+          },
+          "response_class": "value-bearing"
+        },
+        {
+          "name": "active-state-read",
+          "observation": {
+            "descriptor": {
+              "correlation_policy": "request_response",
+              "direct_apply_policy": "state_default",
+              "key": "b524:15:06:03:01:001c",
+              "semantic_class": "state"
+            },
+            "has_descriptor": true,
+            "state": "active"
+          },
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response_class": "value-bearing"
+        }
+      ],
+      "flags": "default",
+      "key": "b524:15:06:03:01:001c",
+      "response": "value-bearing",
+      "traffic_scope": "passive"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "name": "catalog-miss",
+        "observation_state": "catalog_miss",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B524",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "request": "060003011c00"
+      },
+      {
+        "name": "inactive-descriptor",
+        "observation_state": "inactive",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B524",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "request": "060003011c00"
+      },
+      {
+        "name": "config-descriptor",
+        "observation_state": "active",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B524",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "request": "060003011c00"
+      },
+      {
+        "name": "timer-read",
+        "observation_state": "active",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B524",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "request": "030100"
+      },
+      {
+        "name": "write",
+        "observation_state": "active",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "record_only",
+          "family": "B524",
+          "request_intent": "write",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": true
+        },
+        "request": "060103011c00"
+      },
+      {
+        "name": "active-state-read",
+        "observation_state": "active",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "state_default",
+          "effective_external_write_policy": "",
+          "family": "B524",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "request": "060003011c00"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

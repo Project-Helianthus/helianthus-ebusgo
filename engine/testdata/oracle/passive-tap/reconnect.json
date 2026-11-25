@@ -1,0 +1,58 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "passive_bus_tap",
+  "source": "passive_bus_tap.go",
+  "stimulus": "TestPassiveBusTap_ReconnectsAfterDisconnect",
+  "input": {
+    "bytes": "1122",
+    "qualifiers": {
+      "address_class": "loopback-direct",
+      "network": "tcp",
+      "observations_exclude": [
+        "read_timeout"
+      ],
+      "protocol": "enh"
+    },
+    "clock": {
+      "absence_threshold_ns": 1000000000,
+      "read_timeout_ns": 50000000,
+      "reconnect_delay_ns": 5000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "saw_reconnect_symbols": true
+      }
+    ],
+    "cache": {},
+    "observations": [
+      {
+        "kind": "connected"
+      },
+      {
+        "kind": "symbol",
+        "symbol": "11",
+        "was_escaped": false
+      },
+      {
+        "kind": "disconnected"
+      },
+      {
+        "kind": "connected"
+      },
+      {
+        "kind": "symbol",
+        "symbol": "22",
+        "was_escaped": false
+      }
+    ],
+    "counters": {
+      "connect_count_at_least_2": true,
+      "disconnect_count_at_least_1": true,
+      "observed_symbol_count": 2
+    }
+  }
+}

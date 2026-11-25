@@ -1,0 +1,87 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27ObserveFencesEveryReportFieldMismatch/unknown-kind",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "kind": "ready",
+      "mutation": "unknown-kind"
+    },
+    "clock": {
+      "now": "1970-01-01T00:16:40Z"
+    },
+    "state": {
+      "generation": {
+        "registration": 1,
+        "stream": 1,
+        "token": 1,
+        "worker": 1
+      },
+      "layout": [
+        {
+          "role": 1,
+          "size": 152
+        },
+        {
+          "role": 2,
+          "size": 4096
+        }
+      ],
+      "report": {
+        "abi": 1,
+        "build": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+        "descriptors": [
+          {
+            "role": 1,
+            "size": 152
+          },
+          {
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "executable": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+        "generation": {
+          "registration": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        },
+        "kind": 9,
+        "sequence": 0,
+        "state": 1,
+        "tx_active": false
+      }
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "matches_expected": true,
+        "observe_error": "localworkerhost: malformed or unexpected report",
+        "publish_plan_error": "localworkerhost: worker is not ready",
+        "publish_plan_not_ready": true,
+        "status": {
+          "cancelled": 0,
+          "generation": {
+            "registration": 1,
+            "stream": 1,
+            "token": 1,
+            "worker": 1
+          },
+          "launches": 1,
+          "pending": 0,
+          "plans": 0,
+          "reason": "localworkerhost: malformed or unexpected report",
+          "state": "fenced"
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

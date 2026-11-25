@@ -1,0 +1,44 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27UnexpectedExitFencesAndReleases",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "child_exits": "unprompted",
+      "plan": 1
+    },
+    "clock": {
+      "now": "1970-01-01T00:16:40Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "is_exited": true,
+        "publish_plan_error": "",
+        "slot_claimed": false,
+        "status": {
+          "cancelled": 0,
+          "generation": {
+            "registration": 1,
+            "stream": 1,
+            "token": 1,
+            "worker": 1
+          },
+          "launches": 1,
+          "pending": 0,
+          "plans": 0,
+          "reason": "localworkerhost: worker child exited",
+          "state": "stopped"
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

@@ -1,0 +1,178 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_family_policy",
+  "source": "observe_first_family_policy.go",
+  "stimulus": "TestObserveFirstFamilyPolicy_B524ReadAndObservedWriteStaySeparated",
+  "input": {
+    "bytes": "060003011c00060103011c00",
+    "qualifiers": {
+      "read_request": {
+        "data": "060003011c00",
+        "primary": "b5",
+        "secondary": "24",
+        "source": "31",
+        "target": "15"
+      },
+      "write_request": {
+        "data": "060103011c00",
+        "primary": "b5",
+        "secondary": "24",
+        "source": "10",
+        "target": "15"
+      }
+    },
+    "clock": {},
+    "state": {
+      "calls": [
+        {
+          "flags": {
+            "constructor": "DefaultObserveFirstFeatureFlags"
+          },
+          "observation": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "state_default",
+            "has_descriptor": true,
+            "key": "b524:15:06:03:01:001c",
+            "semantic_class": "state",
+            "state": "active"
+          },
+          "order": 1,
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response_class": "value_bearing",
+          "scope": "passive"
+        },
+        {
+          "flags": {
+            "config_direct": false,
+            "constructor": "NormalizeObserveFirstFeatureFlags",
+            "enabled": true,
+            "external_write_policy": "invalidate_only",
+            "state_direct": true
+          },
+          "observation": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "state_default",
+            "has_descriptor": true,
+            "key": "b524:15:06:03:01:001c",
+            "semantic_class": "state",
+            "state": "active"
+          },
+          "order": 2,
+          "request": {
+            "data": "060103011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "10",
+            "target": "15"
+          },
+          "response_class": "header_only",
+          "scope": "passive"
+        },
+        {
+          "flags": {
+            "config_direct": false,
+            "constructor": "NormalizeObserveFirstFeatureFlags",
+            "enabled": true,
+            "external_write_policy": "record_only",
+            "state_direct": true
+          },
+          "observation": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "state_default",
+            "has_descriptor": true,
+            "key": "b524:15:06:03:01:001c",
+            "semantic_class": "state",
+            "state": "active"
+          },
+          "order": 3,
+          "request": {
+            "data": "060103011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "10",
+            "target": "15"
+          },
+          "response_class": "header_only",
+          "scope": "passive"
+        },
+        {
+          "flags": {
+            "config_direct": false,
+            "constructor": "NormalizeObserveFirstFeatureFlags",
+            "enabled": true,
+            "external_write_policy": "record_and_invalidate",
+            "state_direct": true
+          },
+          "observation": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "state_default",
+            "has_descriptor": true,
+            "key": "b524:15:06:03:01:001c",
+            "semantic_class": "state",
+            "state": "active"
+          },
+          "order": 4,
+          "request": {
+            "data": "060103011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "10",
+            "target": "15"
+          },
+          "response_class": "header_only",
+          "scope": "passive"
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "correlation_policy": "request_response",
+        "direct_apply_policy": "state_default",
+        "effective_external_write_policy": "",
+        "family": "B524",
+        "request_intent": "read",
+        "response_class": "value_bearing",
+        "uses_runtime_external_write_policy": false
+      },
+      {
+        "correlation_policy": "request_response",
+        "direct_apply_policy": "never",
+        "effective_external_write_policy": "invalidate_only",
+        "family": "B524",
+        "request_intent": "write",
+        "response_class": "header_only",
+        "uses_runtime_external_write_policy": true
+      },
+      {
+        "correlation_policy": "request_response",
+        "direct_apply_policy": "never",
+        "effective_external_write_policy": "record_only",
+        "family": "B524",
+        "request_intent": "write",
+        "response_class": "header_only",
+        "uses_runtime_external_write_policy": true
+      },
+      {
+        "correlation_policy": "request_response",
+        "direct_apply_policy": "never",
+        "effective_external_write_policy": "record_and_invalidate",
+        "family": "B524",
+        "request_intent": "write",
+        "response_class": "header_only",
+        "uses_runtime_external_write_policy": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

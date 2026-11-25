@@ -1,0 +1,44 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_flags",
+  "source": "observe_first_flags.go",
+  "stimulus": "TestNormalizeObserveFirstFeatureFlags_StateDisabledKeepsValidExternalWritePolicy",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "config_direct": false,
+      "enabled": true,
+      "state_direct": false
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "flags": {
+          "external_write_policy": "invalidate_only",
+          "normalization_reasons": [],
+          "observe_first_enabled": true,
+          "passive_config_direct": false,
+          "passive_state_direct": false
+        },
+        "policy": "invalidate_only"
+      },
+      {
+        "flags": {
+          "external_write_policy": "record_and_invalidate",
+          "normalization_reasons": [],
+          "observe_first_enabled": true,
+          "passive_config_direct": false,
+          "passive_state_direct": false
+        },
+        "policy": "record_and_invalidate"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

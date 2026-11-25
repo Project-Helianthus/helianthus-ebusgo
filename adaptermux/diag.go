@@ -1,0 +1,987 @@
+package adaptermux
+
+import (
+	"sync/atomic"
+	"time"
+
+	"github.com/Project-Helianthus/helianthus-ebusgo/protocol"
+)
+
+// TxnClass is the terminal classification of a gateway-owned transaction.
+// Computed at inactive-time from write/read prefix capture and lifecycle
+// counters. Bounded set — used for runtime diagnostics and test assertions.
+type TxnClass string
+
+const (
+	TxnClassUnknown             TxnClass = ""
+	TxnClassEchoOnlyTimeout     TxnClass = "echo_only_timeout"
+	TxnClassNonEchoInvalidFrame TxnClass = "non_echo_invalid_frame"
+	TxnClassCandidateNoParse    TxnClass = "candidate_no_parse"
+	TxnClassSchemaError         TxnClass = "schema_error"
+	TxnClassSuccessLike         TxnClass = "success_like"
+)
+
+// txnPrefixCap bounds how many leading bytes of write and read traffic are
+// captured per gateway transaction. 8 is enough to characterize classification
+// (source + QQ + PB + SB + NN + two data + ACK-like) without unbounded memory.
+const txnPrefixCap = 8
+
+// ActiveTxnInactiveReason identifies why a gateway active transaction
+// transitioned to inactive. Bounded set of reasons — used for runtime
+// diagnostics and regression tests.
+type ActiveTxnInactiveReason string
+
+const (
+	ReasonNone            ActiveTxnInactiveReason = ""
+	ReasonTransactionDone ActiveTxnInactiveReason = "transaction_done"
+	ReasonCmdNACK         ActiveTxnInactiveReason = "cmd_nack"
+	ReasonSYNIdle         ActiveTxnInactiveReason = "syn_idle"
+	// ReasonSYNTerminator is recorded when a SYN arrives mid-transaction
+	// (bytesRead>0) and is treated as the legitimate frame terminator.
+	// Distinguished from ReasonSYNIdle (which historically covered both
+	// terminator and abandoned-grant cases) because, for a legitimate
+	// terminator, the SYN byte IS delivered to activeCh so the bus.Send
+	// consumer observes the terminator. See onSYNLocked.
+	ReasonSYNTerminator        ActiveTxnInactiveReason = "syn_terminator"
+	ReasonSYNTimeout           ActiveTxnInactiveReason = "syn_timeout"
+	ReasonMaxOwnership         ActiveTxnInactiveReason = "max_ownership"
+	ReasonReset                ActiveTxnInactiveReason = "reset"
+	ReasonReconnect            ActiveTxnInactiveReason = "reconnect"
+	ReasonActiveWriteError     ActiveTxnInactiveReason = "active_write_error"
+	ReasonActiveReadTimeout    ActiveTxnInactiveReason = "active_read_timeout"
+	ReasonContextCancel        ActiveTxnInactiveReason = "context_cancel"
+	ReasonArbitrationCollision ActiveTxnInactiveReason = "arbitration_collision"
+	// ReasonAbandonedOnRebid is recorded when protocol.Bus requests a new
+	// START while its previous transaction is still live from the mux's
+	// point of view, or while it still holds a grant it never used (issue
+	// #1401). The bus re-arbitrates only after its previous transaction
+	// returned, so that transaction ended with a failure the bus detected
+	// itself (for example an echo mismatch) without a transport-visible
+	// terminal. Ownership is released before the new bid is queued.
+	ReasonAbandonedOnRebid ActiveTxnInactiveReason = "abandoned_on_rebid"
+)
+
+// inactiveReasons lists every terminal reason in a fixed order. It indexes
+// activeTxnDiag.inactiveByReason so abnormal endings are countable by reason
+// (issue #1401).
+var inactiveReasons = [...]ActiveTxnInactiveReason{
+	ReasonTransactionDone,
+	ReasonCmdNACK,
+	ReasonSYNIdle,
+	ReasonSYNTerminator,
+	ReasonSYNTimeout,
+	ReasonMaxOwnership,
+	ReasonReset,
+	ReasonReconnect,
+	ReasonActiveWriteError,
+	ReasonActiveReadTimeout,
+	ReasonContextCancel,
+	ReasonArbitrationCollision,
+	ReasonAbandonedOnRebid,
+}
+
+// activeTxnDiag captures per-transaction diagnostic data for a gateway
+// active transaction. Protected by stateMu when mutated via the mux.
+// Counters in ActiveTxnSnapshot are atomic to permit lock-free reads
+// from the hot path (active_path.go Write/Read).
+type activeTxnDiag struct {
+	id           uint64    // monotonic transaction id (set at grant)
+	initiator    byte      // source/initiator byte for this grant
+	grantedAt    time.Time // timestamp of the grant
+	inactiveAt   time.Time // timestamp of the inactive transition
+	inactiveReas ActiveTxnInactiveReason
+	bytesWritten atomic.Uint64 // incremented by activeTransport.Write on success
+	bytesRead    atomic.Uint64 // incremented by activeTransport.ReadByte/ReadEvent success
+	// bytesDeliveredToActive is the precise "at least one real adapter byte
+	// has been enqueued on activeCh during this gateway-owned txn" signal.
+	// Incremented by the readLoop byte-delivery path AFTER a successful
+	// non-blocking send to activeCh while gatewayTxnActive is true. Unlike
+	// bytesRead (lags — consumer side) and bytesWritten (leads — initiator
+	// side before echo returns), this is the correct gate for "the pre-echo
+	// window has ended". Used by onSYNLocked to decide whether a SYN is a
+	// legitimate frame terminator or pre-echo idle-buffer noise. Codex PR
+	// #502 P1 — superseded bytesWritten as the terminator/suppression gate.
+	bytesDeliveredToActive atomic.Uint64
+	// firstByteSuspectArbLoss is set by mux's first-byte arbitration
+	// revalidation predicate (F-NEW-29, 2026-05-23) when the first wire
+	// byte during a gateway-owned txn is a foreign initiator-class byte that
+	// doesn't match the gateway's first expected echo. Forwarded to
+	// activeCh so bus.go:1328-1378's first-byte-after-arbitration
+	// classifier can raise ErrBusCollision.
+	firstByteSuspectArbLoss atomic.Bool
+	drainedOnGrant          int // count of stale bytes drained just before this grant
+
+	// totals across the mux lifetime (never reset)
+	grantsTotal    atomic.Uint64
+	writeErrTotal  atomic.Uint64
+	readTimeoutTot atomic.Uint64
+	// afterInactive counts any active delivery attempts observed after
+	// the current transaction was marked inactive (should be zero under
+	// the lifecycle-correct policy; non-zero indicates a regression).
+	afterInactive atomic.Uint64
+	// terminatorDropOnFullCh counts the number of SYN terminators that
+	// the onSYNLocked path tried to deliver to activeCh but could not
+	// because the channel was full. Expected to be zero in normal
+	// operation (activeCh has capacity 4096 and the reader drains it
+	// promptly during bus.Send). Non-zero indicates runtime backpressure.
+	terminatorDropOnFullCh atomic.Uint64
+
+	// inactiveByReason counts terminal transitions per reason across the
+	// mux lifetime, indexed like inactiveReasons (issue #1401). A rising
+	// max_ownership, syn_idle, arbitration_collision, abandoned_on_rebid
+	// or active_read_timeout count is the regression signal for abnormal
+	// gateway ownerships.
+	inactiveByReason [len(inactiveReasons)]atomic.Uint64
+	// staleActiveDiscarded counts bytes a finished or failed gateway
+	// transaction left in activeCh that were discarded instead of being
+	// carried into the next grant (issue #1401): at the failure release, at
+	// the gateway's next bid, or by the grant-time safety net (which also
+	// records its share in drainedOnGrant).
+	staleActiveDiscarded atomic.Uint64
+	// foreignInitiatorReleases counts gateway ownerships released because a
+	// foreign initiator byte was observed while session 0 held the bus
+	// (issue #1401): the first-byte arbitration loss of a live transaction,
+	// or a foreign telegram during the post-transaction ownership tail.
+	foreignInitiatorReleases atomic.Uint64
+
+	// interWriteDrainTotal counts bytes drained from activeCh in
+	// sendLoop's pre-recordSent critical section (P12). Each drained
+	// byte was a stale entry sitting in activeCh during the inter-write
+	// queue-empty window — i.e., between matchEcho consuming byte K's
+	// echo and sendLoop arming byte K+1. Without the drain those bytes
+	// would have been read by bus.Send.sendRawWithEcho on the next
+	// write and fired echo_mismatch (post_grant_ack on stale 0x00,
+	// pre_echo_syn on stale 0xAA). Non-zero is normal under busy bus
+	// load; persistent zero post-deploy means the upstream pipeline
+	// is fully drained between writes (clean).
+	interWriteDrainTotal atomic.Uint64
+
+	// synSuppressedPreEcho counts SYN bytes that arrived during gateway
+	// ownership with gatewayTxnActive=true and were classified as
+	// non-terminator noise (NOT a legitimate frame-end SYN echo). These
+	// SYNs MUST NOT be delivered to activeCh — doing so would race the
+	// real echo byte and cause sendRawWithEcho to observe SYN (0xAA)
+	// in place of the expected echo, emitting echo_mismatch.
+	//
+	// P10.2 — the gate now uses `gatewayEcho.peekNextExpected()` to
+	// classify SYNs that arrive during an active gateway txn:
+	//   - hasPending=true && nextExpected==SymbolSyn → legitimate
+	//     terminator (bus.Send wrote SYN, awaiting its echo); NOT
+	//     suppressed.
+	//   - hasPending=true && nextExpected!=SymbolSyn → mid-write
+	//     noise (gateway awaiting echo of a non-SYN body byte);
+	//     SUPPRESSED.
+	//   - hasPending=false (queue empty): the gate is OPEN —
+	//     `midWriteSyn=false`, so the terminator branch fires per
+	//     the legacy PR #502 contract whenever
+	//     bytesDeliveredToActive>0 (the gateway has consumed all its
+	//     echoes — typical end-of-frame shape, including tests that
+	//     omit the explicit terminator-write step). The pre-first-
+	//     echo branch (separate gate, bytesDeliveredToActive==0)
+	//     suppresses queue-empty SYNs that arrive before the first
+	//     adapter byte has been delivered to activeCh.
+	//
+	// Original semantics (P0): pre-first-echo case where
+	// bytesDeliveredToActive==0. P10.2 generalizes — that case still
+	// suppresses (no echoes yet, so any pending entry is non-SYN by
+	// construction in normal request flow), but additionally suppresses
+	// late mid-frame SYN races and response-phase noise. 671 pre_echo_syn
+	// events observed pre-P10.2 (~16% of all echo_mismatch); expected to
+	// drop to floor (single-digit per hour) after deploy.
+	//
+	// Expected to be non-zero under normal adapter-direct operation
+	// (typically 1–3 suppressed SYNs per transaction).
+	synSuppressedPreEcho atomic.Uint64
+
+	// batch-21 diagnostic counters — disambiguate three competing
+	// hypotheses about residual `pre_echo_syn` echo_mismatch events
+	// (~11/min as of 2026-05-15). Forensic only; no behavior change.
+	//
+	// synSeenDuringGrantWindow counts SYN observations where the gateway
+	// is the owner but gatewayTxnActive is still false (the brief
+	// window between completeArbitrationGrant and the first
+	// recordSent). preEchoMidFrameSuppress requires gatewayTxnActive=
+	// true, so any SYN in this window bypasses the suppression. If this
+	// counter dominates the residual echo_mismatch rate, Attack 1
+	// (gatewayTxnActive grant-lifecycle gap) is confirmed.
+	synSeenDuringGrantWindow atomic.Uint64
+
+	// synSeenWhileInterWriteEmpty counts SYN observations where the
+	// gateway owns the bus, gatewayTxnActive is true, the echo queue
+	// is empty (peekNextExpected returns hasPending=false) AND we've
+	// already delivered at least one byte to active. P10.2's peek-based
+	// gate requires hasPendingEcho=true to suppress; the brief inter-
+	// write window between echo K being consumed and recordSent(K+1)
+	// arming the next expected echo leaves the queue empty. If this
+	// counter dominates, Attack 3 (queue-empty inter-write window) is
+	// confirmed.
+	synSeenWhileInterWriteEmpty atomic.Uint64
+
+	// synSeenAfterTransportWindowExpired (batch-22 round-3 Attack 2
+	// instrumentation, 2026-05-17) counts SYN observations where
+	// the upstream ENH transport's postGrantPreEcho window has
+	// closed via DEADLINE EXPIRY in the current gateway transaction
+	// (vs. closed normally via first-real-echo arrival). The check
+	// compares transport.PostGrantWindowExpiredCount() against
+	// `transportExpiredAtTxnStart` (captured at recordGatewayGrant)
+	// so the delta reflects only THIS transaction's expiry events.
+	//
+	// Per batch-22: events here are leak candidates beyond what
+	// Attack 1 (grant-window race) and Attack 3 (inter-write empty)
+	// instrumentation surfaced — they target the ~54% of the
+	// pre_echo_syn residual unaccounted-for after round-2.
+	//
+	// Implemented via the helianthus-ebusgo
+	// transport.PostGrantWindowExpiredReporter optional interface;
+	// the gateway type-asserts m.upstream against it. Transports
+	// that don't implement the interface (plain TCP/UDP, ebusd_tcp)
+	// leave the counter at zero — diagnostic degrades cleanly.
+	synSeenAfterTransportWindowExpired atomic.Uint64
+
+	// synSuppressedBetweenWrites (batch-26 round-7) counts wire SYNs
+	// that the betweenWritesSyn branch of preEchoMidFrameSuppress
+	// suppressed. The branch fires when the gateway echo tracker
+	// reports queueJustDrained=true AND the expected-echo queue is
+	// currently empty — i.e., the brief window between matchEcho
+	// consuming echo K of a non-SYN body byte and sendLoop's
+	// recordSent arming byte K+1.
+	//
+	// Forensic semantics: synSuppressedPreEcho is the SUM of all
+	// suppression paths (pre-first-echo + midWriteSyn +
+	// betweenWritesSyn); this counter is the subset specifically
+	// attributable to the Attack 3 (inter-write empty-queue) fix.
+	// Operator dashboards: subtract this from synSeenWhileInterWriteEmpty
+	// to get the residual that was NOT closed by round-7.
+	synSuppressedBetweenWrites atomic.Uint64
+
+	// transportExpiredAtTxnStart is the snapshot of
+	// transport.PostGrantWindowExpiredCount() taken at the moment
+	// the current gateway transaction was granted (in
+	// recordGatewayGrant). Distinguishes "the window expired in
+	// THIS txn" from "the window has expired in some past txn."
+	// Atomic so the SYN-observation site (under stateMu) and the
+	// txn-start site can both interact lock-free.
+	transportExpiredAtTxnStart atomic.Uint64
+
+	// --- Transaction-shape diagnostics (bounded) ---
+	// Captured under stateMu via recordWritePrefix/recordReadPrefix.
+	writePrefix    [txnPrefixCap]byte
+	writePrefixLen int
+	readPrefix     [txnPrefixCap]byte
+	readPrefixLen  int
+	echoCursor     int
+	// Byte-class counters (atomic; hot-path increments in onReceived
+	// and Write paths).
+	echoLike   atomic.Uint64
+	nonEcho    atomic.Uint64
+	synMarkers atomic.Uint64
+	// Terminal classification computed at recordGatewayInactive time.
+	txnClass TxnClass
+	// lastClass persists the most recently classified txn's class so it
+	// can be surfaced through ActiveTxnSnapshot/LastTxnClass even after
+	// recordGatewayGrant resets txnClass for the next grant.
+	lastClass TxnClass
+}
+
+// ActiveTxnSnapshot is an immutable snapshot of the current (or last)
+// gateway active transaction, suitable for logging and test assertions.
+type ActiveTxnSnapshot struct {
+	ID             uint64
+	Initiator      byte
+	GrantedAt      time.Time
+	InactiveAt     time.Time
+	InactiveReason ActiveTxnInactiveReason
+	BytesWritten   uint64
+	BytesRead      uint64
+	DrainedOnGrant int
+	Active         bool // whether txn is currently active (gatewayTxnActive)
+	GrantsTotal    uint64
+	WriteErrTotal  uint64
+	ReadTimeoutTot uint64
+	AfterInactive  uint64
+	// TerminatorDropOnFullCh mirrors activeTxnDiag.terminatorDropOnFullCh.
+	TerminatorDropOnFullCh uint64
+	// InactiveReasonCounts holds the lifetime number of gateway
+	// transactions that ended with each known reason (every reason is
+	// present, zero included). Issue #1401.
+	InactiveReasonCounts map[ActiveTxnInactiveReason]uint64
+	// StaleActiveBytesDiscarded mirrors activeTxnDiag.staleActiveDiscarded.
+	StaleActiveBytesDiscarded uint64
+	// ForeignInitiatorReleases mirrors activeTxnDiag.foreignInitiatorReleases.
+	ForeignInitiatorReleases uint64
+	// SynSuppressedPreEcho mirrors activeTxnDiag.synSuppressedPreEcho.
+	SynSuppressedPreEcho uint64
+	// SynSeenDuringGrantWindow mirrors
+	// activeTxnDiag.synSeenDuringGrantWindow (batch-21 diagnostic).
+	// Counts SYNs observed while gateway owned bus but
+	// gatewayTxnActive=false. Operator measures rate vs echo_mismatch
+	// to identify Attack 1 dominance.
+	SynSeenDuringGrantWindow uint64
+	// SynSeenWhileInterWriteEmpty mirrors
+	// activeTxnDiag.synSeenWhileInterWriteEmpty (batch-21 diagnostic).
+	// Counts SYNs observed during gateway-owned active txn while the
+	// echo queue is empty AND at least one byte has been delivered.
+	// Operator measures rate vs echo_mismatch to identify Attack 3
+	// dominance.
+	SynSeenWhileInterWriteEmpty uint64
+	// SynSeenAfterTransportWindowExpired mirrors
+	// activeTxnDiag.synSeenAfterTransportWindowExpired (batch-22
+	// round-3 Attack 2 instrumentation). Counts SYNs observed while
+	// gateway owned bus AND the upstream transport's postGrantPreEcho
+	// window has already closed via deadline-expiry in the current
+	// transaction. Targets the ~54% pre_echo_syn residual unexplained
+	// by Attack 1 + Attack 3 instrumentation.
+	SynSeenAfterTransportWindowExpired uint64
+	// SynSuppressedBetweenWrites mirrors
+	// activeTxnDiag.synSuppressedBetweenWrites (batch-26 round-7).
+	// Counts wire SYNs the betweenWritesSyn (queueJustDrained) gate
+	// suppressed — the Attack 3 (inter-write empty-queue) fix.
+	// Subset of SynSuppressedPreEcho.
+	SynSuppressedBetweenWrites uint64
+	// InterWriteDrainTotal mirrors activeTxnDiag.interWriteDrainTotal
+	// (P12). Bytes drained from activeCh in sendLoop's pre-recordSent
+	// section. Non-zero is normal; persistent zero indicates the
+	// upstream pipeline is fully drained between writes.
+	InterWriteDrainTotal uint64
+	// EscapePairLeadFailures and EscapePairSuffixFailures mirror the
+	// failed gateway escape-pair echo verifications by failing step.
+	EscapePairLeadFailures   uint64
+	EscapePairSuffixFailures uint64
+	// EchoQueueOverflowResets mirrors gatewayEcho.totalOverflowResets
+	// (P10.2.1). Non-zero indicates the gateway-write loop produced
+	// more than 256 unacknowledged writes, triggering a queue reset.
+	// Real eBUS frames are <30 bytes; reaching 256 implies a
+	// pathological condition (TCP backpressure, paused readLoop,
+	// runaway write loop) and warrants operator investigation.
+	EchoQueueOverflowResets uint64
+	// BytesDeliveredToActive mirrors activeTxnDiag.bytesDeliveredToActive.
+	BytesDeliveredToActive uint64
+	// AbsorbResetTotal mirrors Mux.absorbResetTotal. F-22
+	// (batch-19, 2026-05-13): counts every fail-safe firing of
+	// armPendingStartAbsorbLocked where the absorb counter was
+	// reset to zero because the expected stale STARTED/FAILED
+	// never arrived. Replaces the prior transport-reconnect side
+	// effect: closing the upstream ENH connection on each timeout
+	// severed external sessions (ebusd) and triggered cascade
+	// RequestStart failures (batch-19 measured 13 reconnects /
+	// 90 min producing 263 cascade failures). Non-zero is
+	// expected on a busy bus; a sustained climb on an otherwise
+	// quiet bus warrants investigation.
+	AbsorbResetTotal uint64
+
+	// UndeliverableStarted counts wire wins retired after cancellation or disconnect.
+	UndeliverableStarted uint64
+
+	// ActiveArbitrationHoldReason is the reason this mux holds active
+	// arbitration for ("adapter_out_of_step"), or "" when not held.
+	ActiveArbitrationHoldReason string
+	// OutOfStepDetections counts out-of-step detections of this mux.
+	OutOfStepDetections uint64
+	// AdapterLinkResets counts the link resets this mux requested on a
+	// detection.
+	AdapterLinkResets uint64
+
+	// Transaction-shape diagnostics (bounded).
+	WritePrefix []byte
+	ReadPrefix  []byte
+	EchoLike    uint64
+	NonEcho     uint64
+	SynMarkers  uint64
+	// TxnClass is the terminal classification of the current transaction
+	// if inactive; otherwise TxnClassUnknown. LastTxnClass carries the
+	// most recent classified class across grants.
+	TxnClass     TxnClass
+	LastTxnClass TxnClass
+}
+
+// ActiveTxnSnapshot returns a copy of the current active-transaction
+// diagnostics. Safe to call from any goroutine.
+//
+// Codex-R9: atomic counters are loaded UNDER stateMu to keep the
+// snapshot in the same transaction epoch as the struct fields.
+// Without this, recordGatewayGrant (which resets bytesWritten/bytesRead
+// under stateMu before the next caller returns) could interleave
+// between the struct copy and the atomic loads, producing mixed-epoch
+// results (e.g. ID from txn N with bytesRead from txn N+1).
+func (m *Mux) ActiveTxnSnapshot() ActiveTxnSnapshot {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	wp := make([]byte, m.activeTxn.writePrefixLen)
+	copy(wp, m.activeTxn.writePrefix[:m.activeTxn.writePrefixLen])
+	rp := make([]byte, m.activeTxn.readPrefixLen)
+	copy(rp, m.activeTxn.readPrefix[:m.activeTxn.readPrefixLen])
+	byReason := make(map[ActiveTxnInactiveReason]uint64, len(inactiveReasons))
+	for i, reason := range inactiveReasons {
+		byReason[reason] = m.activeTxn.inactiveByReason[i].Load()
+	}
+	escapeEcho := m.GatewayEscapeEchoSnapshot()
+	return ActiveTxnSnapshot{
+		ID:                                 m.activeTxn.id,
+		Initiator:                          m.activeTxn.initiator,
+		GrantedAt:                          m.activeTxn.grantedAt,
+		InactiveAt:                         m.activeTxn.inactiveAt,
+		InactiveReason:                     m.activeTxn.inactiveReas,
+		DrainedOnGrant:                     m.activeTxn.drainedOnGrant,
+		Active:                             m.gatewayTxnActive,
+		BytesWritten:                       m.activeTxn.bytesWritten.Load(),
+		BytesRead:                          m.activeTxn.bytesRead.Load(),
+		GrantsTotal:                        m.activeTxn.grantsTotal.Load(),
+		WriteErrTotal:                      m.activeTxn.writeErrTotal.Load(),
+		ReadTimeoutTot:                     m.activeTxn.readTimeoutTot.Load(),
+		AfterInactive:                      m.activeTxn.afterInactive.Load(),
+		TerminatorDropOnFullCh:             m.activeTxn.terminatorDropOnFullCh.Load(),
+		InactiveReasonCounts:               byReason,
+		StaleActiveBytesDiscarded:          m.activeTxn.staleActiveDiscarded.Load(),
+		ForeignInitiatorReleases:           m.activeTxn.foreignInitiatorReleases.Load(),
+		SynSuppressedPreEcho:               m.activeTxn.synSuppressedPreEcho.Load(),
+		SynSeenDuringGrantWindow:           m.activeTxn.synSeenDuringGrantWindow.Load(),
+		SynSeenWhileInterWriteEmpty:        m.activeTxn.synSeenWhileInterWriteEmpty.Load(),
+		SynSeenAfterTransportWindowExpired: m.activeTxn.synSeenAfterTransportWindowExpired.Load(),
+		SynSuppressedBetweenWrites:         m.activeTxn.synSuppressedBetweenWrites.Load(),
+		InterWriteDrainTotal:               m.activeTxn.interWriteDrainTotal.Load(),
+		EscapePairLeadFailures:             escapeEcho.LeadFailures,
+		EscapePairSuffixFailures:           escapeEcho.SuffixFailures,
+		EchoQueueOverflowResets:            m.gatewayEcho.overflowResets(),
+		BytesDeliveredToActive:             m.activeTxn.bytesDeliveredToActive.Load(),
+		AbsorbResetTotal:                   m.absorbResetTotal.Load(),
+		UndeliverableStarted:               m.undeliverableStarted.Load(),
+		ActiveArbitrationHoldReason:        m.ActiveArbitrationHoldReason(),
+		OutOfStepDetections:                m.step.detections,
+		AdapterLinkResets:                  m.step.linkResets,
+		WritePrefix:                        wp,
+		ReadPrefix:                         rp,
+		EchoLike:                           m.activeTxn.echoLike.Load(),
+		NonEcho:                            m.activeTxn.nonEcho.Load(),
+		SynMarkers:                         m.activeTxn.synMarkers.Load(),
+		TxnClass:                           m.activeTxn.txnClass,
+		LastTxnClass:                       m.activeTxn.lastClass,
+	}
+}
+
+// LastTxnClass returns the terminal classification of the most recently
+// completed gateway transaction. If no transaction has completed yet, the
+// returned value is TxnClassUnknown. Safe to call from any goroutine.
+//
+// This is the lightweight accessor used by optional
+// ActiveTxnClassifier consumers (e.g. statsBus) that only need the final
+// class string without the full snapshot.
+func (m *Mux) LastTxnClass() string {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	// While a transaction is still active the live txnClass is empty;
+	// fall back to the last completed class so diagnostics remain useful.
+	if m.activeTxn.txnClass != TxnClassUnknown {
+		return string(m.activeTxn.txnClass)
+	}
+	return string(m.activeTxn.lastClass)
+}
+
+// recordGatewayGrant marks the start of a new gateway active transaction.
+// Caller must hold stateMu. `drained` is the number of stale bytes drained
+// from activeCh as part of the grant.
+func (m *Mux) recordGatewayGrant(initiator byte, drained int) {
+	m.activeTxn.id++
+	m.activeTxn.initiator = initiator
+	m.activeTxn.grantedAt = time.Now()
+	m.activeTxn.inactiveAt = time.Time{}
+	m.activeTxn.inactiveReas = ReasonNone
+	m.activeTxn.bytesWritten.Store(0)
+	m.activeTxn.bytesRead.Store(0)
+	m.activeTxn.bytesDeliveredToActive.Store(0)
+	m.activeTxn.firstByteSuspectArbLoss.Store(false)
+	m.collisionResyncOwed = 0
+	m.activeTxn.drainedOnGrant = drained
+	m.activeTxn.grantsTotal.Add(1)
+	// batch-22 round-3 Attack 2: snapshot the upstream transport's
+	// post-grant-window expiry counter so the SYN observation site
+	// can compute the per-txn delta. postGrantWindowExpiredCountSafe
+	// acquires connMu internally (m.upstream is connMu-guarded and
+	// can be replaced concurrently by reconnect; reading it without
+	// connMu would race — Codex pre-push review). Transports that
+	// don't implement PostGrantWindowExpiredReporter leave the
+	// snapshot at 0 (and the diagnostic counter stays at 0).
+	current, _ := m.postGrantWindowExpiredCountSafe()
+	m.activeTxn.transportExpiredAtTxnStart.Store(current)
+	// Reset per-txn shape diagnostics.
+	m.activeTxn.writePrefixLen = 0
+	m.activeTxn.readPrefixLen = 0
+	m.activeTxn.echoCursor = 0
+	m.activeTxn.writePrefix = [txnPrefixCap]byte{}
+	m.activeTxn.readPrefix = [txnPrefixCap]byte{}
+	m.activeTxn.echoLike.Store(0)
+	m.activeTxn.nonEcho.Store(0)
+	m.activeTxn.synMarkers.Store(0)
+	m.activeTxn.txnClass = TxnClassUnknown
+	m.logger.Printf(
+		"adaptermux: activeTxn grant id=%d initiator=0x%02X drained=%d",
+		m.activeTxn.id, initiator, drained,
+	)
+}
+
+// releaseGatewayAfterFailureLocked ends the live gateway transaction with an
+// abnormal reason and releases gateway bus ownership in the same stateMu
+// critical section (issue #1401). Before #1401 these failure paths only
+// cleared gatewayTxnActive and left the grant to the next idle SYN or to
+// MaxOwnershipDuration, so external bids were ignored for seconds while the
+// gateway held a bus it no longer used. Bytes the dead transaction left in
+// activeCh are discarded and counted so they never reach the next grant.
+// Returns true when a live transaction was ended; the caller must then cancel
+// the gateway echo watchdog after unlocking. Caller must hold stateMu.
+func (m *Mux) releaseGatewayAfterFailureLocked(reason ActiveTxnInactiveReason) bool {
+	if !m.gatewayTxnActive {
+		return false
+	}
+	m.gatewayTxnActive = false
+	m.recordGatewayInactive(reason)
+	m.releaseGatewayOwnershipLocked()
+	m.discardStaleActiveBytesLocked()
+	return true
+}
+
+// releaseGatewayOwnershipLocked drops gateway bus ownership, if held, together
+// with its echo expectations. Caller must hold stateMu.
+func (m *Mux) releaseGatewayOwnershipLocked() {
+	if !m.arb.isOwner(gatewaySessionID) {
+		return
+	}
+	m.arb.releaseOwnership(gatewaySessionID)
+	m.gatewayEcho.reset()
+}
+
+// discardStaleActiveBytesLocked removes the byte events still queued on
+// activeCh for a finished or failed gateway transaction and counts them
+// (issue #1401). Lifecycle (error) events are preserved. Caller must hold
+// stateMu.
+func (m *Mux) discardStaleActiveBytesLocked() {
+	if n := m.drainActiveChBytesOnly(); n > 0 {
+		m.activeTxn.staleActiveDiscarded.Add(uint64(n))
+	}
+}
+
+// releaseGatewayOnArbitrationLossLocked handles a confirmed arbitration loss
+// of the live gateway transaction (the F-NEW-29 first-byte foreign initiator,
+// or an escape-pair echo collision): the transaction ends with
+// ReasonArbitrationCollision and ownership is released at once (issue #1401)
+// instead of being held through a recovery envelope that only a
+// transport-lifecycle callback could end. protocol.Bus still waits for
+// protocol.CollisionRetryResyncSYNCount wire SYNs before it re-bids; that many
+// SYNs stay owed to activeCh (see onSYNLocked) so the retry is not starved
+// until its request deadline. Regrant waits for the next SYN because the
+// foreign telegram is still on the wire. Caller holds stateMu and must cancel
+// the gateway echo watchdog after unlocking when this returns true.
+func (m *Mux) releaseGatewayOnArbitrationLossLocked() bool {
+	if !m.releaseGatewayAfterFailureLocked(ReasonArbitrationCollision) {
+		return false
+	}
+	m.collisionResyncOwed = protocol.CollisionRetryResyncSYNCount
+	m.deferRegrantUntilNextSyn = true
+	return true
+}
+
+// retirePreviousGatewayTxnLocked runs when the gateway submits a new START.
+// protocol.Bus re-arbitrates only after its previous transaction returned, so
+// a transaction that is still live here, or a grant that was never used,
+// ended with a failure the bus detected without a transport-visible terminal
+// (for example an echo mismatch): it is ended with ReasonAbandonedOnRebid and
+// its ownership released before the new bid is queued (issue #1401). A grant
+// whose transaction already ended normally keeps the IdleReleaseGrace tail,
+// so the arbitration timing of healthy back-to-back transactions is
+// unchanged. Any post-loss resync window closes and what the finished
+// transaction left in activeCh is discarded. Returns true when a live
+// transaction was ended. Caller must hold stateMu.
+func (m *Mux) retirePreviousGatewayTxnLocked() bool {
+	transitioned := m.gatewayTxnActive
+	if transitioned ||
+		(m.arb.isOwner(gatewaySessionID) && m.activeTxn.inactiveReas == ReasonNone) {
+		m.gatewayTxnActive = false
+		m.recordGatewayInactive(ReasonAbandonedOnRebid)
+		m.releaseGatewayOwnershipLocked()
+	}
+	m.collisionResyncOwed = 0
+	m.discardStaleActiveBytesLocked()
+	return transitioned
+}
+
+// markActiveReadTimeout ends the gateway transaction with
+// ReasonActiveReadTimeout and releases gateway ownership at once (issue
+// #1401). A confirmed arbitration loss has already released the grant at
+// detection, so a timeout while protocol.Bus waits for its resynchronization
+// SYNs finds no live transaction and leaves the owed SYN window open.
+// Caller must NOT hold stateMu.
+//
+// Codex round-2 MUST FIX on PR #647: if the transition fires AND
+// V8ClassifierMode != Off, the watchdog is cancelled outside stateMu
+// (pacer mutex is independent; nested-lock free). Closes the
+// stale-fire window where an armed watchdog would otherwise emit an
+// EchoSoftTimeout / EchoHardTimeout admin event for a write whose
+// active transaction was just torn down by the active-read-timeout
+// boundary.
+func (m *Mux) markActiveReadTimeout() {
+	m.stateMu.Lock()
+	transitioned := m.releaseGatewayAfterFailureLocked(ReasonActiveReadTimeout)
+	m.stateMu.Unlock()
+	if transitioned {
+		m.cancelGatewayWatchdog()
+	}
+}
+
+// markActiveWriteError ends the gateway transaction with
+// ReasonActiveWriteError and releases gateway ownership (issue #1401).
+// Called from activeTransport.Write when sendLoop returns an error. A write
+// that failed with an escape-pair echo collision was already released as an
+// arbitration loss by doSend, so it finds no live transaction here.
+// Acquires stateMu internally. Caller must NOT hold stateMu.
+//
+// Codex round-2 MUST FIX on PR #647: same cancel-after-unlock
+// pattern as markActiveReadTimeout. Mirror of the doSend defer
+// cancel (which fires on the immediate write-error path); this
+// helper is called for write errors propagated UP from sendLoop's
+// error channel to activeTransport.Write callers, which can
+// happen even if doSend's own cancel already fired (the cancel
+// is idempotent so the second invocation is a no-op).
+func (m *Mux) markActiveWriteError() {
+	m.stateMu.Lock()
+	transitioned := m.releaseGatewayAfterFailureLocked(ReasonActiveWriteError)
+	m.stateMu.Unlock()
+	if transitioned {
+		m.cancelGatewayWatchdog()
+	}
+}
+
+// markActiveContextCancel ends the gateway transaction with
+// ReasonContextCancel, releases gateway ownership and closes any post-loss
+// resync window, because the active consumer is gone (issue #1401).
+// Called from activeTransport Read/Write when ctx.Done() fires.
+// Acquires stateMu internally. Caller must NOT hold stateMu.
+//
+// Codex round-2 MUST FIX on PR #647: same cancel-after-unlock
+// pattern. Context cancellation tears down the active transaction;
+// any pending echo watchdog is no longer meaningful.
+func (m *Mux) markActiveContextCancel() {
+	m.stateMu.Lock()
+	transitioned := m.releaseGatewayAfterFailureLocked(ReasonContextCancel)
+	m.collisionResyncOwed = 0
+	m.stateMu.Unlock()
+	if transitioned {
+		m.cancelGatewayWatchdog()
+	}
+}
+
+// cancelGatewayWatchdog is the private helper used by all gateway
+// ownership / active-txn teardown paths to cancel any pending
+// echo watchdog. Codex round-2 MUST FIX on PR #647 + round-3
+// MUST FIX expansion: every site that clears gatewayTxnActive or
+// releases gateway ownership invokes this so a stale soft/hard
+// fire cannot emit an admin event for a write whose context is
+// gone.
+//
+// Safe to call when V8ClassifierMode == Off (SessionPacer
+// returns nil; the call is a no-op). Caller MUST NOT hold
+// stateMu — CancelEchoWatchdog uses the pacer's own mutex, which
+// is independent from stateMu (nested-lock free either order),
+// but callers should avoid nesting by convention.
+func (m *Mux) cancelGatewayWatchdog() {
+	if pacer := m.SessionPacer(gatewaySessionID); pacer != nil {
+		pacer.CancelEchoWatchdog()
+	}
+}
+
+// recordGatewayInactive marks the gateway transaction as inactive with
+// the given reason. Caller must hold stateMu. Idempotent: a second call
+// with a different reason does not override the first (the first reason
+// is the truth; subsequent cleanup is not the root cause).
+func (m *Mux) recordGatewayInactive(reason ActiveTxnInactiveReason) {
+	if m.activeTxn.inactiveReas != ReasonNone {
+		return
+	}
+	m.activeTxn.inactiveAt = time.Now()
+	m.activeTxn.inactiveReas = reason
+	if reason == ReasonSYNTerminator || reason == ReasonTransactionDone {
+		m.stepCompletedLocked()
+	}
+	for i, known := range inactiveReasons {
+		if known == reason {
+			m.activeTxn.inactiveByReason[i].Add(1)
+			break
+		}
+	}
+	class := m.classifyTxnLocked(reason)
+	m.activeTxn.txnClass = class
+	m.activeTxn.lastClass = class
+	wp := m.activeTxn.writePrefix[:m.activeTxn.writePrefixLen]
+	rp := m.activeTxn.readPrefix[:m.activeTxn.readPrefixLen]
+	m.logger.Printf(
+		"adaptermux: activeTxn inactive id=%d reason=%s class=%s writes=%d reads=%d firstByteSuspectArbLoss=%v echoLike=%d nonEcho=%d synMarkers=%d writePrefix=% X readPrefix=% X dur=%s",
+		m.activeTxn.id, reason, class,
+		m.activeTxn.bytesWritten.Load(), m.activeTxn.bytesRead.Load(),
+		m.activeTxn.firstByteSuspectArbLoss.Load(),
+		m.activeTxn.echoLike.Load(), m.activeTxn.nonEcho.Load(), m.activeTxn.synMarkers.Load(),
+		wp, rp,
+		time.Since(m.activeTxn.grantedAt),
+	)
+}
+
+// recordWritePrefix captures the first txnPrefixCap bytes the gateway
+// writes during the current transaction. Caller must hold stateMu.
+func (m *Mux) recordWritePrefix(b byte) {
+	if m.activeTxn.writePrefixLen < txnPrefixCap {
+		m.activeTxn.writePrefix[m.activeTxn.writePrefixLen] = b
+		m.activeTxn.writePrefixLen++
+	}
+}
+
+// recordReadPrefixAndClassify captures the first txnPrefixCap bytes the
+// gateway reads during the current transaction and updates byte-class
+// counters. Caller must hold stateMu.
+func (m *Mux) recordReadPrefixAndClassify(b byte) {
+	if b == protocol.SymbolSyn {
+		m.activeTxn.synMarkers.Add(1)
+	} else if m.activeTxn.echoCursor < m.activeTxn.writePrefixLen &&
+		m.activeTxn.writePrefix[m.activeTxn.echoCursor] == b {
+		// Echo matching follows the next expected echoed write byte,
+		// not the absolute read position. Leading SYN chatter must not
+		// permanently misalign a later real echo.
+		m.activeTxn.echoLike.Add(1)
+		m.activeTxn.echoCursor++
+	} else {
+		m.activeTxn.nonEcho.Add(1)
+		if m.activeTxn.echoCursor < m.activeTxn.writePrefixLen {
+			m.activeTxn.echoCursor++
+		}
+	}
+	if m.activeTxn.readPrefixLen < txnPrefixCap {
+		m.activeTxn.readPrefix[m.activeTxn.readPrefixLen] = b
+		m.activeTxn.readPrefixLen++
+	}
+}
+
+// classifyTxnLocked computes the terminal TxnClass from captured prefixes
+// and counters. Caller must hold stateMu. Pure function modulo struct
+// fields — no side effects.
+//
+// Decision order (first matching wins):
+//   - SuccessLike: TransactionDone or CmdNACK reason (lifecycle-complete)
+//   - SuccessLike: reads include a SYN marker AND non-echo byte count is
+//     positive AND reads >= writes (plausible response + terminator)
+//   - EchoOnlyTimeout: no-response shape (including SYN-terminated echo-only
+//     traffic) AND reads all matched writes position-wise (no nonEcho bytes seen)
+//   - NonEchoInvalidFrame: got nonEcho bytes but no SYN and no success
+//     (incoherent bytes on the wire; not a framed response)
+//   - CandidateNoParse: got nonEcho bytes AND a SYN but still timed out
+//     (looks like a response but upper layer didn't produce a frame)
+//   - SchemaError: reserved for payload-schema failure path; decided by
+//     caller via classifyTxnWithSchemaError (not computed here)
+//   - Unknown: insufficient signal
+func (m *Mux) classifyTxnLocked(reason ActiveTxnInactiveReason) TxnClass {
+	hasWritePrefix := m.activeTxn.writePrefixLen > 0
+	echo := m.activeTxn.echoLike.Load()
+	nonEcho := m.activeTxn.nonEcho.Load()
+	syns := m.activeTxn.synMarkers.Load()
+
+	// Lifecycle-complete reasons imply the phase tracker observed a
+	// full frame or an explicit NACK. Treat as success-like for the
+	// purpose of distinguishing from silent timeouts. (CmdNACK is not
+	// a "successful" read, but the target DID respond — different from
+	// echo-only timeout.)
+	if reason == ReasonTransactionDone || reason == ReasonCmdNACK {
+		return TxnClassSuccessLike
+	}
+	// A first-byte arbitration collision is confirmed foreign traffic,
+	// not a candidate response.
+	if reason == ReasonArbitrationCollision {
+		return TxnClassNonEchoInvalidFrame
+	}
+
+	isTimeoutLike := reason == ReasonActiveReadTimeout ||
+		reason == ReasonSYNTerminator ||
+		reason == ReasonSYNIdle ||
+		reason == ReasonSYNTimeout ||
+		reason == ReasonMaxOwnership ||
+		reason == ReasonActiveWriteError ||
+		reason == ReasonContextCancel ||
+		reason == ReasonReset ||
+		reason == ReasonReconnect ||
+		reason == ReasonAbandonedOnRebid
+
+	// SuccessLike heuristic: saw non-echo response bytes and a SYN
+	// terminator after at least part of the gateway write stream was
+	// echoed back. Without an echo signal, stale/foreign traffic can
+	// be incorrectly blessed as the gateway's successful transaction.
+	if nonEcho > 0 && syns > 0 && echo > 0 && hasWritePrefix {
+		return TxnClassSuccessLike
+	}
+
+	if !isTimeoutLike {
+		return TxnClassUnknown
+	}
+
+	// Timeout-like paths past this point.
+	if hasWritePrefix && nonEcho == 0 && echo >= 1 {
+		// Every read matched the write prefix position-wise: echo-only.
+		return TxnClassEchoOnlyTimeout
+	}
+	if hasWritePrefix && m.activeTxn.readPrefixLen == 0 {
+		// Didn't even see our own echo back — treat as echo-only
+		// (lowest-confidence class, but still more informative than
+		// "unknown" for an operator triaging the soak log).
+		return TxnClassEchoOnlyTimeout
+	}
+	if nonEcho > 0 && syns == 0 {
+		return TxnClassNonEchoInvalidFrame
+	}
+	if nonEcho > 0 && syns > 0 {
+		return TxnClassCandidateNoParse
+	}
+	return TxnClassUnknown
+}
+
+// synDiagRingCap bounds the SYN-path diagnostics ring. 16 entries is
+// enough to characterize the last ~16 SYN events that arrived while the
+// gateway owned the bus (the window where a missed final-SYN echo would
+// strand a Send consumer). Bounded — never grows.
+const synDiagRingCap = 16
+
+// SynDiagEntry records a single SYN-on-gateway-ownership event. The
+// fields answer: at SYN arrival, did the mux consider the txn active?
+// What was the last byte we wrote (to correlate with a real response)?
+// How many bytes had the active path read already? Did we deliver the
+// SYN to activeCh for the Send consumer, or did onSYNLocked consume it
+// as an end-of-txn terminator? Which inactive reason (if any) was set?
+type SynDiagEntry struct {
+	ObservedAt           time.Time
+	TxnID                uint64
+	OwnerID              uint64
+	GatewayOwned         bool
+	GwActiveBefore       bool
+	GwActiveAfter        bool
+	LastWrittenByte      byte
+	HasLastWrittenByte   bool
+	BytesRead            uint64
+	SynDeliveredToActive bool
+	InactiveReason       ActiveTxnInactiveReason
+}
+
+// synDiagRing is a bounded ring of SynDiagEntry. Wraps once it reaches
+// synDiagRingCap — oldest entries are overwritten. Access is guarded by
+// Mux.stateMu.
+type synDiagRing struct {
+	entries [synDiagRingCap]SynDiagEntry
+	head    int // next write slot
+	count   int // number of valid entries (<=synDiagRingCap)
+}
+
+// push appends entry, overwriting the oldest slot once full.
+func (r *synDiagRing) push(e SynDiagEntry) {
+	r.entries[r.head] = e
+	r.head = (r.head + 1) % synDiagRingCap
+	if r.count < synDiagRingCap {
+		r.count++
+	}
+}
+
+// snapshot returns a slice of entries in chronological order (oldest
+// first). Safe to call with Mux.stateMu held.
+func (r *synDiagRing) snapshot() []SynDiagEntry {
+	if r.count == 0 {
+		return nil
+	}
+	out := make([]SynDiagEntry, 0, r.count)
+	start := (r.head - r.count + synDiagRingCap) % synDiagRingCap
+	for i := 0; i < r.count; i++ {
+		out = append(out, r.entries[(start+i)%synDiagRingCap])
+	}
+	return out
+}
+
+// SynDiagSnapshot returns a chronological snapshot of recent SYN-on-
+// gateway-ownership events. Bounded to synDiagRingCap entries. Safe to
+// call from any goroutine.
+//
+// Used by tests and by runtime soak triage to confirm or exclude the
+// hypothesis that the trailing SYN of a gateway transaction is consumed
+// by onSYNLocked before the Send consumer sees it as a frame terminator.
+func (m *Mux) SynDiagSnapshot() []SynDiagEntry {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	return m.synDiag.snapshot()
+}
+
+// ActiveTxnSnapshotForScan returns a txnID-carrying snapshot of the
+// current (or most recent) gateway transaction, bounded to the first
+// txnPrefixCap write/read bytes and the lightweight class string. This
+// is the richer seam used by statsBus when the injected classifier
+// implements activeTxnSnapshotter — it lets each scan attempt log carry
+// the specific txn ID the bus.Send call actually produced, eliminating
+// the attribution race where LastTxnClass() could return a later txn's
+// class if a second grant completed between Send return and the log
+// write.
+//
+// Returned prefix slices are freshly allocated copies — safe to hold
+// across calls. Safe to call from any goroutine.
+func (m *Mux) ActiveTxnSnapshotForScan() (id uint64, writePrefix []byte, readPrefix []byte, class string) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	wp := make([]byte, m.activeTxn.writePrefixLen)
+	copy(wp, m.activeTxn.writePrefix[:m.activeTxn.writePrefixLen])
+	rp := make([]byte, m.activeTxn.readPrefixLen)
+	copy(rp, m.activeTxn.readPrefix[:m.activeTxn.readPrefixLen])
+	cls := m.activeTxn.txnClass
+	if cls == TxnClassUnknown {
+		cls = m.activeTxn.lastClass
+	}
+	return m.activeTxn.id, wp, rp, string(cls)
+}
+
+// recordSynDiagLocked pushes a SYN-on-gateway-ownership entry into the
+// ring. Caller must hold stateMu. Only call when gateway owns the bus at
+// SYN arrival (the hypothesis-relevant window).
+func (m *Mux) recordSynDiagLocked(
+	ownerID uint64,
+	gwActiveBefore bool,
+	gwActiveAfter bool,
+	synDelivered bool,
+) {
+	var last byte
+	hasLast := false
+	if n := m.activeTxn.writePrefixLen; n > 0 {
+		last = m.activeTxn.writePrefix[n-1]
+		hasLast = true
+	}
+	m.synDiag.push(SynDiagEntry{
+		ObservedAt:           time.Now(),
+		TxnID:                m.activeTxn.id,
+		OwnerID:              ownerID,
+		GatewayOwned:         true,
+		GwActiveBefore:       gwActiveBefore,
+		GwActiveAfter:        gwActiveAfter,
+		LastWrittenByte:      last,
+		HasLastWrittenByte:   hasLast,
+		BytesRead:            m.activeTxn.bytesRead.Load(),
+		SynDeliveredToActive: synDelivered,
+		InactiveReason:       m.activeTxn.inactiveReas,
+	})
+}
+
+// MarkSchemaError flags the most recent (or current) gateway transaction
+// as having failed because the payload did not match the expected
+// schema. Called by the gateway-side parse path when a candidate frame
+// was received but schema validation failed. Safe to call after the txn
+// has already been marked inactive — it overrides the recorded class
+// only in that case (schema error is a post-terminal classification
+// refinement).
+func (m *Mux) MarkSchemaError() {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	// Only promote to SchemaError if the prior class was a plausible
+	// response (CandidateNoParse or SuccessLike). Don't overwrite
+	// EchoOnlyTimeout — that is physically incompatible with a
+	// schema error.
+	switch m.activeTxn.txnClass {
+	case TxnClassCandidateNoParse, TxnClassSuccessLike, TxnClassUnknown:
+		m.activeTxn.txnClass = TxnClassSchemaError
+	}
+	switch m.activeTxn.lastClass {
+	case TxnClassCandidateNoParse, TxnClassSuccessLike, TxnClassUnknown:
+		m.activeTxn.lastClass = TxnClassSchemaError
+	}
+}

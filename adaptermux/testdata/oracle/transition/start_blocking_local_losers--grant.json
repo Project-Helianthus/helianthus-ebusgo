@@ -1,0 +1,62 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "adaptermux",
+  "source": "internal/adaptermux/mux.go",
+  "stimulus": "TestMuxTransitionCharacterization/start_blocking_local_losers/grant",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "fixture": "start_blocking_local_losers",
+      "input": "grant",
+      "upstream": "blocking"
+    },
+    "clock": {
+      "deadline": "fires only when the input is start_deadline",
+      "timers": "held"
+    },
+    "state": {
+      "absorb": 0,
+      "bids": "deferred gateway 0x7F",
+      "blocking_call": true,
+      "gateway_txn": false,
+      "local_losers": "gateway, session 2",
+      "owner": "",
+      "phase": "",
+      "recovery": "",
+      "regrant_fence": false,
+      "resync_owed": 0,
+      "retired_selection": false,
+      "start": "session 1 0x31",
+      "start_blocking": true,
+      "start_response": false
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "effect_classes": [],
+        "effects": null,
+        "state": {
+          "absorb": 0,
+          "bids": "deferred gateway 0x7F",
+          "blocking_call": true,
+          "gateway_txn": false,
+          "local_losers": "gateway, session 2",
+          "owner": "",
+          "phase": "",
+          "recovery": "",
+          "regrant_fence": false,
+          "resync_owed": 0,
+          "retired_selection": false,
+          "start": "session 1 0x31",
+          "start_blocking": true,
+          "start_response": false
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

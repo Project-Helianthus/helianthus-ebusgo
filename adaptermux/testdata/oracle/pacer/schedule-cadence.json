@@ -1,0 +1,47 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/pacer.go",
+  "stimulus": "TestPacer_Schedule_SubsequentCallEnforcesCadence/CallerLateAdvancesCadence/BurstSequence",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "burst": 6,
+      "calls_ns": [
+        0,
+        1000000,
+        100000000
+      ]
+    },
+    "clock": {
+      "t0_unix": 1000000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "burst_emit_ns": [
+          0,
+          4167000,
+          8334000,
+          12501000,
+          16668000,
+          20835000
+        ],
+        "emit_ns": [
+          0,
+          4167000,
+          100000000
+        ],
+        "last_scheduled_ns": 100000000
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "tau_ns": 4167000
+    }
+  }
+}

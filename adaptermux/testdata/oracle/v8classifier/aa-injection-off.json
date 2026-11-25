@@ -1,0 +1,40 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/classifier.go",
+  "stimulus": "TestClassifier_DropAaInjection/off",
+  "input": {
+    "bytes": "aa",
+    "qualifiers": {
+      "mode": "off",
+      "started": "71"
+    },
+    "clock": {
+      "at": "1970-01-01T00:00:42Z"
+    },
+    "state": {
+      "after_started": true
+    }
+  },
+  "output": {
+    "symbols_written": [
+      "aa"
+    ],
+    "decisions": [
+      {
+        "admin_dropped": 0,
+        "admin_events": [],
+        "drop": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "enforce_drops_applied_total": 0,
+      "fsm_drop_aa_injection_total": 0,
+      "observed_admin_events_total": 0,
+      "observed_bytes_total": 0,
+      "shadow_would_have_dropped": 0
+    }
+  }
+}

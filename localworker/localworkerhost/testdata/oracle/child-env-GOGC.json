@@ -1,0 +1,38 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27ChildEnvironmentNeverInheritsGatewayRuntimeSettings/GOGC",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "policy_gc": "off",
+      "policy_memory_limit": "64MiB",
+      "stripped_key": "GOGC"
+    },
+    "clock": {},
+    "state": {
+      "base": [
+        "PATH=/usr/bin",
+        "GOGC=parent-value",
+        "LANG=C"
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "env": [
+          "PATH=/usr/bin",
+          "LANG=C",
+          "GOGC=off",
+          "GOMEMLIMIT=64MiB"
+        ]
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

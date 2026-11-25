@@ -1,0 +1,26 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/mode.go",
+  "stimulus": "TestParseMode/unknown",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "text": "bogus"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "v8classifier: unknown mode \"bogus\" (expected off|shadow|enforce)",
+        "mode": "off"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

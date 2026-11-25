@@ -1,0 +1,35 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchDescriptorRejectsPartialB555Selector",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "canonical": "b555:15:a5:02:00:06:ff:raw:1:06:0:00",
+      "selector": {
+        "has_slot": false,
+        "has_weekday": true,
+        "hc": "00",
+        "opcode": "a5",
+        "slot": "00",
+        "target": "15",
+        "weekday": "06",
+        "zone": "02"
+      }
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "watch descriptor \"b555:15:a5:02:00:06:ff:raw:1:06:0:00\" must set both weekday and slot selectors together"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

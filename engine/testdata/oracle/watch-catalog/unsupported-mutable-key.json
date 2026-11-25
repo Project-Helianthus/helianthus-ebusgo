@@ -1,0 +1,23 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestNewWatchCatalogRejectsUnsupportedMutableKeyType",
+  "input": {
+    "bytes": "",
+    "qualifiers": {},
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "watch descriptor key type *ebusgateway.mutableTestWatchKey is not supported for immutable catalog storage"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

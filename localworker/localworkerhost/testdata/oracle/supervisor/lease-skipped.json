@@ -1,0 +1,46 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27LeasesAdvanceStrictlyAndExpireOnInjectedTime/skipped",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "sequence": 2
+    },
+    "clock": {
+      "lease_interval_ns": 100000000,
+      "lease_ttl_ns": 1000000000,
+      "ready_timeout_ns": 5000000000,
+      "start": "1970-01-01T00:16:40Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "is_lease": true,
+        "lease_error": "localworkerhost: lease sequence out of order"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "status": {
+        "cancelled": 0,
+        "generation": {
+          "registration": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        },
+        "launches": 1,
+        "pending": 0,
+        "plans": 0,
+        "reason": "localworkerhost: lease sequence out of order",
+        "state": "fenced"
+      }
+    }
+  }
+}

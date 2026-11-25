@@ -1,0 +1,70 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "passive_transaction_reconstructor",
+  "source": "passive_transaction_reconstructor.go",
+  "stimulus": "TestPassiveTransactionReconstructor_ClassifiesBroadcast",
+  "input": {
+    "bytes": "10feb5160201020baa",
+    "qualifiers": {
+      "escaped_symbol_indices": [],
+      "fed_symbols": "aa10feb5160201020baa",
+      "feeder": "feedPassiveSymbols",
+      "tap_events_after_stream": []
+    },
+    "clock": {
+      "start": "1970-01-01T00:00:00Z",
+      "symbol_spacing_ns": 10000000
+    },
+    "state": {
+      "local_address_snapshotter": {
+        "installed": false
+      },
+      "passive_transaction_watchdog_ns": 1000000000
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [],
+    "cache": {},
+    "observations": [
+      {
+        "abandon_reason": "",
+        "ack_correlation": {
+          "byte": "00",
+          "complete_request": false,
+          "correlator": "",
+          "position": ""
+        },
+        "discontinuity_reason": "",
+        "error": "",
+        "frame_type": "broadcast",
+        "has_request": true,
+        "has_response": false,
+        "kind": "broadcast_frame",
+        "observed_at": "1970-01-01T00:00:00.09Z",
+        "offending_symbol": "00",
+        "offending_was_escaped": false,
+        "request": {
+          "data": "0102",
+          "primary": "b5",
+          "secondary": "16",
+          "source": "10",
+          "target": "fe"
+        },
+        "response": {},
+        "timing": {
+          "request_end": "1970-01-01T00:00:00.09Z",
+          "request_start": "1970-01-01T00:00:00.01Z",
+          "response_end": "",
+          "response_start": "",
+          "terminal": "1970-01-01T00:00:00.09Z"
+        }
+      }
+    ],
+    "counters": {
+      "abandons_by_reason": {},
+      "invalid_src_class_skipped_total": 0,
+      "prefix_resync_skipped_total": 0
+    }
+  }
+}

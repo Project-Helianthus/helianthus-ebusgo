@@ -1,0 +1,168 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "passive_reconstructor_f19c_helpers",
+  "source": "passive_reconstructor_f19c_helpers.go",
+  "stimulus": "TestF19c_InvalidQQ_NotMaster/TestF19c_F18_RegressionGuard",
+  "input": {
+    "bytes": "00103070f001113171f103133373f307173777f70f1f3f7fff125288994ccd",
+    "qualifiers": {},
+    "clock": {},
+    "state": {
+      "initiator_operands": "00103070f001113171f103133373f307173777f70f1f3f7fff125288994ccd",
+      "target_operands": "08aaa9fe10"
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "byte": "00",
+        "initiator": true
+      },
+      {
+        "byte": "10",
+        "initiator": true
+      },
+      {
+        "byte": "30",
+        "initiator": true
+      },
+      {
+        "byte": "70",
+        "initiator": true
+      },
+      {
+        "byte": "f0",
+        "initiator": true
+      },
+      {
+        "byte": "01",
+        "initiator": true
+      },
+      {
+        "byte": "11",
+        "initiator": true
+      },
+      {
+        "byte": "31",
+        "initiator": true
+      },
+      {
+        "byte": "71",
+        "initiator": true
+      },
+      {
+        "byte": "f1",
+        "initiator": true
+      },
+      {
+        "byte": "03",
+        "initiator": true
+      },
+      {
+        "byte": "13",
+        "initiator": true
+      },
+      {
+        "byte": "33",
+        "initiator": true
+      },
+      {
+        "byte": "73",
+        "initiator": true
+      },
+      {
+        "byte": "f3",
+        "initiator": true
+      },
+      {
+        "byte": "07",
+        "initiator": true
+      },
+      {
+        "byte": "17",
+        "initiator": true
+      },
+      {
+        "byte": "37",
+        "initiator": true
+      },
+      {
+        "byte": "77",
+        "initiator": true
+      },
+      {
+        "byte": "f7",
+        "initiator": true
+      },
+      {
+        "byte": "0f",
+        "initiator": true
+      },
+      {
+        "byte": "1f",
+        "initiator": true
+      },
+      {
+        "byte": "3f",
+        "initiator": true
+      },
+      {
+        "byte": "7f",
+        "initiator": true
+      },
+      {
+        "byte": "ff",
+        "initiator": true
+      },
+      {
+        "byte": "12",
+        "initiator": false
+      },
+      {
+        "byte": "52",
+        "initiator": false
+      },
+      {
+        "byte": "88",
+        "initiator": false
+      },
+      {
+        "byte": "99",
+        "initiator": false
+      },
+      {
+        "byte": "4c",
+        "initiator": false
+      },
+      {
+        "byte": "cd",
+        "initiator": false
+      }
+    ],
+    "cache": {},
+    "observations": [
+      {
+        "byte": "08",
+        "valid_target": true
+      },
+      {
+        "byte": "aa",
+        "valid_target": false
+      },
+      {
+        "byte": "a9",
+        "valid_target": false
+      },
+      {
+        "byte": "fe",
+        "valid_target": false
+      },
+      {
+        "byte": "10",
+        "valid_target": false
+      }
+    ],
+    "counters": {}
+  }
+}

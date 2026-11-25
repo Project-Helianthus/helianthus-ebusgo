@@ -1,0 +1,35 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchDescriptorRejectsWidenedTTL",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "ttl_ns": 121000000000
+    },
+    "clock": {},
+    "state": {
+      "descriptor": {
+        "correlation_policy": "request_response",
+        "decoder_id": "vaillant.f32le",
+        "direct_apply_policy": "state_default",
+        "freshness_profile": "state_slow",
+        "freshness_ttl_ns": 121000000000,
+        "key": "b524:15:06:01:00:0005",
+        "semantic_class": "state"
+      }
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "watch descriptor \"b524:15:06:01:00:0005\" freshness ttl 2m1s widens default 2m0s"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

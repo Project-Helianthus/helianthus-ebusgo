@@ -1,0 +1,50 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27StopEscalatesAndAnUnreapedChildBlocksEveryStart/unreaped",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "exit_on_kill": false,
+      "exit_on_stop": false,
+      "kill_grace_fires": true,
+      "stop_grace_fires": true
+    },
+    "clock": {
+      "kill_grace_ns": 2000000000,
+      "stop_grace_ns": 1000000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "is_unreaped": true,
+        "resources_after_stop": [
+          {
+            "closes": 0,
+            "role": 1,
+            "size": 152
+          },
+          {
+            "closes": 0,
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "second_supervisor_start": "localworkerhost: a worker child is already live in this process",
+        "start_after_reap": "",
+        "start_while_unreaped": "localworkerhost: the worker child was not reaped within its stop budget",
+        "state_after_late_reap": "stopped",
+        "state_after_stop": "unreaped",
+        "stop_error": "localworkerhost: the worker child was not reaped within its stop budget",
+        "worker_epoch_after_reap": 2
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

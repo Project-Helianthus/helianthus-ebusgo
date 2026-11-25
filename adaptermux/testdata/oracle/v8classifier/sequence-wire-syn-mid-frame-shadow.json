@@ -1,0 +1,80 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/classifier.go",
+  "stimulus": "TestStreamEventWireSyn_EnforceMode_Drops/shadow",
+  "input": {
+    "bytes": "aa",
+    "qualifiers": {
+      "mode": "shadow",
+      "sequence": "wire-syn-mid-frame"
+    },
+    "clock": {
+      "at": "1970-01-01T00:00:00Z"
+    },
+    "state": {
+      "events": [
+        {
+          "escaped": false,
+          "event": "started",
+          "value": "71"
+        },
+        {
+          "escaped": false,
+          "event": "wire_syn",
+          "value": "aa"
+        }
+      ],
+      "fsm": "idle"
+    }
+  },
+  "output": {
+    "symbols_written": [
+      "aa"
+    ],
+    "decisions": [
+      {
+        "drop": false,
+        "escaped": false,
+        "event": "started",
+        "fsm_state": "PASSIVE_TRACKING",
+        "passive": true,
+        "value": "71"
+      },
+      {
+        "drop": false,
+        "escaped": false,
+        "event": "wire_syn",
+        "fsm_state": "PASSIVE_TRACKING",
+        "passive": true,
+        "value": "aa"
+      }
+    ],
+    "cache": {},
+    "observations": [
+      {
+        "at": "1970-01-01T00:00:00Z",
+        "byte": "aa",
+        "fsm_state": "PASSIVE_TRACKING",
+        "kind": "aa_injection_drop",
+        "was_escaped": false
+      }
+    ],
+    "counters": {
+      "admin_dropped": 0,
+      "enforce_drops_applied_total": 0,
+      "escaped_payload_aa_total": 0,
+      "escaped_payload_esc_total": 0,
+      "fsm_drop_aa_injection_total": 1,
+      "fsm_enter_passive_total": 1,
+      "fsm_forward_total": 0,
+      "fsm_protocol_fault_total": 0,
+      "fsm_reset_total": 0,
+      "observed_admin_events_total": 0,
+      "observed_bytes_total": 2,
+      "plain_byte_total": 0,
+      "shadow_would_have_dropped": 1,
+      "wire_auto_syn_total": 1
+    }
+  }
+}

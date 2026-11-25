@@ -1,0 +1,279 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27RestartAdvancesEveryEpochAndReplaysNothing",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "first_command_sequence": 1,
+      "first_plan": 1
+    },
+    "clock": {
+      "now": "1970-01-01T00:16:40Z"
+    },
+    "state": {
+      "generation_before": {
+        "registration": 1,
+        "stream": 1,
+        "token": 1,
+        "worker": 1
+      },
+      "operations": [
+        {
+          "call": "PublishPlan",
+          "order": 1,
+          "plan": 1,
+          "registration": 1,
+          "stream": 1,
+          "worker": 1
+        },
+        {
+          "call": "Enqueue",
+          "order": 2,
+          "sequence": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        },
+        {
+          "call": "Restart",
+          "order": 3
+        },
+        {
+          "call": "Observe",
+          "order": 4,
+          "report": {
+            "abi": 1,
+            "build": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+            "descriptors": [
+              {
+                "role": 1,
+                "size": 152
+              },
+              {
+                "role": 2,
+                "size": 4096
+              }
+            ],
+            "executable": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+            "generation": {
+              "registration": 1,
+              "stream": 1,
+              "token": 1,
+              "worker": 1
+            },
+            "kind": 1,
+            "sequence": 0,
+            "state": 1,
+            "tx_active": false
+          }
+        },
+        {
+          "call": "Observe",
+          "order": 5,
+          "report": {
+            "abi": 1,
+            "build": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+            "descriptors": [
+              {
+                "role": 1,
+                "size": 152
+              },
+              {
+                "role": 2,
+                "size": 4096
+              }
+            ],
+            "executable": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+            "generation": {
+              "registration": 2,
+              "stream": 2,
+              "token": 2,
+              "worker": 2
+            },
+            "kind": 1,
+            "sequence": 0,
+            "state": 1,
+            "tx_active": false
+          }
+        },
+        {
+          "call": "PublishPlan",
+          "order": 6,
+          "plan": 2,
+          "registration": 2,
+          "stream": 2,
+          "worker": 1
+        },
+        {
+          "call": "PublishPlan",
+          "order": 7,
+          "plan": 2,
+          "registration": 2,
+          "stream": 1,
+          "worker": 2
+        },
+        {
+          "call": "PublishPlan",
+          "order": 8,
+          "plan": 2,
+          "registration": 1,
+          "stream": 2,
+          "worker": 2
+        },
+        {
+          "call": "Enqueue",
+          "order": 9,
+          "sequence": 1,
+          "stream": 2,
+          "token": 2,
+          "worker": 1
+        },
+        {
+          "call": "Enqueue",
+          "order": 10,
+          "sequence": 1,
+          "stream": 1,
+          "token": 2,
+          "worker": 2
+        },
+        {
+          "call": "Enqueue",
+          "order": 11,
+          "sequence": 1,
+          "stream": 2,
+          "token": 1,
+          "worker": 2
+        },
+        {
+          "call": "PublishPlan",
+          "order": 12,
+          "plan": 1,
+          "registration": 2,
+          "stream": 2,
+          "worker": 2
+        },
+        {
+          "call": "PublishPlan",
+          "order": 13,
+          "plan": 1,
+          "registration": 2,
+          "stream": 2,
+          "worker": 2
+        },
+        {
+          "call": "Enqueue",
+          "order": 14,
+          "sequence": 1,
+          "stream": 2,
+          "token": 2,
+          "worker": 2
+        },
+        {
+          "call": "Drain",
+          "order": 15
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "drain_after_restart": 0,
+        "drained": 1,
+        "drained_token": 2,
+        "duplicate_is_plan": true,
+        "duplicate_plan_error": "localworkerhost: plan identity is invalid or duplicated",
+        "first_enqueue_error": "",
+        "first_plan_error": "",
+        "fresh_command_error": "",
+        "fresh_plan_error": "",
+        "predecessor_kills": 0,
+        "predecessor_ready_error": "localworkerhost: stale generation dropped",
+        "predecessor_ready_is_stale": true,
+        "predecessor_stops": 1,
+        "resources_after_restart": [
+          {
+            "closes": 1,
+            "role": 1,
+            "size": 152
+          },
+          {
+            "closes": 1,
+            "role": 2,
+            "size": 4096
+          },
+          {
+            "closes": 0,
+            "role": 1,
+            "size": 152
+          },
+          {
+            "closes": 0,
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "restart_error": "",
+        "stale": [
+          {
+            "error": "localworkerhost: stale generation dropped",
+            "is_stale": true,
+            "kind": "plan",
+            "name": "old worker"
+          },
+          {
+            "error": "localworkerhost: stale generation dropped",
+            "is_stale": true,
+            "kind": "plan",
+            "name": "old stream"
+          },
+          {
+            "error": "localworkerhost: stale generation dropped",
+            "is_stale": true,
+            "kind": "plan",
+            "name": "old registration"
+          },
+          {
+            "error": "localworkerhost: stale generation dropped",
+            "is_stale": true,
+            "kind": "command",
+            "name": "old worker"
+          },
+          {
+            "error": "localworkerhost: stale generation dropped",
+            "is_stale": true,
+            "kind": "command",
+            "name": "old stream"
+          },
+          {
+            "error": "localworkerhost: stale generation dropped",
+            "is_stale": true,
+            "kind": "command",
+            "name": "old token"
+          }
+        ],
+        "state_after_predecessor_ready": "starting",
+        "status_after_restart": {
+          "cancelled": 1,
+          "generation": {
+            "registration": 2,
+            "stream": 2,
+            "token": 2,
+            "worker": 2
+          },
+          "launches": 2,
+          "pending": 0,
+          "plans": 0,
+          "reason": "",
+          "state": "starting"
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

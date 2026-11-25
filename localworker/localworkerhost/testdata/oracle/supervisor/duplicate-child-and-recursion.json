@@ -1,0 +1,50 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27DuplicateChildAndRecursionAreRefused",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "child_flag": "--internal-ebus-local-worker"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "is_duplicate": true,
+        "is_running": true,
+        "other_launches": 0,
+        "other_supervisor_error": "localworkerhost: a worker child is already live in this process",
+        "recursion": [
+          {
+            "argv": [
+              "/opt/gateway/bin/gateway",
+              "--internal-ebus-local-worker"
+            ],
+            "error": "localworkerhost: a worker child cannot supervise a worker",
+            "is_recursion": true,
+            "name": "child argv"
+          },
+          {
+            "argv": [
+              "/opt/gateway/bin/gateway",
+              "-x",
+              "--internal-ebus-local-worker"
+            ],
+            "error": "localworkerhost: a worker child cannot supervise a worker",
+            "is_recursion": true,
+            "name": "flag later"
+          }
+        ],
+        "second_start_error": "localworkerhost: the worker is already started"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

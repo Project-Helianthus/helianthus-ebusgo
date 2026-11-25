@@ -1,0 +1,41 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "semantic_read_scheduler",
+  "source": "semantic_read_scheduler.go",
+  "stimulus": "TestSemanticReadScheduler_UsesCacheWithinMaxAge",
+  "input": {
+    "bytes": "aa",
+    "qualifiers": {
+      "fetch_returns": "aa",
+      "gets": 2,
+      "key": "k",
+      "max_age_ns": 1000000000
+    },
+    "clock": {
+      "now": "1970-01-01T00:00:00Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "errors": [
+          "",
+          ""
+        ],
+        "returned_values": [
+          "aa",
+          "aa"
+        ]
+      }
+    ],
+    "cache": {
+      "served_from_cache": true
+    },
+    "observations": [],
+    "counters": {
+      "fetch_calls": 1
+    }
+  }
+}

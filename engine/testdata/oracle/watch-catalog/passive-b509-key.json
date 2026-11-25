@@ -1,0 +1,71 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestPassiveWatchKeyFromEventMatchesB509SchedulerKey",
+  "input": {
+    "bytes": "0d02002902000e0200",
+    "qualifiers": {},
+    "clock": {},
+    "state": {
+      "events": [
+        {
+          "has_request": true,
+          "opcode": "0d",
+          "request": {
+            "data": "0d0200",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "10",
+            "target": "08"
+          }
+        },
+        {
+          "has_request": true,
+          "opcode": "29",
+          "request": {
+            "data": "290200",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "10",
+            "target": "08"
+          }
+        },
+        {
+          "has_request": true,
+          "opcode": "0e",
+          "request": {
+            "data": "0e0200",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "10",
+            "target": "08"
+          }
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "canonical": "b509:08:0200",
+        "ok": true,
+        "opcode": "0d"
+      },
+      {
+        "canonical": "b509:08:0200",
+        "ok": true,
+        "opcode": "29"
+      },
+      {
+        "canonical": "b509:08:0200",
+        "ok": true,
+        "opcode": "0e"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

@@ -1,0 +1,3314 @@
+package adaptermux
+
+import (
+	"context"
+	"errors"
+	"expvar"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+	"github.com/Project-Helianthus/helianthus-ebusgo/protocol"
+	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
+
+	"github.com/Project-Helianthus/helianthus-ebusgo/adaptermux/v8classifier"
+)
+
+const infoCacheInterRequestDelay = 200 * time.Millisecond
+
+const (
+	infoBootstrapIDsEnv = "HELIANTHUS_INFO_BOOTSTRAP_IDS"
+	infoDelayMSEnv      = "HELIANTHUS_INFO_DELAY_MS"
+)
+
+// Config configures the adapter multiplexer.
+type Config struct {
+	// Protocol is "enh" or "ens".
+	Protocol string
+
+	// Network and Address specify the adapter endpoint (e.g., "tcp",
+	// "boiler.local:9999", or NetworkSerial and an absolute device path).
+	Network string
+	Address string
+
+	// Timeouts for the adapter connection.
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+
+	// ReconnectInitialDelay is the initial delay before reconnecting
+	// after an adapter disconnect. Default: 1s.
+	ReconnectInitialDelay time.Duration
+
+	// ReconnectMaxDelay is the maximum reconnection backoff. Default: 30s.
+	ReconnectMaxDelay time.Duration
+
+	// MaxOwnershipDuration is the hard limit on continuous bus ownership,
+	// measured from the grant. Default: 10s. External sessions retain this
+	// budget for long transactions with continuing wire activity.
+	MaxOwnershipDuration time.Duration
+
+	// GatewayMaxOwnershipDuration additionally bounds gateway grants.
+	// Default: 1500ms. Failure paths release gateway ownership immediately;
+	// this is only the last-resort guard for a stuck grant (issue #1401).
+	// The shared MaxOwnershipDuration limit still applies when shorter.
+	GatewayMaxOwnershipDuration time.Duration
+
+	// IdleReleaseGrace is the grace period after bus acquisition before
+	// idle SYN can release ownership. Default: 200ms.
+	IdleReleaseGrace time.Duration
+
+	// ExternalSessionSYNGrace is the grace period applied to SYN-timeout
+	// events (wirePhaseEventSYNTimeout) when the bus owner is an external
+	// session, rather than the gateway itself. Default: 2s.
+	//
+	// The wire-phase machine emits SYN-timeout when SYN appears during
+	// the WaitCmdAck/CollectRequest phase. For the gateway's own tight
+	// protocol (B524 directed reads with no inter-byte gap) that signal
+	// genuinely means "txn died". For external sessions like ebusd
+	// running broadcast scans (0xFE address), the protocol naturally
+	// has multi-second gaps while each responder replies in turn — those
+	// inter-responder gaps look identical to SYN-timeout but are NOT a dead
+	// transaction.
+	//
+	// F-10v2 (EBUSD-VERIFICATION-2026-05-11-batch3.md): immediate-
+	// release on SYN-timeout fired 80 times against ebusd's session vs
+	// 0 times against the gateway in a 5000-line window. Adding a grace
+	// window for external sessions decouples the per-protocol timing
+	// expectations from the immediate-release policy that fits the
+	// gateway's own pattern.
+	ExternalSessionSYNGrace time.Duration
+
+	// IsKnownInitiatorByte is an optional predicate that classifies a
+	// FAILED arbitration data byte as a real bus initiator (true) versus
+	// a transient AND-collision artifact (false). When two real
+	// initiators arbitrate, the wire byte is the bit-wise AND of their
+	// addresses, which can land on a value that is NOT itself a
+	// physically-present initiator — e.g. 0x7F (gateway) AND'd with 0xF1
+	// (radio) produces 0x71 on the wire even though no initiator at
+	// 0x71 exists on the bus. Mirror clients (ebusd) that consume
+	// the proxy's StreamEventFailed bytes interpret 0x71 as a
+	// fictitious bus initiator and pollute their passive view.
+	//
+	// Returning false on a byte suppresses its delivery to the
+	// per-session sendCh mirror; the passive emit and the error
+	// logging still fire so observability stays complete.
+	//
+	// When nil (the default), no filtering is performed — all FAILED
+	// data bytes flow to mirror clients as before. Production wires
+	// this to a runtime_state-backed lookup. (Proxy-bug C5 / R5.)
+	IsKnownInitiatorByte func(b byte) bool
+
+	// LatencyHistogramReportInterval controls how often a single-line
+	// summary of the adaptermux_session_frame_latency_us_bucket_total
+	// expvar is emitted via the logger. Default: 60s. Set to a negative
+	// duration to disable the periodic emission entirely (still
+	// available via /debug/vars).
+	//
+	// This was added so the F-10 falsifying data is visible in
+	// `ha addons logs` without requiring an operator to wget
+	// /debug/vars from inside the addon container (per the batch-3
+	// side-observation in EBUSD-VERIFICATION-2026-05-11-batch3.md).
+	LatencyHistogramReportInterval time.Duration
+
+	// StartDeadline also bounds gateway admission while waiting for SYN.
+	// Once selected, it is the maximum time to wait for the adapter to
+	// respond with STARTED/FAILED after a START request. Default: 5s.
+	// If the adapter does not respond within this duration, the pending
+	// start is cleared and the session is notified of failure (AM8).
+	StartDeadline time.Duration
+
+	// BlackholeThreshold is the duration of consecutive read timeouts
+	// (after the bus was previously active) before triggering a TCP
+	// blackhole reconnect. Default: 30s.
+	//
+	// The previous implementation counted timeout iterations
+	// (consecutiveTimeouts > 150) which coupled the threshold to the
+	// ReadTimeout value. A duration-based check decouples the two:
+	// changing ReadTimeout no longer silently changes when blackhole
+	// detection fires.
+	BlackholeThreshold time.Duration
+
+	// Logger for multiplexer events. If nil, log.Default() is used.
+	Logger *log.Logger
+
+	// V8ClassifierMode selects the rollout mode of the
+	// frame-atomic-visibility v8 classifier (Phase 3 Step B3.2
+	// scaffold). The zero value is v8classifier.ModeOff, which
+	// disables the classifier entirely (production default until
+	// B3.7 live-bus validation closes). See
+	// helianthus-docs-ebus/architecture/adaptermux/frame-atomic-visibility-v8.md
+	// for the rollout phases.
+	//
+	// Modes:
+	//   - ModeOff (default): no observation, no behavioral effect.
+	//   - ModeShadow: classifier observes every StreamEvent the
+	//     mux's read loop dispatches but does NOT alter the byte
+	//     stream. Counter surfaces via
+	//     Mux.V8Classifier().ObservedBytesTotal(). Admin-event
+	//     observation lands in B3.6 (the transport-to-mux admin
+	//     channel surface is not yet exposed in B3.2).
+	//   - ModeEnforce: classifier becomes the authoritative read
+	//     path. (Filtering not yet implemented in B3.2; will land
+	//     in stacked PRs B3.3..B3.6.)
+	//
+	// Set from the environment via v8classifier.EnvVarName
+	// (HELIANTHUS_V8_CLASSIFIER_MODE) in the gateway startup glue,
+	// or explicitly by tests. Mode parsing lives in
+	// v8classifier.ParseMode.
+	V8ClassifierMode v8classifier.Mode
+
+	// AdapterStepMemory is the out-of-step memory shared by the mux
+	// generations of one runtime: whether the single link reset of the
+	// current out-of-step episode is spent, and the active-arbitration
+	// hold. A lifecycle owner that replaces the mux after a connection
+	// loss passes the same memory to every generation. Nil means New
+	// allocates a private memory, kept across in-place reconnects.
+	AdapterStepMemory *AdapterStepMemory
+}
+
+func (c *Config) defaults() {
+	if c.DialTimeout == 0 {
+		c.DialTimeout = 5 * time.Second
+	}
+	if c.ReadTimeout == 0 {
+		c.ReadTimeout = 200 * time.Millisecond
+	}
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = 2 * time.Second
+	}
+	if c.ReconnectInitialDelay == 0 {
+		c.ReconnectInitialDelay = 1 * time.Second
+	}
+	if c.ReconnectMaxDelay == 0 {
+		c.ReconnectMaxDelay = 30 * time.Second
+	}
+	if c.MaxOwnershipDuration == 0 {
+		c.MaxOwnershipDuration = 10 * time.Second
+	}
+	if c.GatewayMaxOwnershipDuration == 0 {
+		c.GatewayMaxOwnershipDuration = 1500 * time.Millisecond
+	}
+	if c.IdleReleaseGrace == 0 {
+		// 200ms is enough for any eBUS transaction to complete (~100ms for
+		// the longest B524 frame) while releasing promptly after each scan
+		// probe. The wire phase is not advanced during gateway ownership,
+		// so there's no premature idle/WaitCmdAck issue.
+		//
+		// F-33 (iter10) attempted to lower this to 30ms based on the
+		// observation that 96% of grants burn the full grace. F-33
+		// REGRESSED scan success from 65% to 51.6% because F-21
+		// (deferred terminal-SYN release) only applies to EXTERNAL
+		// sessions; the gateway's own transactions still rely on
+		// this grace for clean completion. Reverted to 200ms.
+		//
+		// The 96%-burns-grace observation is correct but the inferred
+		// causal model was wrong: those releases ARE the gateway's
+		// own transactions completing normally via idle-grace
+		// (because F-21 doesn't apply to session-0). The grace is
+		// load-bearing for the gateway path.
+		c.IdleReleaseGrace = 200 * time.Millisecond
+	}
+	if c.LatencyHistogramReportInterval == 0 {
+		c.LatencyHistogramReportInterval = 60 * time.Second
+	}
+	if c.ExternalSessionSYNGrace == 0 {
+		// F-27 (batch-24, iter4, 2026-05-14): lowered from 2s to 250ms.
+		//
+		// Pre-F-27 rationale was "leave generous headroom for buses with
+		// more participants" — calibrated against a 13:46:13 ebusd scan
+		// trace where the longest inter-responder gap was ~190ms. The
+		// 2s value was a 10x safety margin over that.
+		//
+		// The 2s margin turned out to be the dominant cause of the
+		// tight-scan-08 failures observed in batch-23 (iter3): when
+		// ebusd's bus state machine silently dropped a grant due to
+		// "arbitration won in invalid state" (a state collision caused
+		// by gateway queue delay timing out ebusd's internal arbitration
+		// wait), the gateway then held the now-dead external ownership
+		// for the FULL 2s grace before reclaiming. Byte-trace forensic
+		// evidence: /tmp/iter3-postfix-enh.txt latency analysis showed
+		// 246/580 events in the 1-5s bucket, with concrete examples of
+		// 8-second lockouts (gateway log 2026-05-14 21:53:25-21:53:39:
+		// 14 consecutive ebusd START 0x31 requests during a single
+		// stalled external ownership hold).
+		//
+		// Why 250ms: legitimate ebusd transactions bump
+		// `lastWireActivity` per echoed byte (mux.go ~1622, gated on
+		// !wire-SYN). At 2400 baud each byte is ~4-5ms on the wire, plus
+		// ENH framing overhead through TCP; observed median ebusd
+		// inter-byte gap is well under 50ms even for multi-responder
+		// scans. 250ms is 5x that worst-case while killing the
+		// silent-drop lockout. If a target's response really takes
+		// 250+ms (none observed in production traces), the grace
+		// expires and the next tryGrantAndStart re-grants the still-
+		// pending session immediately.
+		c.ExternalSessionSYNGrace = 250 * time.Millisecond
+	}
+	if c.StartDeadline <= 0 {
+		c.StartDeadline = 5 * time.Second
+	}
+	if c.BlackholeThreshold <= 0 {
+		c.BlackholeThreshold = 30 * time.Second
+	}
+	if c.Logger == nil {
+		c.Logger = log.Default()
+	}
+}
+
+// PassiveEvent is delivered to the passive path callback when a
+// third-party symbol is received from the bus.
+//
+// F-23 (batch-19, 2026-05-13, Codex bot review on PR-2): WasEscaped
+// carries the wire-side provenance flag for Symbol. It is valid for
+// PassiveEventSymbol only; other kinds leave it at the zero value.
+// The flag is sourced from upstream transport.StreamEvent.WasEscaped
+// (added in helianthus-ebusgo PR #154 / F-23) so adapter-direct
+// consumers — which read from the mux's passiveTransport bridge —
+// can distinguish escape-decoded payload 0xAA (WasEscaped=true) from
+// raw wire SYN (WasEscaped=false), matching the contract honored by
+// raw-TCP passive observers via the local escape decoder.
+type PassiveEvent struct {
+	Kind       PassiveEventKind
+	Symbol     byte
+	WasEscaped bool
+	ObservedAt time.Time
+}
+
+// PassiveEventKind categorizes passive events.
+type PassiveEventKind uint8
+
+const (
+	PassiveEventSymbol       PassiveEventKind = iota + 1 // third-party bus symbol
+	PassiveEventConnected                                // adapter connection established
+	PassiveEventDisconnected                             // adapter connection lost
+	PassiveEventReset                                    // adapter RESETTED
+)
+
+// arbitrationRequester is the non-blocking START interface.
+// ENHTransport.RequestStart only acquires writeMu (not readMu),
+// so readLoop continues receiving bus bytes during arbitration.
+type arbitrationRequester interface {
+	RequestStart(initiator byte) error
+}
+
+// pendingStartState tracks an in-flight START request sent to the
+// adapter but not yet confirmed via STARTED/FAILED response.
+// Protected by stateMu.
+type pendingStartState struct {
+	// responseReceived is guarded by stateMu. Once the wire response has
+	// arrived, cancellation and deadline expiry must not expect another one.
+	responseReceived bool
+	lifecycleEpoch   uint64 // selection cannot survive reset, reconnect, or close
+	sessionID        uint64
+	initiator        byte
+	notify           chan startResult
+	deadline         *time.Timer // AM8: fires if adapter doesn't respond before cfg.StartDeadline
+	blockingArb      bool        // true when using blocking StartArbitration fallback
+
+	// req is the arbitrator's startRequest pointer kept by the mux for
+	// the duration of the in-flight grant. A cancelled wire win is retired
+	// at the next SYN and counted rather than delivered to an old waiter.
+	req *startRequest
+}
+
+// Mux is the adapter multiplexer. It owns a single ENH/ENS connection
+// to the adapter hardware and provides:
+//   - Active path: RawTransport for gateway.Bus
+//   - Passive path: filtered symbol callback (third-party only)
+//   - Session management: external ENH clients (ebusd)
+type Mux struct {
+	undeliverableStarted atomic.Uint64
+
+	cfg    Config
+	logger *log.Logger
+
+	// v8 is the frame-atomic-visibility v8 classifier (Phase 3
+	// Step B3.2 scaffold). Non-nil iff cfg.V8ClassifierMode is set
+	// to a non-Off value (ModeOff explicitly leaves this nil so
+	// the call site's `if m.v8 != nil` short-circuit fully elides
+	// the Observe call AND its time.Now() argument evaluation on
+	// the hot path). Subsequent stacked PRs (B3.3..B3.7) wire
+	// the classifier into the read path's filtering decisions.
+	// For B3.2 it is observe-only and behaviorally inert.
+	v8 *v8classifier.Classifier
+
+	// sessionPacers is a per-sessionID map of v8classifier.Pacer
+	// instances, used by the adapter-write hot path (mux.doSend)
+	// to invoke BeforeActiveWrite + (B3.6d+) RecordEcho. Phase 3
+	// Step B3.6c (L_rtt side of the pacer wiring; the output
+	// pacer at session.writeLoop lands in B3.6f).
+	//
+	// Populated lazily:
+	//   - gateway session pacer (sessionID == gatewaySessionID)
+	//     is created in New() when V8ClassifierMode != Off.
+	//   - external session pacers are created in AddSession on
+	//     the same condition.
+	//   - cleanup happens in RemoveSession.
+	//
+	// sync.Map is used (rather than a mutex-protected map[uint64])
+	// because the adapter-write hot path needs a lock-free
+	// lookup; per-session pacer instances themselves are mutex-
+	// protected internally.
+	//
+	// All entries are *v8classifier.Pacer. Empty in ModeOff.
+	sessionPacers sync.Map
+
+	// Adapter connection (guarded by connMu for reconnection).
+	connMu           sync.Mutex
+	conn             net.Conn
+	upstream         transport.RawTransport
+	upstreamFeatures atomic.Uint32 // features byte from upstream INIT handshake
+
+	// Multiplexer state (guarded by stateMu).
+	stateMu  sync.Mutex
+	phase    wirePhaseTracker
+	arb      *arbitrator
+	busOwned time.Time // when current owner acquired the bus
+
+	// lastWireActivity is the timestamp of the most recent adapter
+	// byte (StreamEventByte) seen on the wire after the current
+	// ownership grant, plus the grant moment itself. The release
+	// paths use this — rather than busOwned — to measure how long
+	// the wire has actually been idle, so a long-running external
+	// transaction (e.g. an ebusd broadcast scan that runs > 2s with
+	// real inter-responder traffic) is not torn down purely because
+	// the grant is old. Reset to time.Now() in
+	// completeArbitrationGrant alongside busOwned, then bumped on
+	// every observed adapter byte while ownership is held.
+	// (Codex P1+P2 round on PR #621.)
+	lastWireActivity time.Time
+
+	pendingStart       *pendingStartState // in-flight START awaiting STARTED/FAILED
+	pendingStartAbsorb int                // stale adapter responses to absorb (FAILED/STARTED from cancelled requests)
+	// localLosers tracks clients supplied a source by local FAILED independently
+	// of the selected waiter, including while its physical response is absorbed.
+	// Protected by stateMu; cleared at a response or observed SYN boundary.
+	localLosers []*startRequest
+	// localLoserSource is the selected source advertised to localLosers.
+	// It also identifies a retired selection after SYN clears that set,
+	// until another selection or lifecycle boundary retires its identity.
+	localLoserSource byte
+	// absorbSkipLog* rate-limits the hot tryGrantAndStart skip log while
+	// pendingStartAbsorb is acting as the stale-response barrier.
+	absorbSkipLogLastEmit        time.Time
+	absorbSkipLogSuppressedSince uint64
+	// pendingAbsorbResetTimer is the single persistent debounce timer
+	// that fires F-22's reset when pendingStartAbsorb has stayed
+	// > 0 for at least `cfg.StartDeadline` without a new arm or
+	// legitimate decrement. F-NEW-25 (2026-05-21): replaces the prior
+	// per-arm AfterFunc + pendingAbsorbGen generation-invalidation
+	// pattern, which had a livelock failure mode under signal-loss
+	// storms: if armPendingStartAbsorbLocked was called faster than
+	// the 2s deadline (e.g. the gateway's semantic poller retried a
+	// failed RequestStart and each retry's deadline-expiry path
+	// re-armed absorb), every freshly-scheduled AfterFunc bumped
+	// pendingAbsorbGen, invalidating its own gen check at fire time —
+	// so the reset NEVER executed and pendingStartAbsorb stayed at
+	// 1 permanently. The hot loop was observed in production on
+	// 2026-05-20 12:25 UTC, producing 1336 "tryGrantAndStart
+	// skipped — waiting to absorb 1 stale arbitration response(s)"
+	// log lines in <60s and stalling active B524 polling for 6+ hours.
+	//
+	// Single-timer debounce: each arm Reset()s the timer. The reset
+	// callback fires exactly `cfg.StartDeadline` after the LAST arm —
+	// not the first. Re-arming faster than the deadline simply
+	// extends the wait, which is the correct semantics for "wait
+	// until adapter responses settle before forcing reset".
+	pendingAbsorbResetTimer *time.Timer
+	// pendingAbsorbResetDueAt is the canonical "if no new arm happens
+	// before this instant, the reset is allowed to fire" deadline.
+	// Codex round-1 MUST FIX on PR #656: prevents a stale AfterFunc
+	// callback from clearing a fresh post-arm counter. Race shape
+	// without this guard:
+	//   t=0:        arm — timer scheduled for t+deadline.
+	//   t=deadline: AfterFunc fires fireAbsorbReset; goroutine queued
+	//               but has NOT yet acquired stateMu.
+	//   t=d+ε:      NEW arm increments pendingStartAbsorb, calls
+	//               Reset() on the timer — schedules a fresh callback
+	//               for t+d+ε+deadline.
+	//   t=d+ε+δ:    the OLD goroutine finally acquires stateMu, sees
+	//               pendingStartAbsorb > 0, and (without this guard)
+	//               logs the reset + clears the fresh counter,
+	//               breaking the stale-response barrier for a request
+	//               that JUST armed.
+	// Guard: at fire time the callback reads
+	// pendingAbsorbResetDueAt under stateMu. If now() is BEFORE that
+	// instant, a fresher Reset() bumped the deadline; the callback
+	// no-ops and lets the future fire do the actual reset.
+	// Boundary clearers (Close / reconnect / handleReset) zero this
+	// field along with pendingStartAbsorb so any in-flight stale
+	// callback hits the "counter is 0" early-return.
+	pendingAbsorbResetDueAt time.Time
+	// pendingAbsorbLastReason captures the most recent reason passed
+	// to armPendingStartAbsorbLocked, for diagnostic logging when the
+	// debounce timer fires. The closure is allocated once at first
+	// arm; without this field, the log message would always report
+	// the FIRST arm's reason rather than the LATEST one.
+	pendingAbsorbLastReason string
+	// absorbResetTotal counts how many times the absorb-timeout
+	// fail-safe (armPendingStartAbsorbLocked) fired and reset the
+	// pending absorb counter to zero. F-22 (batch-19, 2026-05-13):
+	// replaces the prior transport-reconnect side effect at the
+	// absorb-timeout site. The old behavior closed the upstream ENH
+	// connection on every timeout, which severed external sessions
+	// (ebusd) and triggered cascade RequestStart failures for no
+	// transport-level reason — batch-19 measured 5 reconnects /
+	// 68 min producing 92 cascade failures. The new behavior just
+	// resets the counter and lets the next poll iteration issue a
+	// fresh RequestStart cleanly. atomic.Uint64 because external
+	// readers (ActiveTxnSnapshot, tests) may load it without
+	// holding stateMu.
+	absorbResetTotal atomic.Uint64
+	// Blocking StartArbitration tracking. blockingArbGen is monotonically
+	// increasing (never reset to 0 or reused) — reconnect/handleReset
+	// bump it forward so any stale goroutine's captured gen no longer
+	// matches. blockingArbActive indicates whether any blocking goroutine
+	// is currently considered in-flight (owns the transport). Only a
+	// goroutine whose gen matches the current blockingArbGen may clear
+	// blockingArbActive; stale goroutines from prior generations cannot.
+	blockingArbGen    uint64 // monotonic generation counter, never reused
+	blockingArbActive bool   // true while a blocking goroutine owns the transport
+
+	// gatewayTxnActive reports whether bus.Send is actively consuming
+	// activeCh for a gateway transaction. Separate from ownership:
+	// after a normal end, ownership can outlive the transaction up to
+	// IdleReleaseGrace. Only when gatewayTxnActive is true are bytes
+	// delivered to activeCh (plus the owed resync SYNs below). Set by
+	// the first gateway write after completeArbitrationGrant, cleared
+	// when the transaction ends (SYN terminator, transaction complete,
+	// NACK, SYN timeout, idle grace expired). A failed transaction (write
+	// error, active read timeout, context cancel, arbitration loss,
+	// abandoned on re-bid) also releases the ownership in the same
+	// critical section (issue #1401).
+	gatewayTxnActive bool
+
+	// collisionResyncOwed is the number of wire SYNs still owed to
+	// protocol.Bus after a confirmed arbitration loss released the gateway
+	// (issue #1401; F-NEW-29 first-byte foreign initiator or escape-pair
+	// echo collision). The bus waits for protocol.CollisionRetryResyncSYNCount
+	// SYNs before it re-bids, and with ownership already released no SYN
+	// would otherwise reach activeCh. Protected by stateMu; zeroed by the
+	// collision lifecycle completion, the next gateway bid or grant, reset,
+	// reconnect, context cancellation and Close.
+	collisionResyncOwed uint8
+
+	// A cancelled or disconnected wire winner occupies its slot until the next SYN.
+	deferRegrantUntilNextSyn bool
+	arbitrationRecovery      arbitrationRecovery // requested under stateMu, applied only by readLoop
+	retiredSelection         bool                // recognizes late results after the absorb budget and SYN fence end
+
+	// step is the out-of-step detector (adapter_step.go), guarded by
+	// stateMu; stepMemory is its lock-free cross-generation memory.
+	step       adapterStepDetector
+	stepMemory *AdapterStepMemory
+
+	// activeTxn is the diagnostics snapshot for the current/last gateway
+	// transaction. Updated under stateMu. Exposed via ActiveTxnSnapshot()
+	// for tests and production observability. Bounded — never grows.
+	activeTxn activeTxnDiag
+
+	// synDiag is a bounded ring of SYN events observed while gateway owns
+	// the bus. Used to confirm/exclude the "final SYN echo consumed by
+	// onSYNLocked before Send sees the terminator" hypothesis. Protected
+	// by stateMu. Bounded by synDiagRingCap — never grows.
+	synDiag synDiagRing
+
+	// Gateway echo tracker (for the internal active path).
+	// Protected by stateMu.
+	gatewayEcho *echoTracker
+
+	// gatewayLeadWait is the outstanding raw-echo expectation for the
+	// escape lead of a gateway write (issue #1003). Set by the sendLoop
+	// write path, resolved once by the readLoop's raw-symbol handling or
+	// retired at reset/reconnect/close. See raw_symbols.go.
+	gatewayLeadWait atomic.Pointer[gatewayLeadWait]
+
+	// gatewayEscapeDiag counts failed escape-pair verifications and rate-limits
+	// their log line (issue #1416). See raw_symbols.go.
+	gatewayEscapeDiag gatewayEscapeEchoDiag
+
+	// gatewaySuffixCommitHook, when set, runs after a gateway escape lead
+	// was written and before its suffix commit. Test-only seam for
+	// interleaving a lifecycle boundary at the commit point; nil in
+	// production.
+	gatewaySuffixCommitHook func()
+	// gatewayLeadCommitHook, when set, runs after the wait is armed and
+	// before the lead is committed; nil in production.
+	gatewayLeadCommitHook func()
+
+	// externalAbandonAfter schedules the external-session abandon
+	// watchdog (F-34/F-35). It defaults to time.AfterFunc; it is a field
+	// so deterministic tests can capture and fire the deadline without
+	// sleeping on the wall clock.
+	externalAbandonAfter func(time.Duration, func())
+
+	// External sessions.
+	sessionsMu sync.Mutex // write lock — protects map AND session echo trackers
+	sessions   map[uint64]*session
+	sessionSeq atomic.Uint64
+
+	// sessionRemoteAddrs is a lock-free side index from session ID to
+	// the client's RemoteAddr string, written on AddSession and deleted
+	// on RemoveSession. It exists so code paths that already hold
+	// stateMu (e.g. onSYNLocked) can label diagnostic logs with the
+	// remote endpoint without acquiring sessionsMu — that would invert
+	// the established sessionsMu → stateMu lock order and risk ABBA
+	// deadlock with doSend. Reads use sync.Map.Load and are safe from
+	// any goroutine; writes happen under sessionsMu in AddSession /
+	// RemoveSession but do not require any extra synchronization.
+	sessionRemoteAddrs sync.Map // key uint64 sessionID → value string remote addr
+
+	// Active path channels.
+	activeSendCh chan sendRequest
+	activeCh     chan activeEvent // capacity 4096: unified byte+error channel (FIFO ordered)
+
+	// INFO cache — populated once after INIT, served to active path
+	// and sessions without hitting the upstream transport's readMu.
+	infoCacheMu sync.RWMutex
+	infoCache   map[transport.AdapterInfoID][]byte
+
+	// Passive path callback (set via SetPassiveCallback).
+	// The callback must NOT call back into Mux methods (re-entrancy hazard).
+	passiveMu       sync.Mutex
+	passiveCallback func(PassiveEvent)
+
+	// connectionLostCallback is a generation-lifecycle signal for the
+	// in-process DriverManager. It fires when readLoop enters reconnect after
+	// a terminal read failure or the duration-based blackhole threshold. Once
+	// installed, lifecycle ownership is delegated to that manager: this mux
+	// retires instead of running its legacy in-place reconnect loop.
+	connectionLostMu       sync.Mutex
+	connectionLostCallback func()
+	connectionLossManaged  atomic.Bool
+	// connectionUseMu is the managed-generation linearization fence. It is
+	// inactive for callback-free muxes. Managed proxy admission and physical
+	// START/SEND use hold R; terminal loss fences new work, closes the upstream
+	// to unblock existing use, drains R with W, tears state down, and publishes
+	// BACKOFF while W remains held.
+	connectionUseMu         sync.RWMutex
+	connectionLossDelegated atomic.Bool
+	// proxyListener is populated by NewProxyListener after a successful bind.
+	// ManagedConnectionReady consults its live accept-loop state so a fatal
+	// listener exit cannot be masked by an otherwise healthy upstream mux.
+	proxyListener atomic.Pointer[ProxyListener]
+
+	// Lifecycle.
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
+	// closing is set to true at the start of Close() before m.wg.Wait().
+	// Gates tryGrantAndStart's wg.Add(1) for the blocking-path goroutine
+	// to prevent a WaitGroup misuse panic when a timer callback /
+	// readLoop / RemoveSession races with shutdown.
+	closing atomic.Bool
+	// closeMu serializes the check-of-closing-and-wg.Add critical section
+	// in tryGrantAndStart's blocking path with Close()'s closing.Store(true)
+	// that precedes m.wg.Wait(). Codex PR #502 P2: without this mutex,
+	// tryGrantAndStart can observe closing=false, then Close sets closing
+	// and reaches Wait, and the stale path still calls wg.Add(1) — panic
+	// ("sync: WaitGroup misuse") or leak. The mutex is narrow and only
+	// held across the guard read and the wg.Add/goroutine launch.
+	closeMu sync.Mutex
+}
+
+// activeEventKind tags active-path channel events.
+type activeEventKind uint8
+
+const (
+	activeEventByte  activeEventKind = iota // data byte from adapter
+	activeEventError                        // error (reset, disconnect)
+)
+
+// activeEvent is a tagged union carried on the single activeCh channel.
+// Merging bytes and errors into one channel guarantees FIFO ordering:
+// handleReset drains the channel and enqueues the reset event before
+// readLoop resumes enqueuing bytes, so the consumer sees events in
+// exact enqueue order — no Go-select non-determinism.
+//
+// F-23 (batch-19, Codex bot on PR-2): wasEscaped carries the
+// upstream WasEscaped provenance for activeEventByte. Surfaced via
+// activeTransport.ReadByteWithEscape (transport.EscapeFlaggedReader)
+// so protocol.Bus's waitForSyn / sendRawWithEcho can distinguish
+// real wire SYN (false) from escape-decoded payload 0xAA (true).
+type activeEvent struct {
+	kind       activeEventKind
+	b          byte  // valid when kind == activeEventByte
+	wasEscaped bool  // valid when kind == activeEventByte (F-23)
+	err        error // valid when kind == activeEventError
+}
+
+// Sentinel errors returned by doSend for error classification.
+// Host-side errors (ownership, connectivity, adapter write) are distinct
+// from bus errors so callers can deliver the correct ENH response code
+// (ENHResErrorHost vs ENHResErrorEBUS).
+var (
+	errNotBusOwner  = errors.New("adaptermux: session is not bus owner")
+	errNotConnected = errors.New("adaptermux: not connected")
+	errAdapterWrite = errors.New("adaptermux: adapter write failed")
+)
+
+// sendRequest is a request from the active path or an external session
+// to send a byte to the adapter.
+type sendRequest struct {
+	sessionID uint64
+	data      byte
+	// structural is the F-NEW-28 (2026-05-21) provenance flag for the
+	// gateway session's writes. When true, this byte is being sent as
+	// a STRUCTURAL SymbolSyn (end-of-message terminator) — the
+	// expected wire echo is a raw 0xAA with WasEscaped=false. When
+	// false (the default for all payload bytes including payload-0xAA),
+	// the expected wire echo is the byte value with WasEscaped
+	// determined by the byte's escape state on the wire (true for
+	// 0xAA-as-payload, false for non-0xAA).
+	//
+	// Set by activeTransport.Write consulting the one-shot
+	// `nextWriteIsStructuralSyn` flag toggled by bus.go's
+	// SignalNextWriteIsStructuralSyn() call. Propagated by sendLoop to
+	// echoTracker.recordSentInternal so the SYN-suppression predicate
+	// at `mux.go:2487` can distinguish a pending terminator-SYN
+	// expected echo from a pending payload-0xAA expected echo, closing
+	// the round-9 enforce-mode leak.
+	//
+	// External sessions (ENH client traffic) always pass structural=false
+	// — only the gateway's structural-terminator writes use the flag.
+	structural bool
+	result     chan error
+}
+
+// New creates a new adapter multiplexer with the given configuration.
+// Call Start() to connect to the adapter and begin processing.
+func New(cfg Config) *Mux {
+	cfg.defaults()
+	arb := newArbitrator()
+	mux := &Mux{
+		cfg:          cfg,
+		logger:       cfg.Logger,
+		arb:          arb,
+		gatewayEcho:  newEchoTracker(),
+		sessions:     make(map[uint64]*session),
+		infoCache:    make(map[transport.AdapterInfoID][]byte),
+		activeSendCh: make(chan sendRequest, 256),  // AM49: increased from 16 for burst tolerance
+		activeCh:     make(chan activeEvent, 4096), // unified byte+error channel (4096: survives ~16s of bus traffic during arbitration waits)
+		stepMemory:   cfg.AdapterStepMemory,
+	}
+	if mux.stepMemory == nil {
+		mux.stepMemory = NewAdapterStepMemory()
+	}
+	mux.externalAbandonAfter = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	// Phase 3 Step B3.2: instantiate the v8 classifier only when a
+	// non-Off mode is configured. ModeOff is equivalent to a nil
+	// classifier (both yield a no-op Observe path); leaving it nil
+	// avoids one allocation per Mux and one branch + atomic per
+	// wire byte on the hot path.
+	if cfg.V8ClassifierMode != v8classifier.ModeOff {
+		mux.v8 = v8classifier.New(cfg.V8ClassifierMode)
+		// Phase 3 Step B3.6c: pre-create the gateway-internal
+		// session pacer via ensureSessionPacer (the
+		// LIFECYCLE-ONLY constructor). External sessions get
+		// their pacers in AddSession. The hot-path doSend uses
+		// SessionPacer (load-only) which returns nil for any
+		// sessionID that wasn't ensure'd here or in
+		// AddSession — eliminates the
+		// RemoveSession+lazy-create resurrection race (Codex
+		// round-1 MEDIUM on PR #645).
+		mux.ensureSessionPacer(gatewaySessionID)
+	}
+	return mux
+}
+
+// SessionPacer returns the per-session v8 classifier Pacer for
+// the given sessionID. Load-only — does NOT lazy-create. Returns
+// nil when:
+//   - V8ClassifierMode == Off (no v8 classifier at all)
+//   - sessionID was never registered via AddSession (or via the
+//     Mux constructor for the gateway-internal pacer)
+//   - sessionID was registered but has been removed via
+//     RemoveSession
+//
+// Phase 3 Step B3.6c — adapter-write path (mux.doSend) uses this
+// to look up the pacer for BeforeActiveWrite. The output pacer
+// side (session.writeLoop) lands in B3.6f and uses the same
+// load-only lookup.
+//
+// Per Codex round-1 MEDIUM on PR #645: lazy-create was REMOVED
+// because it could resurrect a deleted pacer entry on a doSend
+// that raced with RemoveSession (doSend passes arb.isOwner
+// BEFORE Remove deletes the pacer entry, then SessionPacer
+// LoadOrStore created a new entry that never got cleaned up).
+// The load-only contract eliminates this race: RemoveSession
+// deletes; subsequent doSend calls see nil and skip the
+// BeforeActiveWrite call (which is the correct behavior — the
+// session is gone, no pacer state to maintain).
+//
+// Callers MUST nil-check before calling pacer methods — Pacer is
+// mutex-backed and its methods would panic on a nil receiver.
+func (m *Mux) SessionPacer(sessionID uint64) *v8classifier.Pacer {
+	if m == nil || m.v8 == nil {
+		return nil
+	}
+	v, ok := m.sessionPacers.Load(sessionID)
+	if !ok {
+		return nil
+	}
+	return v.(*v8classifier.Pacer)
+}
+
+// ensureSessionPacer is the LIFECYCLE-ONLY constructor used by
+// Mux.New (for the gateway-internal pacer) and AddSession (for
+// external session pacers). LoadOrStore is race-tolerant for the
+// expected single-caller-per-sessionID pattern.
+//
+// Hot-path callers MUST use SessionPacer (load-only) instead.
+// Per Codex round-1 MEDIUM on PR #645: this split eliminates the
+// RemoveSession + lazy-create-from-doSend race.
+func (m *Mux) ensureSessionPacer(sessionID uint64) {
+	if m == nil || m.v8 == nil {
+		return
+	}
+	if _, ok := m.sessionPacers.Load(sessionID); ok {
+		return
+	}
+	// Phase 3 Step B3.6e: use NewPacerForSession so the per-session
+	// pacer's echo watchdog has its admin-event emitter pre-wired
+	// to the classifier's adminEvents ring buffer. Falling back to
+	// v8classifier.NewPacer here would leave the watchdog firing
+	// silently — counters increment, but operator-facing
+	// ClassifierAdminEvent entries would never appear.
+	m.sessionPacers.LoadOrStore(sessionID, m.v8.NewPacerForSession())
+}
+
+// Start connects to the adapter and begins the multiplexer loop.
+// The context controls the multiplexer lifetime.
+func (m *Mux) Start(ctx context.Context) error {
+	m.ctx, m.cancel = context.WithCancel(ctx)
+
+	if err := m.connect(); err != nil {
+		return fmt.Errorf("adaptermux: initial connect: %w", err)
+	}
+
+	m.wg.Add(1)
+	go m.readLoop() // goroutine: reads bytes from adapter, dispatches to consumers
+
+	m.wg.Add(1)
+	go m.sendLoop() // goroutine: processes send requests from active path + sessions
+
+	if m.cfg.LatencyHistogramReportInterval > 0 {
+		m.wg.Add(1)
+		go m.latencyHistogramReportLoop() // goroutine: periodic dump of F-10 histogram
+	}
+
+	m.emitPassive(PassiveEvent{
+		Kind:       PassiveEventConnected,
+		ObservedAt: time.Now(),
+	})
+
+	return nil
+}
+
+// Close shuts down the multiplexer and releases all resources.
+// Safe to call multiple times — subsequent calls return the first error.
+func (m *Mux) Close() error {
+	m.closeOnce.Do(func() {
+		// C1 / PR #502 P2: signal shutdown BEFORE any Wait(). tryGrantAndStart
+		// checks this flag to avoid m.wg.Add(1) on the blocking-path goroutine
+		// while m.wg.Wait() is running — that would panic with "sync:
+		// WaitGroup misuse: Add called concurrently with Wait".
+		//
+		// The store is performed under closeMu to serialize with
+		// tryGrantAndStart's gate-then-Add critical section. Any goroutine
+		// that saw closing=false before we took closeMu has already run
+		// wg.Add(1) by the time we release the mutex; any goroutine that
+		// takes closeMu after us sees closing=true and skips the Add.
+		// closeMu is released BEFORE m.wg.Wait() to avoid blocking
+		// tryGrantAndStart callers that would otherwise queue behind Wait.
+		m.closeMu.Lock()
+		m.closing.Store(true)
+		m.closeMu.Unlock()
+		if m.cancel != nil {
+			m.cancel()
+		}
+
+		// Close the adapter transport before any arbitration teardown.
+		// The readLoop blocks in m.upstream, not necessarily m.conn; test
+		// transports and some wrappers are distinct objects, so closing
+		// only conn can leave readLoop parked forever. Issue #1003: a
+		// gateway escape-pair commit holds the arbitrator lock while its
+		// write is in flight, and the teardown below takes that lock
+		// (forceRelease, failAllPending), directly or behind a readLoop
+		// that holds stateMu while waiting for it. Closing first fails a
+		// stalled write, so the commit returns and the teardown proceeds
+		// instead of waiting for a write deadline (or forever, with
+		// deadlines disabled). The pointers stay published until the
+		// teardown below is done, so a racing tryGrantAndStart still sees
+		// the (now closed) transport's capabilities and fails through its
+		// normal error paths.
+		m.connMu.Lock()
+		upstream := m.upstream
+		conn := m.conn
+		m.connMu.Unlock()
+		if upstream != nil {
+			m.closeErr = upstream.Close()
+		} else if conn != nil {
+			m.closeErr = conn.Close()
+		}
+
+		// Cancel in-flight pending START if any.
+		m.retireGatewayLeadWait(errors.New("adaptermux: closed"))
+		m.stateMu.Lock()
+		pendingToCancel := m.pendingStart
+		m.pendingStart = nil
+		m.pendingStartAbsorb = 0
+		m.localLosers = nil
+		m.clearAbsorbSkipLogStateLocked()
+		// F-NEW-25: stop the absorb-reset debounce timer if armed.
+		// Stop() is best-effort — if the callback is already
+		// running on another goroutine it will see
+		// pendingStartAbsorb == 0 above and no-op. Clearing
+		// pendingAbsorbResetDueAt also closes the
+		// Codex-round-1 race where a stale callback could
+		// interpret a future-dated due-at as "skip" forever after
+		// Close; on a closed mux nothing should rearm anyway, but
+		// belt-and-suspenders.
+		if m.pendingAbsorbResetTimer != nil {
+			m.pendingAbsorbResetTimer.Stop()
+			m.pendingAbsorbResetTimer = nil
+		}
+		m.pendingAbsorbResetDueAt = time.Time{}
+		if pendingToCancel != nil && pendingToCancel.deadline != nil {
+			pendingToCancel.deadline.Stop() // AM8: cancel deadline timer
+		}
+		m.deferRegrantUntilNextSyn = false
+		m.arbitrationRecovery = arbitrationRecoveryReset
+		m.retiredSelection = false
+		// Closing is also a transaction-generation boundary. Leave no
+		// recovery token live after shutdown: a caller may still hold an
+		// activeTransport reference, but it must not be able to terminalize
+		// ownership from the closed generation.
+		if m.gatewayTxnActive {
+			m.gatewayTxnActive = false
+			m.recordGatewayInactive(ReasonContextCancel)
+		}
+		m.gatewayEcho.reset()
+		m.collisionResyncOwed = 0
+		m.activeTxn.firstByteSuspectArbLoss.Store(false)
+		wasHeld := m.stepBoundaryLocked()
+		m.stateMu.Unlock()
+		m.logStepHoldCleared(wasHeld, "close")
+		if pendingToCancel != nil {
+			// AM53: guarded send to avoid blocking Close if nobody reads notify.
+			select {
+			case pendingToCancel.notify <- startResult{granted: false, initiator: pendingToCancel.initiator, err: errors.New("adaptermux: closed")}:
+			case <-time.After(1 * time.Second):
+				m.logger.Printf("adaptermux: Close: timed out sending to pendingStart.notify")
+			}
+		}
+
+		// Fail all pending arbitration requests.
+		m.arb.forceRelease()
+		m.arb.failAllPending(errors.New("adaptermux: closed"))
+
+		// Collect sessions under lock, close outside lock to avoid holding
+		// sessionsMu during potentially blocking session.close() (5s timeout).
+		m.sessionsMu.Lock()
+		toClose := make([]*session, 0, len(m.sessions))
+		for id, sess := range m.sessions {
+			toClose = append(toClose, sess)
+			delete(m.sessions, id)
+		}
+		m.sessionsMu.Unlock()
+
+		// AM51: close sessions concurrently to avoid O(N * 5s) shutdown.
+		var sessWg sync.WaitGroup
+		for _, sess := range toClose {
+			m.arb.removeSession(sess.id)
+			sessWg.Add(1)
+			go func(s *session) {
+				defer sessWg.Done()
+				s.close()
+			}(sess)
+		}
+		sessWg.Wait()
+
+		m.connMu.Lock()
+		m.upstream = nil
+		m.conn = nil
+		m.connMu.Unlock()
+
+		m.wg.Wait()
+
+		// Codex round-2 MUST FIX on PR #647 + Codex GitHub-bot P2
+		// review on PR #650: cancel any pending gateway echo
+		// watchdog. Close is the strongest teardown boundary; an
+		// armed watchdog could otherwise fire a soft or hard
+		// timeout admin event AFTER Close returned, which would
+		// surface as a phantom event on a mux that has already
+		// shut down.
+		//
+		// P2 follow-up: do the cancel AFTER m.wg.Wait() so the
+		// sendLoop has provably stopped before we cancel. The
+		// earlier "cancel before wg.Wait" pattern had a window
+		// where sendLoop could process a queued gateway write
+		// during shutdown (the select's send case can win
+		// against ctx.Done()) and re-arm the watchdog after the
+		// cancel ran. With cancel-after-wait, sendLoop is gone
+		// before the cancel — no possible re-arm.
+		if pacer := m.SessionPacer(gatewaySessionID); pacer != nil {
+			pacer.CancelEchoWatchdog()
+		}
+	})
+	return m.closeErr
+}
+
+// ActiveTransport returns a RawTransport for the gateway's active path.
+// This wraps the multiplexer's internal channels to provide a blocking
+// byte-level interface compatible with gateway.Bus.
+func (m *Mux) ActiveTransport() transport.RawTransport {
+	return &activeTransport{mux: m}
+}
+
+// SetPassiveCallback sets the callback for passive path events.
+// The callback receives only third-party bus traffic (no self-echo).
+// The callback must NOT call back into Mux methods (re-entrancy hazard).
+// Must be called before Start() or during initialization.
+func (m *Mux) SetPassiveCallback(fn func(PassiveEvent)) {
+	m.passiveMu.Lock()
+	defer m.passiveMu.Unlock()
+	m.passiveCallback = fn
+}
+
+// SetConnectionLostCallback installs a non-blocking generation-lifecycle
+// owner. The callback must not call back into Mux methods and should be set
+// before Start. On a terminal connection-loss boundary, the mux reports the
+// loss, rejects further generation-local work, and exits its read loop; the
+// owner is responsible for replacement. With no callback, the legacy in-place
+// reconnect behavior is preserved. Idle read timeouts and in-band RESETTED
+// boundaries are not connection-loss notifications.
+func (m *Mux) SetConnectionLostCallback(fn func()) {
+	m.connectionLostMu.Lock()
+	m.connectionLostCallback = fn
+	m.connectionLostMu.Unlock()
+	m.connectionLossManaged.Store(fn != nil)
+}
+
+func (m *Mux) connectionLostOwner() func() {
+	m.connectionLostMu.Lock()
+	fn := m.connectionLostCallback
+	m.connectionLostMu.Unlock()
+	return fn
+
+}
+
+// beginManagedConnectionUse admits one generation-local proxy/provider use.
+// The bool pair is (gateHeld, admitted). Callback-free muxes avoid the RWMutex
+// hot path entirely and preserve legacy behavior.
+func (m *Mux) beginManagedConnectionUse() (bool, bool) {
+	if !m.connectionLossManaged.Load() {
+		return false, true
+	}
+	m.connectionUseMu.RLock()
+	if m.connectionLossDelegated.Load() || m.ctx == nil || m.ctx.Err() != nil {
+		m.connectionUseMu.RUnlock()
+		return false, false
+	}
+	return true, true
+}
+
+func (m *Mux) endManagedConnectionUse(gateHeld bool) {
+	if gateHeld {
+		m.connectionUseMu.RUnlock()
+	}
+}
+
+// FenceManagedConnection is the non-blocking generation-withdrawal half of
+// managed mux retirement. It is safe to call while DriverManager holds its
+// state lock: it performs one atomic store, never calls the lifecycle owner,
+// and never acquires a mux mutex. Existing pre-fence uses retain their R lease
+// until DriverRuntime closes the upstream; all later proxy START/SEND/session
+// admission is rejected by beginManagedConnectionUse. Callback-free muxes keep
+// their legacy reconnect behavior unchanged.
+func (m *Mux) FenceManagedConnection() {
+	if m != nil && m.connectionLossManaged.Load() {
+		m.connectionLossDelegated.Store(true)
+	}
+}
+
+// RetireManagedProxySessions synchronously removes and closes every external
+// session owned by a managed generation. Fatal proxy-listener loss calls this
+// before notifying DriverManager, so no queued passive/INIT/INFO frame can be
+// published after BACKOFF becomes visible. It deliberately does not acquire
+// connectionUseMu's write side: pre-fence upstream work may be blocked until
+// DriverRuntime closes the transport. AddSession rechecks the fence under
+// sessionsMu, which makes detachment linearizable without that lock-order risk.
+// Callback-free muxes retain their legacy session/reconnect behavior.
+func (m *Mux) RetireManagedProxySessions() {
+	if m == nil || !m.connectionLossManaged.Load() {
+		return
+	}
+	m.FenceManagedConnection()
+	m.clearInfoCache()
+
+	m.sessionsMu.Lock()
+	toClose := make([]*session, 0, len(m.sessions))
+	for id, sess := range m.sessions {
+		toClose = append(toClose, sess)
+		delete(m.sessions, id)
+	}
+	m.sessionsMu.Unlock()
+
+	var closeWG sync.WaitGroup
+	for _, sess := range toClose {
+		m.sessionRemoteAddrs.Delete(sess.id)
+		if value, ok := m.sessionPacers.Load(sess.id); ok {
+			if pacer, _ := value.(*v8classifier.Pacer); pacer != nil {
+				pacer.CancelEchoWatchdog()
+			}
+		}
+		m.sessionPacers.Delete(sess.id)
+		m.arb.removeSession(sess.id)
+		closeWG.Add(1)
+		go func(current *session) {
+			defer closeWG.Done()
+			current.close()
+		}(sess)
+	}
+	closeWG.Wait()
+}
+
+// ManagedConnectionReady reports whether the current managed mux generation
+// can admit proxy work. Readiness is deliberately lock-free with respect to
+// connectionUseMu: reconnect holds its write side while publishing loss, and a
+// status request must report the already-set retirement flag rather than wait
+// behind that callback. The atomic flag is the readiness linearization point.
+func (m *Mux) ManagedConnectionReady() bool {
+	if m == nil || !m.connectionLossManaged.Load() || m.closing.Load() {
+		return false
+	}
+	if m.connectionLossDelegated.Load() || m.ctx == nil || m.ctx.Err() != nil {
+		return false
+	}
+	if listener := m.proxyListener.Load(); listener != nil && !listener.Ready() {
+		return false
+	}
+	m.connMu.Lock()
+	ready := m.upstream != nil
+	m.connMu.Unlock()
+	return ready
+}
+
+// openUpstreamConn opens the serial device or dials the network endpoint.
+func (m *Mux) openUpstreamConn() (net.Conn, error) {
+	if m.cfg.Network == NetworkSerial {
+		conn, err := openSerialConn(m.cfg.Address, m.cfg.Protocol)
+		if err != nil {
+			return nil, fmt.Errorf("open serial %s: %w", m.cfg.Address, err)
+		}
+		return conn, nil
+	}
+	dialer := net.Dialer{Timeout: m.cfg.DialTimeout}
+	conn, err := dialer.DialContext(m.ctx, m.cfg.Network, m.cfg.Address)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s/%s: %w", m.cfg.Network, m.cfg.Address, err)
+	}
+	return conn, nil
+}
+
+// connect opens the adapter connection and performs the INIT handshake.
+func (m *Mux) connect() error {
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+
+	conn, err := m.openUpstreamConn()
+	if err != nil {
+		return err
+	}
+
+	// Set TCP options (log failures instead of discarding).
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		if err := tcpConn.SetNoDelay(true); err != nil {
+			m.logger.Printf("adaptermux: SetNoDelay: %v", err)
+		}
+		if err := tcpConn.SetKeepAlive(true); err != nil {
+			m.logger.Printf("adaptermux: SetKeepAlive: %v", err)
+		}
+		if err := tcpConn.SetKeepAlivePeriod(30 * time.Second); err != nil {
+			m.logger.Printf("adaptermux: SetKeepAlivePeriod: %v", err)
+		}
+	}
+
+	// Create ENH/ENS transport in two phases:
+	// Phase 1: 2s read timeout for INIT + INFO queries (adapter needs ~200ms).
+	// Phase 2: replace with cfg.ReadTimeout for the readLoop idle tick.
+	//
+	// The parser-state concern is theoretical: RequestInfo holds readMu
+	// exclusively and the readLoop hasn't started, so no bus bytes arrive
+	// during the setup phase. After INFO completes, the parser is clean.
+	newTransport := func(readTimeout time.Duration) transport.RawTransport {
+		switch m.cfg.Protocol {
+		case "ens":
+			return transport.NewENSTransport(conn, readTimeout, m.cfg.WriteTimeout)
+		case "enh", "":
+			return transport.NewENHTransport(conn, readTimeout, m.cfg.WriteTimeout)
+		default:
+			return nil
+		}
+	}
+
+	const infoTimeout = 2 * time.Second
+	setupTr := newTransport(infoTimeout)
+	if setupTr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("adaptermux: unsupported protocol %q (expected \"enh\" or \"ens\")", m.cfg.Protocol)
+	}
+
+	m.conn = conn
+	m.upstream = setupTr
+
+	// Perform INIT handshake — fatal if transport implements Init.
+	// Retry up to 5 times with increasing stabilization delays between
+	// retries (200ms, 400ms, 600ms, 800ms).
+	// The adapter's eBUS transceiver needs time after TCP accept to
+	// initialize; features=0x00 on first attempt indicates the adapter
+	// wasn't ready. The standalone proxy had a similar 200ms delay.
+	const requestedFeatures byte = 0x01
+	if initer, ok := setupTr.(interface{ Init(byte) (byte, error) }); ok {
+		var features byte
+		var initErr error
+		initOK := false
+		for attempt := 0; attempt < 5; attempt++ {
+			if attempt > 0 {
+				// Exponential-ish backoff: 200ms, 400ms, 600ms, 800ms
+				backoff := time.Duration(200*(attempt)) * time.Millisecond
+				select {
+				case <-time.After(backoff):
+				case <-m.ctx.Done():
+					_ = conn.Close()
+					m.conn = nil     // AM32: clear stale reference on ctx cancel
+					m.upstream = nil // AM32: clear stale transport on ctx cancel
+					return m.ctx.Err()
+				}
+			}
+			features, initErr = initer.Init(requestedFeatures)
+			if initErr != nil {
+				m.logger.Printf("adaptermux: INIT attempt %d failed: %v (retrying)", attempt+1, initErr)
+				continue
+			}
+			if features&requestedFeatures == requestedFeatures {
+				initOK = true
+				break // adapter confirmed requested features
+			}
+			// features=0x00 means adapter wasn't ready yet — retry
+			m.logger.Printf("adaptermux: INIT attempt %d: features=0x%02X (want 0x%02X), retrying", attempt+1, features, requestedFeatures)
+		}
+		if !initOK && initErr == nil {
+			// All attempts returned features=0x00 but no error.
+			// Accept degraded mode — the adapter may not support features.
+			m.logger.Printf("adaptermux: INIT: adapter does not confirm features=0x%02X, proceeding with features=0x%02X", requestedFeatures, features)
+		} else if initErr != nil && !initOK {
+			_ = conn.Close()
+			m.conn = nil     // AM34: clear stale reference after INIT failure
+			m.upstream = nil // AM34: clear stale transport after INIT failure
+			return fmt.Errorf("adaptermux: INIT handshake failed after 5 attempts: %w", initErr)
+		}
+		m.upstreamFeatures.Store(uint32(features))
+		if initOK {
+			m.logger.Printf("adaptermux: INIT handshake succeeded, upstream features=0x%02X", features)
+		} else {
+			m.logger.Printf("adaptermux: INIT handshake degraded, upstream features=0x%02X", features)
+		}
+
+		// Post-INIT stabilization: give the adapter time to settle
+		// before sending INFO queries. The adapter sends a spontaneous
+		// RESETTED after processing INIT; without this delay, the
+		// RESETTED arrives during the INFO exchange and corrupts it.
+		// 500ms is empirically sufficient (200ms was not enough).
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-m.ctx.Done():
+			_ = conn.Close()
+			m.conn = nil     // AM32: clear stale reference on ctx cancel
+			m.upstream = nil // AM32: clear stale transport on ctx cancel
+			return m.ctx.Err()
+		}
+	}
+
+	// Populate INFO cache with the 2s-timeout transport.
+	if err := m.populateInfoCache(setupTr); err != nil {
+		_ = conn.Close()
+		m.conn = nil     // clear stale reference on ctx cancel
+		m.upstream = nil // clear stale transport on ctx cancel
+		return err
+	}
+
+	// Phase 2: replace with cfg.ReadTimeout transport for readLoop.
+	// RequestInfo needs the longer setup timeout, but steady-state
+	// readLoop timing drives quiet-bus arbitration progress and must
+	// continue honoring cfg.ReadTimeout.
+	m.upstream = newTransport(m.cfg.ReadTimeout)
+
+	return nil
+}
+
+// populateInfoCache queries the upstream transport for INFO metadata
+// and stores responses in the mux-level cache. Sessions and the active
+// path read from the cache instead of touching the upstream transport,
+// avoiding readMu contention during normal operation.
+//
+// Called from connect() after a successful INIT handshake (connMu held
+// by caller). The upstream transport must support InfoRequester; if it
+// does not, the cache is cleared and CachedInfo returns an error.
+//
+// XR_INFO_CACHE_SNAPSHOT / AM29: INFO cache is intentionally a startup
+// snapshot. The cache is repopulated on each reconnect via connect() and is
+// warmed before the adapter is exposed to downstream consumers.
+//
+// Design rationale: the ENH transport's RequestInfo holds readMu
+// exclusively. During normal operation, readLoop also holds readMu to
+// receive bus bytes. Refreshing INFO on-demand would either require
+// pausing readLoop (breaking observer continuity) or a second TCP
+// connection (doubling adapter load). Neither is acceptable. The
+// startup-snapshot model accepts stale telemetry in exchange for
+// zero readMu contention during steady state.
+//
+// INFO version (0x00) is always queried first. The startup cache stores the
+// initial identity/configuration snapshot plus the first telemetry sample
+// (temperature/supply_voltage/bus_voltage) before the transport is handed to
+// consumers. reset_info is fetched once per TCP session when supported.
+// wifi_rssi is intentionally excluded on this adapter family. Startup
+// requests are capability-gated and paced slightly to avoid a tight
+// control-frame burst against fragile adapters.
+func (m *Mux) populateInfoCache(tr transport.RawTransport) error {
+	infoReq, ok := tr.(transport.InfoRequester)
+	if !ok {
+		m.clearInfoCache()
+		return nil
+	}
+
+	cache := make(map[transport.AdapterInfoID][]byte)
+
+	// Try version first — if it fails, adapter doesn't support INFO.
+	// Called via the setup transport (2s timeout); connect() replaces
+	// m.upstream with a fast-timeout transport for readLoop afterward.
+	data, err := infoReq.RequestInfo(transport.AdapterInfoVersion)
+	if err != nil {
+		m.logger.Printf("adaptermux: INFO not supported by adapter: %v", err)
+		m.clearInfoCache()
+		return nil
+	}
+	cache[transport.AdapterInfoVersion] = append([]byte(nil), data...)
+	version, err := transport.ParseAdapterVersion(data)
+	if err != nil {
+		m.logger.Printf("adaptermux: INFO version parse failed: %v", err)
+		m.infoCacheMu.Lock()
+		m.infoCache = cache
+		m.infoCacheMu.Unlock()
+		m.logger.Printf("adaptermux: INFO cache populated (%d entries)", len(cache))
+		return nil
+	}
+
+	bootstrapIDs := []transport.AdapterInfoID{
+		transport.AdapterInfoHardwareConf,
+		transport.AdapterInfoHardwareID,
+		transport.AdapterInfoResetInfo,
+		transport.AdapterInfoTemperature,
+		transport.AdapterInfoSupplyVolt,
+		transport.AdapterInfoBusVoltage,
+	}
+	if overridden, ok := infoBootstrapIDsOverride(); ok {
+		bootstrapIDs = overridden
+	}
+	interRequestDelay := infoCacheInterRequestDelay
+	if overridden, ok := infoBootstrapDelayOverride(); ok {
+		interRequestDelay = overridden
+	}
+	supportedIDs := bootstrapIDs[:0]
+	for _, id := range bootstrapIDs {
+		if !version.SupportsInfoID(id) {
+			continue
+		}
+		supportedIDs = append(supportedIDs, id)
+	}
+	for idx, id := range supportedIDs {
+		data, err := infoReq.RequestInfo(id)
+		if err == nil {
+			cache[id] = append([]byte(nil), data...)
+		}
+		if idx < len(supportedIDs)-1 {
+			if err := m.waitInfoBootstrapDelay(interRequestDelay, cache); err != nil {
+				return err
+			}
+		}
+	}
+
+	m.infoCacheMu.Lock()
+	m.infoCache = cache
+	m.infoCacheMu.Unlock()
+
+	m.logger.Printf("adaptermux: INFO cache populated (%d entries)", len(cache))
+	return nil
+}
+
+func (m *Mux) waitInfoBootstrapDelay(delay time.Duration, cache map[transport.AdapterInfoID][]byte) error {
+	if m.ctx == nil {
+		time.Sleep(delay)
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-m.ctx.Done():
+		m.infoCacheMu.Lock()
+		m.infoCache = cache
+		m.infoCacheMu.Unlock()
+		m.logger.Printf("adaptermux: INFO cache populated (%d entries)", len(cache))
+		return m.ctx.Err()
+	}
+}
+
+func infoBootstrapIDsOverride() ([]transport.AdapterInfoID, bool) {
+	raw := strings.TrimSpace(os.Getenv(infoBootstrapIDsEnv))
+	if raw == "" {
+		return nil, false
+	}
+	parts := strings.Split(raw, ",")
+	ids := make([]transport.AdapterInfoID, 0, len(parts))
+	for _, part := range parts {
+		token := strings.TrimSpace(part)
+		if token == "" {
+			continue
+		}
+		value, err := strconv.ParseUint(token, 0, 8)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, transport.AdapterInfoID(value))
+	}
+	if len(ids) == 0 {
+		return nil, false
+	}
+	return ids, true
+}
+
+func infoBootstrapDelayOverride() (time.Duration, bool) {
+	raw := strings.TrimSpace(os.Getenv(infoDelayMSEnv))
+	if raw == "" {
+		return 0, false
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms < 0 {
+		return 0, false
+	}
+	return time.Duration(ms) * time.Millisecond, true
+}
+
+// clearInfoCache removes all cached INFO entries so that CachedInfo
+// returns an error until the cache is repopulated.
+func (m *Mux) clearInfoCache() {
+	m.infoCacheMu.Lock()
+	m.infoCache = nil
+	m.infoCacheMu.Unlock()
+}
+
+// arbitrationSendsSource checks the upstream transport to determine
+// whether the adapter already places the initiator byte on the wire
+// during START arbitration. Returns true for ENH/ENS adapters.
+//
+// Used by both the wire phase tracker (completeArbitrationGrant) and
+// activeTransport.ArbitrationSendsSource (for bus.sendTransaction).
+// External proxy sessions need correct phase tracking via
+// startRequestWithSource when the upstream sends SRC. For the gateway
+// session, onReceived skips phase.advance during ownership, so the
+// pre-loaded SRC value is harmless but consistent.
+func (m *Mux) arbitrationSendsSource() bool {
+	m.connMu.Lock()
+	tr := m.upstream
+	m.connMu.Unlock()
+	if tr == nil {
+		return false
+	}
+	if checker, ok := tr.(interface{ ArbitrationSendsSource() bool }); ok {
+		return checker.ArbitrationSendsSource()
+	}
+	return false
+}
+
+// bytesAreUnescaped reports whether the upstream transport delivers
+// pre-unescaped (logical) bytes. ENH/ENS transports return true: they
+// decode wire-level {0xA9,0x01}→0xAA / {0xA9,0x00}→0xA9 before surfacing
+// bytes. Protocol.Bus uses this via EscapeAware to skip escape expansion
+// on read and to avoid double-escaping on write.
+//
+// Without this, protocol.Bus treats 0xAA as SYN (bus idle) on the wire
+// even when it is a legitimate data byte on the logical layer.
+func (m *Mux) bytesAreUnescaped() bool {
+	m.connMu.Lock()
+	tr := m.upstream
+	m.connMu.Unlock()
+	if tr == nil {
+		return false
+	}
+	if ea, ok := tr.(transport.EscapeAware); ok {
+		return ea.BytesAreUnescaped()
+	}
+	return false
+}
+
+// CachedInfo returns a copy of the cached INFO response for the given
+// ID. Returns an error if the cache is empty (adapter doesn't support
+// INFO) or the requested ID was not cached.
+func (m *Mux) CachedInfo(id transport.AdapterInfoID) ([]byte, error) {
+	m.infoCacheMu.RLock()
+	defer m.infoCacheMu.RUnlock()
+
+	if len(m.infoCache) == 0 {
+		return nil, errors.New("adaptermux: INFO not available")
+	}
+	data, ok := m.infoCache[id]
+	if !ok {
+		return nil, fmt.Errorf("adaptermux: INFO id 0x%02X not cached", byte(id))
+	}
+	result := make([]byte, len(data))
+	copy(result, data)
+	return result, nil
+}
+
+// reconnect tears down the current connection. Unmanaged muxes then
+// re-establish it in place; managed muxes delegate replacement to their
+// connection-loss owner and return delegated=true so readLoop retires.
+func (m *Mux) reconnect() (delegated bool, err error) {
+	// A managed owner is the sole reconnect authority. Fence new work first,
+	// then detach/close the transport so already-admitted START/SEND calls
+	// unblock before we drain the managed-use gate. BACKOFF is published only
+	// after the common state teardown below, while the write gate remains held.
+	owner := m.connectionLostOwner()
+	delegated = owner != nil
+	managedGateHeld := false
+	// Issue #1003: a gateway write waiting for an escape pair's raw echoes
+	// holds its managed-use lease, and an escape suffix commit holds the
+	// arbitrator lock while it writes. The old stream can no longer echo
+	// that pair, so the reconnect fences it: the write fails promptly and
+	// releases the lease before the managed gate is drained. On the
+	// delegated path the fence follows the upstream close, which unblocks
+	// a suffix write stalled on the old connection.
+	retireErr := fmt.Errorf("adaptermux: adapter disconnected: %w", ebuserrors.ErrAdapterReset)
+	if !delegated {
+		// Close the old connection for callback-free muxes before the
+		// arbitration teardown below, for the same reason as the managed
+		// path: a commit write stalled on it holds the arbitrator lock.
+		m.connMu.Lock()
+		if m.conn != nil {
+			if err := m.conn.Close(); err != nil {
+				m.logger.Printf("adaptermux: old conn close: %v", err)
+			}
+		}
+		m.connMu.Unlock()
+		m.retireGatewayLeadWait(retireErr)
+	}
+	if delegated {
+		m.connectionLossDelegated.Store(true)
+
+		m.connMu.Lock()
+		upstream := m.upstream
+		conn := m.conn
+		m.upstream = nil
+		m.conn = nil
+		m.connMu.Unlock()
+		if upstream != nil {
+			if closeErr := upstream.Close(); closeErr != nil {
+				m.logger.Printf("adaptermux: managed upstream close: %v", closeErr)
+			}
+		} else if conn != nil {
+			if closeErr := conn.Close(); closeErr != nil {
+				m.logger.Printf("adaptermux: managed conn close: %v", closeErr)
+			}
+		}
+		m.retireGatewayLeadWait(retireErr)
+
+		m.connectionUseMu.Lock()
+		managedGateHeld = true
+		defer func() {
+			if managedGateHeld {
+				m.connectionUseMu.Unlock()
+			}
+		}()
+	}
+
+	// Invalidate INFO cache immediately so CachedInfo returns errors
+	// during the disconnect window rather than serving stale data.
+	m.clearInfoCache()
+
+	m.emitPassive(PassiveEvent{
+		Kind:       PassiveEventDisconnected,
+		ObservedAt: time.Now(),
+	})
+
+	// Reset multiplexer state.
+	m.stateMu.Lock()
+	m.phase.reset(wirePhaseIdle)
+	m.arb.forceRelease()
+	m.gatewayEcho.reset()
+	m.collisionResyncOwed = 0
+	if m.gatewayTxnActive {
+		m.gatewayTxnActive = false
+		m.recordGatewayInactive(ReasonReconnect)
+	}
+	// Codex round-2 MUST FIX on PR #647: reconnect tears down
+	// gateway echo state — the in-flight watchdog is no longer
+	// meaningful (the byte's echo will never arrive over the
+	// replaced transport). Cancel here, NOT inside the SessionPacer
+	// nil-check block above — the cancel call uses the pacer's
+	// own mutex (independent of stateMu) and is nested-lock free.
+	pacerToCancel := m.SessionPacer(gatewaySessionID)
+	// Bump gen forward (monotonic) — any in-flight goroutine's captured
+	// arbGen will no longer match, so it cannot clear blockingArbActive.
+	// Clear blockingArbActive here because the transport is being replaced.
+	m.blockingArbGen++
+	m.blockingArbActive = false
+	m.deferRegrantUntilNextSyn = false
+	m.arbitrationRecovery = arbitrationRecoveryReset
+	m.retiredSelection = false
+	pendingToCancel := m.pendingStart
+	m.pendingStart = nil
+	m.pendingStartAbsorb = 0
+	m.localLosers = nil
+	m.clearAbsorbSkipLogStateLocked()
+	// F-NEW-25: stop the absorb-reset debounce timer on reconnect.
+	// reconnect explicitly drains pendingStartAbsorb here; leaving
+	// the timer running would either no-op when it fires (count
+	// already 0) or wrongly bump absorbResetTotal for a reset
+	// that the reconnect path already performed.
+	// Clear pendingAbsorbResetDueAt for the same Codex-round-1
+	// reason as in Close: an in-flight stale callback could
+	// observe a pre-boundary future-dated due-at and incorrectly
+	// no-op forever; zeroing it makes the IsZero short-circuit
+	// in fireAbsorbReset treat the field as "no fresh arm" so any
+	// post-boundary arm sets the next valid due-at.
+	if m.pendingAbsorbResetTimer != nil {
+		m.pendingAbsorbResetTimer.Stop()
+		m.pendingAbsorbResetTimer = nil
+	}
+	m.pendingAbsorbResetDueAt = time.Time{}
+	if pendingToCancel != nil && pendingToCancel.deadline != nil {
+		pendingToCancel.deadline.Stop() // AM8: cancel deadline timer
+	}
+	wasHeld := m.stepBoundaryLocked()
+	m.stateMu.Unlock()
+	m.logStepHoldCleared(wasHeld, "reconnect")
+
+	// Cancel the pacer watchdog OUTSIDE stateMu (Codex round-2
+	// MUST FIX on PR #647 — see captured pacerToCancel above).
+	// Codex GitHub-bot P2 review on PR #650: reconnect is a hard
+	// reset of the upstream transport; the previous L_rtt EMA and
+	// lastEchoAt anchor reflect the OLD connection's latency
+	// characteristics and would produce spurious soft/hard
+	// timeouts on the FIRST post-reconnect write if the new
+	// connection has different latency. ResetLrtt rebootstraps
+	// L_rtt to the initial value and clears lastEchoAt so the
+	// next BeforeActiveWrite re-enters grace bootstrap.
+	if pacerToCancel != nil {
+		pacerToCancel.CancelEchoWatchdog()
+		pacerToCancel.ResetLrtt()
+	}
+
+	// Cancel in-flight pending START if any.
+	if pendingToCancel != nil {
+		// AM53: guarded send to avoid blocking reconnect if nobody reads notify.
+		select {
+		case pendingToCancel.notify <- startResult{granted: false, initiator: pendingToCancel.initiator, err: errors.New("adaptermux: adapter disconnected")}:
+		case <-time.After(1 * time.Second):
+			m.logger.Printf("adaptermux: reconnect: timed out sending to pendingStart.notify")
+		}
+	}
+
+	// F-18: per-session echo trackers were removed; gateway-side reset
+	// happens via m.gatewayEcho.reset() in flushOnSYN paths.
+
+	// Fail pending arbitration.
+	m.arb.failAllPending(errors.New("adaptermux: adapter disconnected"))
+
+	// Notify active path of disconnect so gateway.Bus sees the reset
+	// boundary (Codex P2 #3058767932). Drain stale bytes first.
+	m.drainActiveCh()
+	select {
+	case m.activeCh <- activeEvent{kind: activeEventError, err: ebuserrors.ErrAdapterReset}:
+	default:
+		m.logger.Printf("adaptermux: active channel full, dropping disconnect notification")
+	}
+
+	// The old connection was closed before the teardown above (managed
+	// teardown detached and closed the transport before draining provider
+	// use; callback-free muxes closed the connection first as well).
+	if delegated {
+		owner()
+		m.logger.Printf("adaptermux: connection recovery delegated to lifecycle owner")
+		m.connectionUseMu.Unlock()
+		managedGateHeld = false
+		return true, nil
+	}
+
+	// Reconnection loop with exponential backoff.
+	delay := m.cfg.ReconnectInitialDelay
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-m.ctx.Done():
+			timer.Stop()
+			return false, m.ctx.Err()
+		case <-timer.C:
+		}
+
+		if err := m.connect(); err != nil {
+			m.logger.Printf("adaptermux: reconnect failed: %v", err)
+			delay = delay * 2
+			if delay > m.cfg.ReconnectMaxDelay {
+				delay = m.cfg.ReconnectMaxDelay
+			}
+			continue
+		}
+
+		m.logger.Printf("adaptermux: reconnected to %s/%s", m.cfg.Network, m.cfg.Address)
+		m.emitPassive(PassiveEvent{
+			Kind:       PassiveEventConnected,
+			ObservedAt: time.Now(),
+		})
+
+		// Broadcast RESETTED to external sessions.
+		m.broadcastResetToSessions()
+
+		return false, nil
+	}
+}
+
+// readLoop reads bytes from the adapter and dispatches them to
+// active path, passive path, and external sessions. Each iteration reads
+// one stream item or error, translates it into a transition event and
+// dispatches it to the method for its kind (read_loop.go).
+func (m *Mux) readLoop() {
+	defer m.wg.Done()
+
+	var health readHealth
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+
+		item, err := m.readUpstreamItem()
+		ev, logical := streamItemEvent(item, err)
+		if ev.kind == muxEventReadFailure {
+			if !m.onReadFailure(err, &health) {
+				return
+			}
+			continue
+		}
+
+		health.firstTimeoutTime = time.Time{} // AM27: reset timeout streak on successful read
+		health.lastDataTime = time.Now()      // AM27: track last data for blackhole detection
+
+		bids, admitted := m.admitStreamItem(item)
+		if !admitted || !logical {
+			continue
+		}
+		switch ev.kind {
+		case muxEventStarted:
+			m.onStreamStarted(ev)
+		case muxEventFailed:
+			m.onStreamFailed(ev)
+		case muxEventReset:
+			m.handleReset()
+		default:
+			m.onStreamSymbol(ev, !item.hasRaw, bids)
+		}
+	}
+}
+
+// V8Classifier returns the v8 classifier instance attached to this
+// mux, or nil when V8ClassifierMode is Off (the production default
+// in B3.2). Exposed for diagnostics, expvar surfaces, and tests.
+// A nil return is safe to call all v8classifier.Classifier methods
+// on (each has nil-receiver handling).
+//
+// Phase 3 Step B3.2 (this file): the classifier is observe-only —
+// callers MUST NOT depend on the return value for routing
+// decisions. Subsequent stacked PRs (B3.3..B3.7) extend the
+// classifier's authority.
+func (m *Mux) V8Classifier() *v8classifier.Classifier {
+	return m.v8
+}
+
+// readUpstream reads a stream event from the adapter transport.
+func (m *Mux) readUpstream() (transport.StreamEvent, error) {
+	m.connMu.Lock()
+	tr := m.upstream
+	m.connMu.Unlock()
+
+	if tr == nil {
+		return transport.StreamEvent{}, errors.New("adaptermux: not connected")
+	}
+
+	if reader, ok := tr.(transport.StreamEventReader); ok {
+		return reader.ReadEvent()
+	}
+
+	b, err := tr.ReadByte()
+	if err != nil {
+		return transport.StreamEvent{}, err
+	}
+	return transport.StreamEvent{Kind: transport.StreamEventByte, Byte: b}, nil
+}
+
+// onReceived processes a byte received from the adapter.
+//
+// Lock ordering: stateMu acquired first, released before any callback
+// invocation or session delivery to avoid re-entrancy deadlocks.
+//
+// Boundary invariant — 0xAA at the mux layer:
+//
+//	StreamEventByte{Byte: 0xAA} arriving here IS treated as SYN
+//	(bus idle marker). This is correct for ENH transports: the
+//	ENH parser never produces ENHResReceived(0xAA) because logical
+//	0xAA data is wire-escaped as {0xA9, 0x01} and raw wire 0xAA is
+//	the SYN symbol consumed by the adapter before framing.
+//
+//	See TestOnReceived_0xAA_WireLayerSYNInvariant and
+//	TestMux_0xAA_MockTransportAlwaysSYN for the test coverage.
+//	A cleaner long-term contract is an explicit StreamEventSyn
+//	instead of inferring SYN from byte value; not changed here.
+//
+// onReceived processes one logical byte from the upstream
+// transport. wasEscaped (F-23 / Codex bot on PR-2) is the provenance
+// flag from transport.StreamEvent.WasEscaped — true when the byte
+// was decoded from an eBUS wire escape pair (so a logical 0xAA value
+// is user payload, not a wire SYN; a logical 0xA9 is data, not an
+// escape lead). It's threaded into the passive-event emissions and
+// into activeCh so consumers downstream of the mux see the same
+// per-byte truth as a raw-TCP passive observer would via the local
+// escape decoder.
+//
+// onReceived is the logical-only entry: the byte is also delivered to
+// external sessions. It is used when the upstream supplies no raw view.
+func (m *Mux) onReceived(symbol byte, wasEscaped bool) {
+	m.onLogicalReceived(symbol, wasEscaped, true)
+}
+
+// ownershipDurationLimit keeps the gateway failure guard from shortening
+// the existing external-session budget. Both receive timeout paths use it.
+func (m *Mux) ownershipDurationLimit(ownerID uint64) time.Duration {
+	limit := m.cfg.MaxOwnershipDuration
+	if ownerID == gatewaySessionID && m.cfg.GatewayMaxOwnershipDuration < limit {
+		limit = m.cfg.GatewayMaxOwnershipDuration
+	}
+	return limit
+}
+
+// onLogicalReceived processes one logical byte. deliverToSessions is false
+// when the external sessions already received the raw wire symbol(s) that
+// produced this byte (issue #1003): sessions are then fed exclusively from
+// the raw view and must not see a second, logical RECEIVED.
+func (m *Mux) onLogicalReceived(symbol byte, wasEscaped bool, deliverToSessions bool) {
+	m.onLogicalReceivedForBids(symbol, wasEscaped, deliverToSessions, nil)
+}
+
+// handleReset handles an adapter RESETTED event.
+func (m *Mux) handleReset() {
+	now := time.Now()
+
+	// NOTE: We do NOT clear the INFO cache on in-band RESETTED.
+	// Stable INFO entries (version, hardware ID) do not change on
+	// in-band reset — the adapter's identity is constant. The cache
+	// is only cleared on TCP disconnect (in reconnect()), which calls
+	// connect() to repopulate it after re-establishing the connection.
+
+	m.retireGatewayLeadWait(fmt.Errorf("adaptermux: %w", ebuserrors.ErrAdapterReset))
+	m.stateMu.Lock()
+	m.phase.reset(wirePhaseIdle)
+	m.gatewayEcho.reset()
+	m.collisionResyncOwed = 0
+	wasGatewayActive := m.gatewayTxnActive
+	if m.gatewayTxnActive {
+		m.gatewayTxnActive = false
+		m.recordGatewayInactive(ReasonReset)
+	}
+	// Bump gen forward (monotonic) — see reconnect() for rationale.
+	m.blockingArbGen++
+	m.blockingArbActive = false
+	m.deferRegrantUntilNextSyn = false
+	m.arbitrationRecovery = arbitrationRecoveryReset
+	m.retiredSelection = false
+	pendingToCancel := m.pendingStart
+	m.pendingStart = nil
+	m.localLosers = nil
+	m.pendingStartAbsorb = 0 // reset clears adapter state; no stale responses will arrive
+	m.clearAbsorbSkipLogStateLocked()
+	// F-NEW-25: stop the absorb-reset debounce timer on RESETTED
+	// boundary. The reset semantics already drain pendingStartAbsorb;
+	// leaving the timer running would either no-op when it fires
+	// (count already 0) or fire and bump absorbResetTotal for a
+	// reset that already happened. Stop and discard.
+	// Clear pendingAbsorbResetDueAt for the same Codex-round-1
+	// reason as in Close/reconnect — see those sites' comments.
+	if m.pendingAbsorbResetTimer != nil {
+		m.pendingAbsorbResetTimer.Stop()
+		m.pendingAbsorbResetTimer = nil
+	}
+	m.pendingAbsorbResetDueAt = time.Time{}
+	if pendingToCancel != nil && pendingToCancel.deadline != nil {
+		pendingToCancel.deadline.Stop() // AM8: cancel deadline timer
+	}
+	wasHeld := m.stepBoundaryLocked()
+	m.stateMu.Unlock()
+	m.logStepHoldCleared(wasHeld, "adapter_reset")
+
+	// Codex round-2 MUST FIX on PR #647: a RESETTED boundary
+	// erases any in-flight gateway transaction. Cancel the
+	// watchdog OUTSIDE stateMu so the pacer mutex doesn't nest
+	// inside stateMu. The gateway-active condition was captured
+	// under stateMu above (wasGatewayActive); the cancel is
+	// idempotent so racing a concurrent ArmEchoWatchdog (which
+	// can't happen here because the only producer is sendLoop's
+	// gateway-only block, and post-reset there is no gateway
+	// transaction) is still safe.
+	if wasGatewayActive {
+		if pacer := m.SessionPacer(gatewaySessionID); pacer != nil {
+			pacer.CancelEchoWatchdog()
+		}
+	}
+
+	// Cancel in-flight pending START if any.
+	if pendingToCancel != nil {
+		// AM53: guarded send to avoid blocking handleReset if nobody reads notify.
+		select {
+		case pendingToCancel.notify <- startResult{granted: false, initiator: pendingToCancel.initiator, err: fmt.Errorf("adaptermux: %w", ebuserrors.ErrAdapterReset)}:
+		case <-time.After(1 * time.Second):
+			m.logger.Printf("adaptermux: handleReset: timed out sending to pendingStart.notify")
+		}
+	}
+
+	// F-18: per-session echo trackers were removed.
+
+	m.arb.forceRelease()
+	m.arb.failAllPending(fmt.Errorf("adaptermux: %w", ebuserrors.ErrAdapterReset))
+
+	// Drain stale bytes from active channel before enqueuing the reset
+	// error. Because activeCh is a single FIFO channel, the consumer is
+	// guaranteed to see the reset before any post-reset bytes that
+	// readLoop enqueues after this function returns.
+	m.drainActiveCh()
+
+	// Enqueue reset error into the unified channel (non-blocking to
+	// prevent readLoop deadlock).
+	select {
+	case m.activeCh <- activeEvent{kind: activeEventError, err: ebuserrors.ErrAdapterReset}:
+	default:
+		m.logger.Printf("adaptermux: active channel full, dropping adapter reset notification")
+	}
+
+	m.emitPassive(PassiveEvent{Kind: PassiveEventReset, ObservedAt: now})
+	m.broadcastResetToSessions()
+
+	// NOTE: We intentionally do NOT re-INIT after in-band RESETTED.
+	// Re-INIT sends ENHReqInit which the adapter answers with another
+	// RESETTED, creating an infinite reset loop on ENS adapters.
+	// The INIT handshake is performed once in connect() at TCP connection
+	// time and again in reconnect() after a TCP disconnect. In-band
+	// RESETTED only requires state cleanup (above), not re-negotiation.
+	//
+	// PROXY DIVERGENCE: The standalone proxy performed guarded re-INIT
+	// after in-band RESETTED with a stabilization delay. This mux
+	// intentionally skips re-INIT because ENS adapters enter an infinite
+	// reset loop (INIT -> RESETTED -> INIT -> ...). The INFO cache is
+	// preserved across in-band RESETTED because stable adapter identity
+	// (version, hardware ID) does not change on soft reset. Volatile
+	// telemetry (temperature, voltage) is a startup snapshot by design.
+	// This divergence is documented and tested.
+}
+
+// drainActiveCh discards all buffered events from the active channel.
+// Called before reset/reconnect to ensure consumers don't see stale
+// pre-boundary bytes after a reset event.
+// Returns the number of events drained.
+func (m *Mux) drainActiveCh() int {
+	n := 0
+	for {
+		select {
+		case <-m.activeCh:
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// drainActiveChBytesOnly discards only byte events (activeEventByte)
+// from the active channel, preserving lifecycle events (activeEventError
+// — reset / disconnect boundaries). Codex P12 review pass-1 P1: the
+// inter-write drain must NOT swallow reset boundary signals; bus.Send
+// needs to see them to abort cleanly. Re-enqueues any preserved error
+// event back onto activeCh in order.
+//
+// Returns the number of byte events drained.
+//
+// Caller must hold stateMu (we're racing onReceived which also writes
+// to activeCh under stateMu — peer-of-equals discipline).
+func (m *Mux) drainActiveChBytesOnly() int {
+	n := 0
+	var preserved []activeEvent
+	for {
+		select {
+		case ev := <-m.activeCh:
+			if ev.kind == activeEventByte {
+				n++
+				continue
+			}
+			preserved = append(preserved, ev)
+		default:
+			// Re-enqueue preserved lifecycle events in order. Non-
+			// blocking — if activeCh is full (capacity 4096), log
+			// and continue (the lifecycle event was already in the
+			// channel pre-drain so this is a no-regression path).
+			for _, ev := range preserved {
+				select {
+				case m.activeCh <- ev:
+				default:
+					m.logger.Printf("adaptermux: drain re-enqueue full, lifecycle event dropped: kind=%d err=%v", ev.kind, ev.err)
+				}
+			}
+			return n
+		}
+	}
+}
+
+// activePathExpectsBytes — REMOVED in P11. Pre-P11 the non-SYN
+// delivery path used this bulk filter (just gatewayTxnActive); P11
+// switched to the per-byte filter activePathExpectsByte(symbol) which
+// is symmetric across pre/post-first-echo and rejects mid-write stale
+// bytes. The function's comments still appear historically in
+// onSYNLocked (referring to the gating semantics, which are now
+// embodied by activePathExpectsByte's mid-write/response phase
+// branches).
+
+// activePathExpectsByte — REMOVED in P11 round-2. The per-byte gate
+// is now inlined in onReceived using gatewayEcho's pre-match queue
+// head (protocol-accurate; uncapped). The previous round used
+// echoCursor/writePrefix which were capped at txnPrefixCap=8 AND
+// advanced on non-match — both broken signals (Codex P1 findings on
+// PR #606). The SYN-path call site (line 1120) still uses the legacy
+// helper; preserved as a stub returning the same gatewayTxnActive
+// signal the SYN handler expects (the SYN-specific suppression logic
+// lives in onSYNLocked's preEchoMidFrameSuppress / midWriteSyn —
+// independent of this byte-level filter).
+func (m *Mux) activePathExpectsByte(symbol byte) bool {
+	return m.gatewayTxnActive
+}
+
+// deliverToActive sends a byte to the active path channel.
+// Logs on overflow instead of silently dropping (CRITICAL-1 fix).
+//
+// If countAsDelivered is true and the send succeeds, increment
+// bytesDeliveredToActive — the precise "at least one real adapter byte
+// has been enqueued on activeCh during this gateway-owned txn" signal
+// used by onSYNLocked's terminator/pre-echo suppression gates (Codex PR
+// #502 P1). Callers pass true when the enqueue corresponds to an
+// active-path delivery under gateway ownership (decided under stateMu
+// via activePathExpectsBytes); pass false for shutdown/reset events or
+// for non-gateway-owned passthrough.
+//
+// P12 pass-2 (Codex P1): both call sites now perform their own
+// stateMu.Lock + revalidation around the enqueue (mirror of the non-SYN
+// path at mux.go:1220-1239). This helper is kept for callers that need
+// the standalone non-blocking send semantics; currently unused at
+// compile time but retained for the documented "shutdown/reset
+// passthrough" use case.
+//
+//nolint:unused // retained for future shutdown/reset callers per godoc
+func (m *Mux) deliverToActive(symbol byte, countAsDelivered bool) {
+	select {
+	case m.activeCh <- activeEvent{kind: activeEventByte, b: symbol}:
+		if countAsDelivered {
+			m.activeTxn.bytesDeliveredToActive.Add(1)
+		}
+	default:
+		m.logger.Printf("adaptermux: active channel full, dropping byte 0x%02X", symbol)
+	}
+}
+
+// tryGrantAndStart attempts to grant bus ownership and forward the
+// START request to the adapter using RequestStart (non-blocking).
+//
+// P3 rearchitecture: instead of calling StartArbitration (which holds
+// readMu and blocks readLoop), we call RequestStart (which only holds
+// writeMu) and register a pendingStart. The adapter's STARTED/FAILED
+// response is handled asynchronously by readLoop via
+// handleArbitrationResponse. This ensures passive observers continue
+// to receive bus bytes during gateway arbitration.
+//
+// requestStartForSession replaces a session's bid and cancels any previous
+// in-flight request. Only a subsequent idle SYN can forward the bid.
+func (m *Mux) requestStartForSession(sessionID uint64, initiator byte) <-chan startResult {
+	managedGateHeld, admitted := m.beginManagedConnectionUse()
+	releaseManagedGate := func() {
+		if managedGateHeld {
+			m.endManagedConnectionUse(true)
+			managedGateHeld = false
+		}
+	}
+	defer releaseManagedGate()
+	if !admitted || m.closing.Load() {
+		ch := make(chan startResult, 1)
+		ch <- startResult{granted: false, initiator: initiator, err: errNotConnected}
+		return ch
+	}
+	// Steps 1+2 MUST be atomic under stateMu so a concurrent
+	// tryGrantAndStart cannot pop the OLD request out of
+	// pendingExternal between the in-flight check and the
+	// arbitrator replacement — that gap would leave a re-submitted
+	// session with neither flag set (Codex P1 round 4 on PR #623).
+	// Lock order stateMu → arb.mu matches tryGrantAndStart's order,
+	// so no ABBA risk.
+	m.stateMu.Lock()
+	cancelGatewayWatchdog := false
+	if sessionID == gatewaySessionID {
+		// Issue #1401: the gateway's new bid is the end of its previous
+		// transaction. Release a grant that transaction left live or
+		// unused, and discard what it left in activeCh, before queueing.
+		cancelGatewayWatchdog = m.retirePreviousGatewayTxnLocked()
+	}
+	// F-39 (2026-05-15, Codex adversarial on PR #633):
+	// in-flight same-session+same-initiator duplicate. The pending
+	// START is a real bid for the same arbitration the new caller
+	// wants; cancelling it would mark the in-flight request as
+	// cancelled and convert a real late STARTED into a suppressed
+	// grant. Instead, silently close out the new waiter — its
+	// session.handleStart goroutine reads cancelled:true and exits
+	// without emitting any ENH frame. The in-flight request will
+	// deliver STARTED via its OWN notify channel when the adapter
+	// responds; ebusd accepts that STARTED as the grant for
+	// whichever REQ_START it was most recently waiting on (the ENH
+	// protocol does not tag responses to specific requests, so any
+	// STARTED in ebusd's wait window satisfies its arbitration
+	// wait).
+	//
+	// NOTE: deliberately does NOT retarget pendingStart.notify
+	// because the AM8 deadline timer (armStartDeadlineLocked) captures the
+	// original notify and a pointer change would invalidate the
+	// deadline check. The in-flight grant proceeds under its
+	// original deadline; the new caller exits silently.
+	//
+	// Different-initiator in-flight duplicate still goes through
+	// markInFlightCancelled — that's a real change of intent.
+	if m.pendingStart != nil && m.pendingStart.sessionID == sessionID &&
+		sessionID != gatewaySessionID && m.pendingStart.initiator == initiator {
+		m.stateMu.Unlock()
+		ch := make(chan startResult, 1)
+		ch <- startResult{
+			granted:   false,
+			cancelled: true,
+			initiator: initiator,
+		}
+		return ch
+	}
+	// Step 1: cancel any in-flight grant for THIS session. The
+	// arbitrator's replace path (inside requestStart) only sees
+	// pendingExternal/pendingGateway entries; once an entry has
+	// been popped into m.pendingStart this is the only place the
+	// cancelled flag gets set.
+	//
+	if m.pendingStart != nil && m.pendingStart.sessionID == sessionID && m.pendingStart.req != nil {
+		m.arb.markInFlightCancelled(m.pendingStart.req)
+	}
+
+	// Step 2: hand off to the arbitrator. Holding stateMu across
+	// this call is what closes the race: tryGrantAndStart's pop
+	// is also gated on stateMu, so it cannot interleave between
+	// step 1 and step 2.
+	ch := m.arb.requestStart(sessionID, initiator)
+	if sessionID == gatewaySessionID {
+		// Bound admission only. Once selected at SYN, the physical START has
+		// its own deadline and must remain deliverable even after this timer.
+		time.AfterFunc(m.cfg.StartDeadline, func() { m.expireGatewayAdmission(ch) })
+	}
+
+	m.stateMu.Unlock()
+	if cancelGatewayWatchdog {
+		m.cancelGatewayWatchdog()
+	}
+	releaseManagedGate()
+
+	return ch
+}
+
+// expireGatewayAdmission resolves only the queued or deferred-loser bid
+// identified by notify. selectAtSYN and replacement use the same lock, so
+// expiry cannot cancel a selected wire bid or a newer gateway request.
+func (m *Mux) expireGatewayAdmission(notify <-chan startResult) {
+	m.arb.mu.Lock()
+	defer m.arb.mu.Unlock()
+	var req *startRequest
+	if pending := m.arb.pendingGateway; pending != nil && pending.notify == notify {
+		req = pending
+		m.arb.pendingGateway = nil
+	} else if loser := m.arb.deferredGatewayLoser; loser != nil && loser.notify == notify {
+		req = loser
+		m.arb.deferredGatewayLoser = nil
+	} else {
+		return
+	}
+	req.notify <- startResult{initiator: req.initiator, err: m.gatewayAdmissionError()}
+}
+
+// completeArbitrationGrant finalizes a successful arbitration grant.
+// Used by the blocking StartArbitration fallback path and by
+// handleArbitrationResponse on STARTED.
+func (m *Mux) completeArbitrationGrant(pending *pendingStartState) {
+	sendsSource := m.arbitrationSendsSource()
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	// A lifecycle boundary retires the result itself; a late commit must
+	// neither resurrect its fence nor publish observations in the new stream.
+	if pending.lifecycleEpoch != m.arb.lifecycleEpoch.Load() {
+		return
+	}
+	// Cancellation may win between the adapter response and this commit.
+	if m.pendingStart != pending {
+		m.fenceArbitrationUntilSYNLocked()
+		m.undeliverableStarted.Add(1)
+		return
+	}
+	m.pendingStart = nil
+	if pending.deadline != nil {
+		pending.deadline.Stop()
+	}
+	sessionID, initiator, notify := pending.sessionID, pending.initiator, pending.notify
+	reject := func() {
+		m.fenceArbitrationUntilSYNLocked()
+		m.undeliverableStarted.Add(1)
+		select {
+		case notify <- startResult{cancelled: true, initiator: initiator}:
+		default:
+		}
+	}
+	if pending.req != nil && pending.req.cancelled.Load() {
+		reject()
+		return
+	}
+	// Publish STARTED while the session liveness and ownership commit are
+	// protected together. The writer can only SEND after stateMu is released.
+	startedQueued := false
+	if sessionID != gatewaySessionID {
+		m.sessionsMu.Lock()
+		defer m.sessionsMu.Unlock()
+		sess := m.sessions[sessionID]
+		if sess == nil || sess.closed.Load() {
+			reject()
+			return
+		}
+		sess.bytesSentSinceGrant.Store(0)
+		sess.grantDelivered.Store(false)
+		gen := sess.grantGeneration.Add(1)
+		if !sess.deliverStartedForGrant(initiator, gen) {
+			reject()
+			return
+		}
+		startedQueued = true
+	}
+	if sendsSource {
+		m.phase.startRequestWithSource(initiator)
+	} else {
+		m.phase.startRequest()
+	}
+	now := time.Now()
+	m.busOwned, m.lastWireActivity = now, now
+	if sessionID == gatewaySessionID {
+		drained := m.drainActiveCh()
+		m.activeTxn.staleActiveDiscarded.Add(uint64(drained))
+		m.gatewayEcho.markRequestStart()
+		m.gatewayTxnActive = false
+		m.recordGatewayGrant(initiator, drained)
+	}
+	m.arb.confirmOwnership(sessionID, initiator)
+	notify <- startResult{granted: true, initiator: initiator, startedQueued: startedQueued}
+}
+
+// externalAbandonDeadline is the F-35 abandon-watchdog budget, measured from
+// the moment the granted session's STARTED reached its client.
+const externalAbandonDeadline = 75 * time.Millisecond
+
+// armExternalAbandonWatchdog starts the F-34/F-35 abandon watchdog for the
+// grant identified by grantGen. Called by the session writer after STARTED
+// for that grant was written to the client. The watchdog releases ownership
+// only when the same grant is still current, no SEND arrived for it and the
+// session still owns the bus.
+//
+// The checks and the release run in one stateMu critical section: handleSend
+// counts an accepted SEND under the same lock, so a SEND that passed its owner
+// check is always seen here. The release fences selection until the next SYN
+// like a cancel, so readLoop resets both wire trackers there even when the
+// classifier was following the grant's telegram. Lock order is stateMu, then
+// arb.mu; sessionsMu and connMu are not taken.
+func (m *Mux) armExternalAbandonWatchdog(sess *session, grantGen uint32) {
+	after := m.externalAbandonAfter
+	if after == nil {
+		after = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	}
+	sessionID := sess.id
+	after(externalAbandonDeadline, func() {
+		m.stateMu.Lock()
+		if sess.closed.Load() ||
+			uint32(sess.grantGeneration.Load()) != grantGen || // superseded by a newer grant
+			sess.bytesSentSinceGrant.Load() > 0 || // grant was used
+			!m.arb.isOwner(sessionID) { // already released by some other path
+			m.stateMu.Unlock()
+			return
+		}
+		m.arb.releaseOwnership(sessionID)
+		m.fenceArbitrationUntilSYNLocked()
+		m.stateMu.Unlock()
+		m.logger.Printf("adaptermux: abandon-watchdog firing for session %d gen=%d (no SEND within %v after STARTED reached the client) — force-releasing ownership",
+			sessionID, grantGen, externalAbandonDeadline)
+	})
+}
+
+// handleArbitrationResponse processes a STARTED or FAILED event from
+// the adapter, resolving the pending START registered by tryGrantAndStart.
+// It reports whether a non-cancelled failure carrying the winner was sent to
+// the selected waiter. Source routing must skip that session only when this
+// result actually conveys the source; a pre-handler snapshot can be cancelled
+// or replaced before attribution and must then receive the source as an observer.
+func (m *Mux) handleArbitrationResponse(started bool, data byte) bool {
+	m.logger.Printf("adaptermux: arbitration response started=%v data=0x%02X", started, data)
+	m.stateMu.Lock()
+	// readLoop snapshots these before consuming even a stale response.
+	m.localLosers = nil
+
+	// Absorb stale responses from cancelled RequestStart calls.
+	// cancelPendingStart increments pendingStartAbsorb when it clears a
+	// pending request, because the adapter will still deliver STARTED or
+	// FAILED for that old RequestStart. Without this, a stale FAILED
+	// (which carries the WINNER's address, not the loser's, making
+	// initiator matching impossible) would incorrectly fail a newer
+	// pending request.
+	if m.pendingStartAbsorb > 0 {
+		m.stepInStepLocked()
+		m.fenceArbitrationUntilSYNLocked()
+		m.pendingStartAbsorb--
+		if m.pendingStartAbsorb == 0 {
+			m.clearAbsorbSkipLogStateLocked()
+		}
+		if started {
+			m.undeliverableStarted.Add(1)
+		}
+		// F-15 follow-up (PR #626 Codex bot review on b3b7f13 + e6b96ee
+		// — P1 finding): the absorb-consume branch used to reconnect
+		// unconditionally on STARTED (`needReconnect := started`). On
+		// the non-blocking ENH path that's the same asymmetric design
+		// defect F-15 fixed in the AM8 deadline callback — just
+		// delayed: AM8 arms absorb without closing, but then the late
+		// STARTED arrives, hits THIS branch, and conn.Close fires.
+		// The F-15 fix only prevented the IMMEDIATE close; the late
+		// absorb still tore down TCP, preserving the retry-feedback
+		// loop F-15 was meant to eliminate.
+		//
+		// Mirror F-15's transport-type gate: reconnect only on the
+		// blocking StartArbitration path (where a hung goroutine may
+		// still need unsticking). On the non-blocking RequestStart
+		// path the adapter is merely slow, eBUS arbitration is
+		// per-SYN stateless, and the absorb counter has already done
+		// its bookkeeping job by decrementing.
+		m.connMu.Lock()
+		tr := m.upstream
+		m.connMu.Unlock()
+		_, hasRequestStart := tr.(arbitrationRequester)
+		_, hasBlockingStart := tr.(interface{ StartArbitration(byte) error })
+		isBlockingPath := !hasRequestStart && hasBlockingStart
+		needReconnect := started && isBlockingPath
+		m.stateMu.Unlock()
+		kind := "FAILED"
+		if started {
+			kind = "STARTED"
+		}
+		m.logger.Printf("adaptermux: absorbed stale %s from cancelled request (data=0x%02X, isBlockingPath=%v)", kind, data, isBlockingPath)
+		if needReconnect {
+			m.connMu.Lock()
+			c := m.conn
+			m.connMu.Unlock()
+			if c != nil {
+				if err := c.Close(); err != nil {
+					m.logger.Printf("adaptermux: stale STARTED reconnect close: %v", err)
+				} else {
+					m.logger.Printf("adaptermux: stale STARTED triggered transport reconnect for arbitration resync (blocking path)")
+				}
+			}
+		}
+		return false
+	}
+
+	pending := m.pendingStart
+	if pending == nil {
+		stepAction := adapterStepNone
+		if m.retiredSelection {
+			m.fenceArbitrationUntilSYNLocked()
+			if started {
+				m.undeliverableStarted.Add(1)
+			}
+		} else if started {
+			stepAction = m.stepBadCycleLocked()
+		}
+		m.stateMu.Unlock()
+		m.logger.Printf("adaptermux: stale arbitration response (no pending START)")
+		m.applyStepAction(stepAction)
+		return false
+	}
+
+	if started {
+		// Validate the STARTED response belongs to our pending request.
+		// A stale STARTED from a cancelled request can arrive after a new
+		// request is pending — do not grant ownership in that case.
+		if data != pending.initiator {
+			// AM56 fix: mismatch means a stale STARTED from a previous
+			// session/request. Leaving pendingStart set permanently would
+			// deadlock all future START requests. Fail the pending session
+			// cleanly so it can retry.
+			// The adapter sent this STARTED for a previous RequestStart that
+			// is no longer tracked. The real response for our pending request
+			// may still arrive — absorb it when it does.
+			//
+			// F-17 follow-up (PR #626 review round-2, angry-tester finding
+			// F-NEW-1): like the matched-STARTED and FAILED branches below,
+			// the AM56 mismatch branch must also honor an in-flight
+			// `pending.req.cancelled` flag. If the session has issued a
+			// same-session re-submit (markInFlightCancelled flipped the
+			// struct flag) and the adapter responds with a STALE STARTED
+			// whose byte happens not to match the cancelled bid, the
+			// session has already moved on. Delivering
+			// `ENHResFailed(winner_byte)` to the old wait goroutine
+			// reproduces F-17's retry feedback loop on a narrow but real
+			// path. Suppress silently with cancelled=true.
+			cancelledInFlight := pending.req != nil && pending.req.cancelled.Load()
+			m.pendingStart = nil
+			m.fenceArbitrationUntilSYNLocked()
+			m.armPendingStartAbsorbLocked("started-mismatch")
+			if pending.deadline != nil {
+				pending.deadline.Stop() // AM8: cancel deadline timer
+			}
+			m.lastWireActivity = time.Now()
+			stepAction := adapterStepNone
+			if !cancelledInFlight {
+				stepAction = m.stepBadCycleLocked()
+			}
+			m.stateMu.Unlock()
+			defer m.applyStepAction(stepAction)
+			if cancelledInFlight {
+				m.logger.Printf("adaptermux: suppressing STARTED-mismatch(0x%02X, pending 0x%02X) for session %d — request was cancelled/replaced; absorbed", data, pending.initiator, pending.sessionID)
+				select {
+				case pending.notify <- startResult{
+					granted:   false,
+					cancelled: true,
+					initiator: pending.initiator,
+					err:       errors.New("adaptermux: STARTED-mismatch superseded by client re-submit"),
+				}:
+				default:
+				}
+			} else {
+				m.logger.Printf("adaptermux: STARTED mismatch: got initiator 0x%02X, pending 0x%02X — failing pending session %d", data, pending.initiator, pending.sessionID)
+				// Notify the bidder with the THIRD-PARTY winner byte (`data`),
+				// not the bidder's own `pending.initiator`. This matches the
+				// regular FAILED-path semantics below: the bidder's handleStart
+				// goroutine forwards `result.initiator` to deliverFailed, so the
+				// external session sees ENHResFailed(winner_byte) and learns
+				// the actual wire owner. Without this, the bidder would only
+				// learn its own bid byte from the failure and its bus
+				// reconstructor would misread the next target/PB byte as the
+				// frame source (Codex P2 round 7 on PR #620).
+				pending.notify <- startResult{
+					granted:   false,
+					initiator: data,
+					err:       fmt.Errorf("adaptermux: STARTED mismatch (got 0x%02X, want 0x%02X)", data, pending.initiator),
+				}
+			}
+			// After resolving, check if more requests are pending.
+			return !cancelledInFlight
+		}
+		// Proxy-bug C4 / R4: if the session has re-submitted a START
+		// for this session while THIS grant was in flight at the
+		// adapter, the original startRequest's cancelled flag has
+		// been set by arb.requestStart's replace path. The session
+		// has already drained its old notify channel (granted=false
+		// on the replace) and is now waiting on a fresh notify.
+		// Handing it ENHResStarted for the abandoned grant would
+		// leave the mux thinking the bus is owned by a session that
+		// has moved on; instead, convert the STARTED into a FAILED
+		// (no-grant) so the bus is released cleanly and the next
+		// tryGrantAndStart re-picks the session's current request.
+		if pending.req != nil && pending.req.cancelled.Load() {
+			// REVERTED in 0.6.6 (operator hand-off after the v0.6.5
+			// regression): previously this branch closed the upstream
+			// TCP to the adapter to "resync" after a cancelled bid's
+			// STARTED arrived. Live capture proved that reconnect
+			// produced a continuous 5-second cycle of "device invalid"
+			// / "signal lost" on ebusd's side and tore down the
+			// upstream every time any session replaced an in-flight
+			// START. The adapter does NOT need TCP resync on a
+			// cancelled-bid STARTED — the eBUS protocol is per-SYN
+			// stateless from the adapter's perspective; the next SYN
+			// boundary resets arbitration. The minimum-correct
+			// behaviour is to absorb the STARTED, never deliver it
+			// to the originating session, and leave the upstream and
+			// every other session alone.
+			//
+			// This is essentially the original spec for C4/R4:
+			// "convert STARTED to FAILED for cancelled requests"
+			// without any cross-cutting transport action.
+			m.pendingStart = nil
+			if pending.deadline != nil {
+				pending.deadline.Stop() // AM8: cancel deadline timer
+			}
+			m.fenceArbitrationUntilSYNLocked()
+			m.undeliverableStarted.Add(1)
+			m.stateMu.Unlock()
+			m.logger.Printf("adaptermux: suppressing STARTED for session %d — request was cancelled/replaced; absorbed", pending.sessionID)
+			// F-17 follow-up (PR #626 review round-1, angry-tester
+			// finding F-1): the old notify channel MUST receive
+			// `cancelled: true` so session.go's handleStart goroutine
+			// (session.go:524) takes the silent-return branch instead
+			// of falling through to deliverFailed(initiator). Without
+			// this flag, the old goroutine still emits
+			// ENHResFailed(0x31) on the wire — the exact failure mode
+			// F-17 was filed to fix, just on the in-flight-cancel
+			// branch instead of the pendingExternal-replace branch.
+			//
+			// Symmetry: `arb.requestStart`'s pendingExternal-replace
+			// and pendingGateway-replace paths set both the struct
+			// flag AND the channel-value flag. `arb.cancelStart` sets
+			// both as well. `markInFlightCancelled` (called from
+			// `requestStartForSession`) sets only the struct flag
+			// because the channel-value send was deferred to whichever
+			// `handleArbitrationResponse` path eventually fires —
+			// THIS branch (matched STARTED for cancelled bid), the
+			// FAILED-with-cancelled-req branch below, AND the AM56
+			// STARTED-mismatch-with-cancelled-req branch above.
+			//
+			// The contract is: any code in `handleArbitrationResponse`
+			// that observes a cancelled startRequest while resolving
+			// the bid normally (no transport-level error) MUST set
+			// `cancelled: true` on the value so `session.handleStart`'s
+			// branch order (`granted → cancelled → err(reset) →
+			// deliverFailed`) silent-returns.
+			//
+			// EXCEPTION: code paths that deliver a transport-level
+			// boundary error via `err` matching `isResetOrDisconnectError`
+			// (e.g., `failAllPending` on shutdown / `reconnect`) MUST
+			// NOT set `cancelled: true`. Session.go's check order
+			// favors `cancelled` over `err(reset)`, so setting both
+			// would suppress the RESETTED delivery the client needs.
+			//
+			// Best-effort send: the old notify channel is buffered to
+			// 1 and may already hold the replace's granted=false
+			// result. A late STARTED for a cancelled bid still
+			// resolves the channel cleanly when the read-side hasn't
+			// drained it yet.
+			select {
+			case pending.notify <- startResult{
+				granted:   false,
+				cancelled: true,
+				initiator: pending.initiator,
+				err:       errors.New("adaptermux: START superseded by client re-submit"),
+			}:
+			default:
+			}
+			return false
+		}
+		pending.responseReceived = true
+		if pending.deadline != nil {
+			pending.deadline.Stop()
+		}
+		m.stateMu.Unlock()
+		m.completeArbitrationGrant(pending)
+	} else {
+		// F-17 follow-up (PR #626 review round-1, angry-tester finding
+		// F-1, FAILED-half): if the in-flight request was cancelled by
+		// markInFlightCancelled (called from requestStartForSession on
+		// a same-session re-submit), the FAILED arriving for the OLD
+		// bid is also addressed to a session that has already moved
+		// on. Without `cancelled: true` on the notify, session.go's
+		// handleStart goroutine takes the deliverFailed branch and
+		// emits ENHResFailed(winner) on the wire — same
+		// retry-feedback-loop class as F-17's STARTED-half. Suppress
+		// silently with the cancelled flag; the new request waits on
+		// its own fresh notify channel and the queue advances below.
+		cancelledInFlight := pending.req != nil && pending.req.cancelled.Load()
+		m.pendingStart = nil
+		m.fenceArbitrationUntilSYNLocked()
+		if pending.deadline != nil {
+			pending.deadline.Stop() // AM8: cancel deadline timer
+		}
+		m.stateMu.Unlock()
+		if cancelledInFlight {
+			m.logger.Printf("adaptermux: suppressing FAILED(0x%02X) for session %d — request was cancelled/replaced; absorbed", data, pending.sessionID)
+			// Best-effort send (cap-1 channel may already hold the
+			// replace's granted=false result).
+			select {
+			case pending.notify <- startResult{
+				granted:   false,
+				cancelled: true,
+				initiator: pending.initiator,
+				err:       errors.New("adaptermux: START superseded by client re-submit (FAILED arrived)"),
+			}:
+			default:
+			}
+		} else {
+			pending.notify <- startResult{
+				granted:   false,
+				initiator: data,
+				err:       fmt.Errorf("adaptermux: arbitration lost to 0x%02X: %w", data, ebuserrors.ErrBusCollision),
+			}
+		}
+		return !cancelledInFlight
+	}
+
+	// After resolving, check if more requests are pending.
+	return false
+}
+
+// cancelPendingStart cancels an in-flight pending START if it belongs
+// to the given session. Called by handleStart on SYN cancel (P1 fix:
+// START cancel must also clear pending adapter-level START).
+func (m *Mux) cancelPendingStart(sessionID uint64) {
+	m.stateMu.Lock()
+	if m.pendingStart != nil && m.pendingStart.sessionID == sessionID {
+		pending := m.pendingStart
+		m.pendingStart = nil
+		m.fenceArbitrationUntilSYNLocked()
+		if pending.deadline != nil {
+			pending.deadline.Stop() // AM8: cancel deadline timer
+		}
+		// Expect a stale response only if the adapter has not responded yet.
+		// STARTED may already have been consumed before ownership commits;
+		// in that case the next SYN is the only remaining regrant barrier.
+		if !pending.responseReceived {
+			m.armPendingStartAbsorbLocked("cancel")
+		}
+		// Codex PR #502 P1 (v2 — mirror C2 reconnect pattern): if the
+		// cancelled pending was on the blocking StartArbitration path,
+		// the goroutine may still be hung in the transport call.
+		// Previously we cleared blockingArbActive + called
+		// tryGrantAndStart in-line — but that lets a second blocking
+		// goroutine overlap the first on the same transport AND the
+		// hung goroutine may still have been granted START by the
+		// adapter, so mux/arbitrator state can diverge. Instead,
+		// trigger a transport reconnect: closing m.conn forces the
+		// hung read/write call to return with an I/O error; readLoop
+		// observes the error and invokes reconnect() which bumps
+		// blockingArbGen, clears blockingArbActive, and fails/re-queues
+		// arbitration safely under stateMu. The hung goroutine's late
+		// return finds a stale gen and skips state mutation. Do NOT
+		// admit another bid before the next SYN after reconnect.
+		wasBlocking := pending.blockingArb && !pending.responseReceived
+		m.stateMu.Unlock()
+		// AM8: guard the send — if another path already delivered a
+		// result for this notify channel, skip to avoid blocking.
+		select {
+		case pending.notify <- startResult{granted: false, initiator: pending.initiator, cancelled: true}:
+		default:
+			m.logger.Printf("adaptermux: cancelPendingStart: notify channel full for session %d, result already delivered", sessionID)
+		}
+		if wasBlocking {
+			// Close the current conn to force the hung blocking
+			// StartArbitration call to return with an I/O error.
+			// readLoop's error handler invokes reconnect() which
+			// advances blockingArbGen and clears blockingArbActive
+			// atomically under stateMu. No in-line queue advance —
+			// reconnect drives that safely.
+			m.connMu.Lock()
+			c := m.conn
+			m.connMu.Unlock()
+			if c != nil {
+				if err := c.Close(); err != nil {
+					m.logger.Printf("adaptermux: cancelPendingStart-triggered conn close: %v", err)
+				} else {
+					m.logger.Printf("adaptermux: cancelPendingStart triggered transport reconnect to unstick hung StartArbitration (session %d)", sessionID)
+				}
+			}
+		}
+		return
+	}
+	m.stateMu.Unlock()
+}
+
+// armPendingStartAbsorbLocked records that the mux expects one stale
+// STARTED/FAILED from a cancelled adapter-level START. The hard absorb barrier
+// prevents stale responses from being misapplied to newer requests, but it
+// needs a fail-safe because some adapters may never emit the stale response.
+//
+// F-22 (batch-19, 2026-05-13): on timeout, RESET the absorb counter
+// only. The prior behavior also closed the upstream ENH transport on
+// every timeout, which severed external sessions (ebusd) and produced
+// a cascade of RequestStart failures for no transport-level reason
+// (batch-19 measured 13 reconnects / 90 min producing 263 cascade
+// failures). The wire-level stale response we expected to absorb was
+// lost (likely dropped by upstream soft parser errors). The transport
+// itself is fine. Mirrors F-15's reasoning that internal state-machine
+// timeouts don't justify a transport reset.
+//
+// F-NEW-25 (2026-05-21): replace the prior per-arm AfterFunc +
+// pendingAbsorbGen generation-invalidation pattern with a single
+// persistent *time.Timer + Reset() (debounce). The old pattern's
+// failure mode: when arm-rate exceeded 1/(StartDeadline), each new
+// arm bumped pendingAbsorbGen, invalidating every previously-
+// scheduled AfterFunc's gen check at fire time. The reset never
+// executed and pendingStartAbsorb stayed at 1 permanently, producing
+// a "tryGrantAndStart skipped — waiting to absorb 1" hot loop
+// that stalled active polling for 6+ hours (2026-05-20 12:25 UTC
+// production incident). New semantics: each arm Reset()s the same
+// timer; the callback fires exactly StartDeadline after the LAST arm,
+// not the first.
+//
+// Caller must hold stateMu.
+func (m *Mux) armPendingStartAbsorbLocked(reason string) {
+	m.pendingStartAbsorb++
+	m.pendingAbsorbLastReason = reason
+	deadline := m.cfg.StartDeadline
+	if deadline <= 0 {
+		deadline = 2 * time.Second
+	}
+	// Set the canonical due-at BEFORE arming the timer. A stale
+	// callback that's already mid-execution but pre-stateMu-acquire
+	// will read THIS due-at after we release stateMu and see that
+	// it's in the future — no-op'ing and letting the freshly-armed
+	// timer's own callback do the eventual reset.
+	m.pendingAbsorbResetDueAt = time.Now().Add(deadline)
+	if m.pendingAbsorbResetTimer == nil {
+		// First arm — allocate the persistent timer. Subsequent
+		// arms will Reset() it, debouncing the deadline. The
+		// callback closes over `m` only (NOT over a captured
+		// generation counter or reason string); it reads
+		// pendingAbsorbLastReason and pendingAbsorbResetDueAt at
+		// fire time so the diagnostic log reflects whatever caused
+		// the most recent arm and the stale-callback guard sees
+		// the latest deadline.
+		m.pendingAbsorbResetTimer = time.AfterFunc(deadline, m.fireAbsorbReset)
+		return
+	}
+	// Already-armed timer — extend the deadline. time.Timer.Reset on
+	// an AfterFunc timer is documented as safe to call at any time;
+	// if the timer has already fired, Reset re-arms it. If it has
+	// NOT fired yet, Reset replaces the pending deadline. Either way
+	// the next fire happens `deadline` from now, not from the
+	// original arm. The fireAbsorbReset due-at check handles the
+	// case where the timer fired between this caller incrementing
+	// the counter and Reset() restarting it.
+	m.pendingAbsorbResetTimer.Reset(deadline)
+}
+
+// fireAbsorbReset is the debounce timer callback. It runs in a fresh
+// goroutine (time.AfterFunc semantics). Acquires stateMu, drains the
+// absorb counter if still positive AND the canonical due-at has
+// elapsed, and kicks tryGrantAndStart if the queue has pending work
+// and no active START is in flight.
+//
+// Stale-callback guard (Codex round-1 MUST FIX on PR #656): a fresh
+// arm may have called Reset() on the timer after this callback was
+// already scheduled by an expired-timer fire. The Go runtime does
+// not cancel the in-flight callback when Reset is called. Without
+// the due-at guard, the stale callback would clear a counter that
+// the fresh arm just incremented — breaking the stale-response
+// barrier exactly when it matters. The due-at compare under
+// stateMu makes the callback no-op when a fresh arm bumped the
+// deadline; the Reset()'d timer's own callback will do the real
+// reset at the right time.
+//
+// Idempotent under spurious fire: when pendingStartAbsorb is already
+// 0 (legitimate stale-response arrival drained the counter before
+// the debounce window closed), the callback is a no-op. No transport
+// reconnect side effect — the F-22 rationale stands.
+func (m *Mux) fireAbsorbReset() {
+	m.stateMu.Lock()
+	if m.pendingStartAbsorb == 0 {
+		// Legitimate decrement(s) drained the counter while the
+		// debounce timer was pending. Nothing to reset. Leaving
+		// the timer field non-nil is fine — next arm will call
+		// Reset() on it without re-allocating.
+		m.stateMu.Unlock()
+		return
+	}
+	if !m.pendingAbsorbResetDueAt.IsZero() && time.Now().Before(m.pendingAbsorbResetDueAt) {
+		// A fresher arm bumped the deadline into the future after
+		// this callback was already scheduled (the AfterFunc fired
+		// before the new arm's Reset() could pre-empt it, or the
+		// Go runtime queued multiple fires through Reset()
+		// transitions). The fresh arm's Reset() will fire its own
+		// callback at the right time; this stale callback must
+		// not clear the counter.
+		m.stateMu.Unlock()
+		return
+	}
+	count := m.pendingStartAbsorb
+	reason := m.pendingAbsorbLastReason
+	suppressed := m.absorbSkipLogSuppressedSince
+	if suppressed > 0 {
+		m.logger.Printf("adaptermux: absorb timeout reset reason=%s (was waiting for %d stale arbitration response(s)) (debounced) (%d suppressed)", reason, count, suppressed)
+	} else {
+		m.logger.Printf("adaptermux: absorb timeout reset reason=%s (was waiting for %d stale arbitration response(s)) (debounced)", reason, count)
+	}
+	m.absorbResetTotal.Add(1)
+	m.pendingStartAbsorb = 0
+	m.clearAbsorbSkipLogStateLocked()
+	// Clear the due-at so subsequent stale callbacks (extremely
+	// unlikely but possible if the runtime queued multiple fires)
+	// see the IsZero short-circuit and don't re-log.
+	m.pendingAbsorbResetDueAt = time.Time{}
+	stepAction := adapterStepNone
+	if reason == "deadline" || reason == "started-mismatch" {
+		stepAction = m.stepBadCycleLocked()
+	}
+
+	m.stateMu.Unlock()
+	m.applyStepAction(stepAction)
+
+	// F-22: NO transport-reconnect side effect.
+}
+
+// clearAbsorbSkipLogStateLocked resets the rate-limit fields associated with
+// the absorb-skip log so the next absorb cycle starts with a fresh suppressed
+// counter and emit timestamp. Caller must hold stateMu.
+//
+// Why this exists: pendingStartAbsorb can return to zero via several paths
+// (fireAbsorbReset deadline, normal stale-response consumption via
+// handleArbitrationResponse + the cancelled-start decrement branches in
+// sendLoop). Without this reset, a stale (N suppressed) suffix from a
+// previous absorb episode could leak into the first eligible skip-log of
+// the next episode, misrepresenting the rate (Codex review on PR #660).
+func (m *Mux) clearAbsorbSkipLogStateLocked() {
+	m.absorbSkipLogSuppressedSince = 0
+	m.absorbSkipLogLastEmit = time.Time{}
+}
+
+// sendLoop processes send requests from the active path and external sessions.
+func (m *Mux) sendLoop() {
+	defer m.wg.Done()
+
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case req := <-m.activeSendCh:
+			if req.sessionID == gatewaySessionID {
+				// Arm after sendLoop accepts the request but before doSend
+				// writes to the adapter. That closes the immediate-echo
+				// race without arming transactions that never entered the
+				// mux write path.
+				//
+				// P11 round-3 (Codex pass-2 P1): record the echo expectation
+				// in the SAME critical section as gatewayTxnActive flip +
+				// recordWritePrefix. Pre-round-3 recordSent ran in doSend
+				// AFTER stateMu was released, leaving a state-ordering race
+				// where gatewayTxnActive=true && gatewayEcho empty: stale
+				// bytes leaked through as response-phase. Hoisting the call
+				// closes the gap.
+				//
+				// P12 (echo_mismatch deep-dive 2026-05-10): drain activeCh
+				// of any stale bytes BEFORE arming the next write. The
+				// inter-byte queue-empty window (between matchEcho
+				// consuming byte K's echo and sendLoop recording byte K+1)
+				// briefly opens response-phase delivery in
+				// activePathExpectsByte. Stale bytes that landed in that
+				// window must be discarded before we arm gatewayTxnActive
+				// on the next write — otherwise bus.Send.sendRawWithEcho
+				// would read them in echo position and fire
+				// echo_mismatch (post_grant_ack on stale 0x00,
+				// pre_echo_syn on stale 0xAA). Both subclasses share this
+				// root cause; agent deep-dive 2026-05-10 confirmed.
+				//
+				// stateMu is held throughout drain+arm+recordSent so
+				// onReceived (which also acquires stateMu) cannot
+				// interleave a new stale byte between drain and arm.
+				//
+				// CONTRACT (Codex P12 pass-1 P1): drainActiveChBytesOnly
+				// preserves lifecycle (activeEventError) events for
+				// bus.Send abort path. Drain is byte-only.
+				//
+				// CONTRACT (Codex P12 pass-1 P2): bus.sendRawWithEcho calls
+				// activeTransport.Write with single-byte slices and reads
+				// each echo before issuing the next write — so by the
+				// time sendLoop receives a new request, the prior echo
+				// has already been consumed by bus.Send.ReadByte and is
+				// no longer in activeCh. Multi-byte gateway writes would
+				// risk draining a legitimate prior echo; the API
+				// supports them but no production caller uses them.
+				// Tests that use multi-byte Write sequence echoes after
+				// Write returns, so the drain is still safe in practice.
+				m.stateMu.Lock()
+				drained := m.drainActiveChBytesOnly()
+				if drained > 0 {
+					m.activeTxn.interWriteDrainTotal.Add(uint64(drained))
+				}
+				if !m.gatewayTxnActive {
+					m.gatewayTxnActive = true
+				}
+				m.recordWritePrefix(req.data)
+				// Phase 3 Step B3.6d (Codex round-1 MAJOR on PR
+				// #646): gate the time-tracking record path on
+				// m.v8 != nil. In ModeOff (m.v8 == nil) we call
+				// the legacy recordSent which appends only to
+				// expectedEchoes — NO time.Now() call, NO
+				// time.Time slot allocation per byte. When v8 is
+				// on we capture time.Now() so the matching site
+				// can compute RTT for the L_rtt EMA.
+				//
+				// Phase 3 Step B3.6e: when v8 is on, ALSO arm the
+				// echo-watchdog using the (soft, hard, hardEnabled)
+				// tuple from the gateway pacer's EchoDeadlines.
+				// BeforeActiveWrite (B3.6c) was already called
+				// earlier at the doSend pre-write hook; the
+				// watchdog is armed here using the post-grace
+				// L_rtt state. If the echo arrives in time, the
+				// match site cancels the watchdog. If the soft
+				// (and conditionally hard) deadline expires
+				// first, the pacer emits an admin event into the
+				// classifier's adminEvents ring buffer.
+				if m.v8 != nil {
+					writeAt := time.Now()
+					// F-NEW-28 (2026-05-21): propagate the
+					// structural-write provenance flag from
+					// sendRequest (toggled by bus.go's
+					// SignalNextWriteIsStructuralSyn → activeTransport.Write)
+					// into echoTracker.expectedStructural. The
+					// mux's SYN-suppression predicate at
+					// `mux.go:2487` (midWriteSyn) consults this
+					// flag to distinguish a pending
+					// structural-terminator expected echo from a
+					// pending payload-0xAA expected echo, closing
+					// the round-9 enforce-mode leak.
+					m.gatewayEcho.recordSentWithTimeStructural(req.data, writeAt, req.structural)
+					// Codex round-1 MAJOR #1 on PR #647:
+					// BeforeActiveWrite MUST run before
+					// ArmEchoWatchdog so a long-idle gateway
+					// write enters grace-bootstrap (graceRemaining
+					// set non-zero) before the watchdog computes
+					// deadlines from EchoDeadlines. Without this
+					// hoist, the arm at the sendLoop site used
+					// pre-grace L_rtt state — the first
+					// post-idle echo was waited on with normal
+					// (tight) deadlines instead of grace (loose),
+					// defeating the B3.5 grace-bootstrap fix.
+					//
+					// BeforeActiveWrite is idempotent if called
+					// twice before any RecordEcho (per its
+					// docstring), so doSend's existing
+					// BeforeActiveWrite call below remains
+					// harmless for non-gateway sessions and is a
+					// no-op for the gateway pacer at the second
+					// invocation.
+					if pacer := m.SessionPacer(gatewaySessionID); pacer != nil {
+						pacer.BeforeActiveWrite(writeAt)
+						pacer.ArmEchoWatchdog(writeAt)
+					}
+				} else {
+					// F-NEW-28: same provenance plumbing on the
+					// v8-off path. expectedStructural is always
+					// length-locked to expectedEchoes regardless of
+					// v8 mode (the SYN-suppression predicate uses
+					// it on every wire SYN).
+					m.gatewayEcho.recordSentStructural(req.data, req.structural)
+				}
+				m.stateMu.Unlock()
+			}
+			err := m.doSendNormalized(req.sessionID, req.data, req.structural)
+			req.result <- err
+		}
+	}
+}
+
+// doSend writes a byte to the adapter for the given session.
+//
+// P11 round-5 (Codex P2 finding on PR #606): every error path —
+// errNotBusOwner / errNotConnected / tr.Write failure — must roll
+// back gateway echo state (the byte never reached the wire) AND
+// clear gatewayTxnActive in the SAME stateMu critical section. The
+// pre-write returns previously skipped both, leaving phantom echo
+// expectations and a stuck gatewayTxnActive=true state until the
+// next SYN/grant reset. The deferred rollback below handles all
+// failure exits uniformly.
+func (m *Mux) doSend(sessionID uint64, data byte) error {
+	return m.doSendNormalized(sessionID, data, false)
+}
+
+// doSendNormalized writes one requested byte to the adapter, applying the
+// write normalization of its source (issue #1003, see raw_symbols.go):
+// external sessions send raw symbols unchanged; a gateway logical byte is
+// encoded into its raw SEND symbols when the active path advertises logical
+// writes, and every resulting symbol is verified. structural is the
+// gateway's explicit end-of-message SYN mark.
+func (m *Mux) doSendNormalized(sessionID uint64, data byte, structural bool) error {
+	isGateway := sessionID == gatewaySessionID
+	sendOK := false
+	defer func() {
+		if !isGateway || sendOK {
+			return
+		}
+		m.stateMu.Lock()
+		m.gatewayEcho.rollbackSent()
+		// Issue #1401: a failed gateway write also releases the grant
+		// now rather than at the next idle SYN or MaxOwnershipDuration.
+		m.releaseGatewayAfterFailureLocked(ReasonActiveWriteError)
+		m.stateMu.Unlock()
+		// Codex round-1 MUST FIX #2 on PR #647: write-error
+		// rollback must ALSO cancel the watchdog the sendLoop
+		// armed before doSend. Without this, the soft / hard
+		// timer would fire later and emit a stale admin event
+		// for a byte that never reached the adapter. The pacer
+		// comment lists write-fail as a documented cancellation
+		// boundary; this call closes that path.
+		//
+		// Outside stateMu — CancelEchoWatchdog uses the pacer's
+		// own mutex; nested-lock free.
+		if pacer := m.SessionPacer(gatewaySessionID); pacer != nil {
+			pacer.CancelEchoWatchdog()
+		}
+	}()
+	managedGateHeld, admitted := m.beginManagedConnectionUse()
+	if !admitted {
+		return errNotConnected
+	}
+	defer m.endManagedConnectionUse(managedGateHeld)
+
+	if !m.arb.isOwner(sessionID) {
+		return errNotBusOwner
+	}
+
+	m.connMu.Lock()
+	tr := m.upstream
+	m.connMu.Unlock()
+
+	if tr == nil {
+		return errNotConnected
+	}
+
+	// Record echo expectation.
+	//
+	// P11 round-3: gateway session's recordSent is hoisted into sendLoop
+	// (same critical section as gatewayTxnActive flip) to close the
+	// state-ordering race where gatewayTxnActive=true but gatewayEcho
+	// queue is still empty.
+	//
+	// F-18:
+	// the external-session recordSent + rollback block that used to live
+	// here is removed. Per the ENH protocol spec, external sessions must
+	// receive their own echoes (handled by deliverToSessions above), and
+	// they no longer need a per-session expected-echoes queue. Keeping
+	// recordSent without the matching matchEcho consumer would let the
+	// per-session queue grow to the 256-byte cap and trigger spurious
+	// totalOverflowResets alarms every 256 external SENDs.
+	// Phase 3 Step B3.6c: pacer wiring at the adapter-write
+	// choke point. Per v8 §1.4: BeforeActiveWrite fires before
+	// tr.Write so a long-idle write enters grace-bootstrap
+	// BEFORE the first post-idle echo is awaited. Skipped when
+	// V8ClassifierMode == Off (SessionPacer returns nil).
+	//
+	// Codex round-1 MAJOR #1 on PR #647: for GATEWAY sessions the
+	// sendLoop now invokes BeforeActiveWrite BEFORE ArmEchoWatchdog
+	// (so the watchdog sees post-grace L_rtt). To preserve the
+	// canonical "exactly one BeforeActiveWrite per active write"
+	// semantics (asserted by TestSessionPacer_DoSend_GatewayInvokesBeforeActiveWrite),
+	// gateway sessions skip the doSend call. External sessions
+	// (sessionID > 0) still take the doSend path — they don't go
+	// through sendLoop's gateway-only critical section, so this is
+	// their canonical site.
+	//
+	// Pacer integration plan (B3.6c..B3.6f):
+	//   B3.6c: BeforeActiveWrite at the active-write pre-Write
+	//          hot path (sendLoop for gateway; doSend for external).
+	//   B3.6d: RecordEcho wiring at the echo-arrival site
+	//          so the L_rtt EMA actually moves.
+	//   B3.6e: Echo watchdog timer enforcing soft/hard
+	//          deadlines + admin events (gateway only).
+	//   B3.6f: Output pacer at session.writeLoop.
+	if !isGateway {
+		if pacer := m.SessionPacer(sessionID); pacer != nil {
+			pacer.BeforeActiveWrite(time.Now())
+		}
+	}
+	symbols := []byte{data}
+	if isGateway && m.activePathIsLogical() {
+		symbols = gatewaySendSymbols(data, structural)
+	}
+	if err := m.writeSymbols(tr, symbols); err != nil {
+		var leadErr errGatewayLeadEcho
+		if errors.As(err, &leadErr) {
+			// Escape-lead verification failed: return the bus-level
+			// class (collision, timeout, reset) to protocol.Bus as is.
+			if errors.Is(leadErr.err, ebuserrors.ErrBusCollision) {
+				// protocol.Bus now waits for two SYN symbols before it
+				// retries, so the transaction must stay live to deliver
+				// them: hand it to the bounded collision recovery
+				// lifecycle instead of rolling it back.
+				sendOK = true
+				m.enterWriteCollisionRecovery()
+			}
+			return leadErr.err
+		}
+		return fmt.Errorf("%w: %v", errAdapterWrite, err)
+	}
+
+	sendOK = true
+	return nil
+}
+
+// latencyHistogramReportLoop periodically emits a single-line summary
+// of the F-10 per-session-frame pipeline latency histogram to the
+// logger. The bucket counters themselves remain authoritative on
+// /debug/vars; this loop exists so the same data is visible in
+// `ha addons logs` for ad-hoc operator inspection — the batch-3
+// EBUSD-VERIFICATION audit flagged that grepping the addon log for
+// histogram data returned nothing despite the data being live in
+// memory.
+//
+// Cadence is governed by Config.LatencyHistogramReportInterval
+// (default 60s). The loop exits when m.ctx is cancelled.
+//
+// The cumulative semantics of the histogram are preserved in the log
+// surface: each `le_*` figure is the count of frames at or under the
+// labelled upper bound; `gt_100000` is the non-cumulative overflow.
+// Operators can therefore compute "frames over the 25 ms ebusd
+// budget" as `(le_100000 + gt_100000) - le_25000` without leaving
+// the addon log.
+func (m *Mux) latencyHistogramReportLoop() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(m.cfg.LatencyHistogramReportInterval)
+	defer ticker.Stop()
+	bucketNames := []string{"le_1000", "le_5000", "le_25000", "le_100000", "gt_100000"}
+	readBucket := func(name string) int64 {
+		if v := adaptermuxSessionFrameLatencyBucketTotal.Get(name); v != nil {
+			if ev, ok := v.(*expvar.Int); ok {
+				return ev.Value()
+			}
+		}
+		return 0
+	}
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			vals := make([]string, 0, len(bucketNames))
+			for _, name := range bucketNames {
+				vals = append(vals, fmt.Sprintf("%s=%d", name, readBucket(name)))
+			}
+			m.logger.Printf("adaptermux: session frame latency histogram (cumulative le_*, overflow gt_*): %s",
+				strings.Join(vals, " "))
+		}
+	}
+}
+
+// emitPassive delivers a passive event to the callback.
+// Must be called WITHOUT stateMu held to avoid re-entrancy deadlock.
+func (m *Mux) emitPassive(event PassiveEvent) {
+	m.passiveMu.Lock()
+	fn := m.passiveCallback
+	m.passiveMu.Unlock()
+	if fn != nil {
+		fn(event)
+	}
+}
+
+// nextSessionID generates a unique session ID for external sessions.
+func (m *Mux) nextSessionID() uint64 {
+	return m.sessionSeq.Add(1)
+}
+
+// deliverToSessions delivers a non-SYN byte to every external session,
+// including the owner. This is the F-18 fix:
+// external ENH sessions MUST receive their own post-arbitration echoes
+// per john30/ebusd's enhanced_proto.md ("ENH_RES_RECEIVED ... shall not
+// be sent when the byte received was part of an arbitration request
+// initiated by ebusd"). Arbitration-byte echoes are handled separately
+// by deliverWinnerByteToOtherSessions below, which correctly skips the
+// winning session — that path delivers the 0x31 byte to OTHER sessions,
+// while the winner gets ENHResStarted via session.handleStart.
+//
+// Gateway echo accounting is performed via m.gatewayEcho on the
+// activeSendCh/sendLoop path; the gateway's sessionID (gatewaySessionID
+// = 0) is provably never inserted into m.sessions (nextSessionID starts
+// at 1), so this loop only ever operates on external sessions.
+//
+// Pre-F-18 this method per-session-suppressed each owner byte via
+// sess.echoTracker.matchEcho — that suppression matched the standalone
+// proxy's behavior for non-ENH clients but broke ENH external clients
+// (ebusd's DirectProtocolHandler at protocol_direct.cpp:412-414 requires
+// the echo to advance bs_sendCmd through multi-byte frames). It also
+// hosted a latent reorder hazard via the echoMatchFlushed branch
+// (Codex bonus finding in batch-13), which is eliminated by the
+// deletion.
+//
+// AM40 lock note: sessionsMu is held purely to iterate m.sessions
+// safely. No tracker mutation happens here anymore.
+func (m *Mux) deliverToSessions(symbol byte, currentOwner uint64, hasOwner bool, now time.Time) {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
+
+	for _, sess := range m.sessions {
+		sess.deliverReceived(symbol)
+	}
+}
+
+// resetLocalLoserSources inserts a synthetic session reconstruction boundary
+// when the locally selected source from FAILED did not win on the wire. An
+// intervening observed SYN already clears localLosers. This boundary
+// belongs only to affected ENH sessions, never to raw or passive wire evidence.
+func (m *Mux) resetLocalLoserSources(losers []*startRequest) {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
+	for _, loser := range losers {
+		if sess := m.sessions[loser.sessionID]; sess != nil {
+			sess.deliverReceived(protocol.SymbolSyn)
+		}
+	}
+}
+
+// undoLocalLosses retracts the source advertised by local FAILED when its START
+// never reached the adapter. A SYN or RESETTED seen since publication already
+// cleared localLosers and gave these sessions their boundary, and a later
+// selection owns any list it installed, so only the same list is reset here.
+func (m *Mux) undoLocalLosses(losers []*startRequest) {
+	m.stateMu.Lock()
+	current := len(losers) > 0 && len(m.localLosers) > 0 && m.localLosers[0] == losers[0]
+	if current {
+		m.localLosers = nil
+	}
+	m.stateMu.Unlock()
+	if current {
+		m.resetLocalLoserSources(losers)
+	}
+}
+
+// deliverWinnerByteToOtherSessions delivers an arbitration-winner byte
+// as a passive observation to every external session EXCEPT the one
+// identified by exceptSessionID. Used by the readLoop's STARTED/FAILED
+// synthesis paths when an external session won (STARTED) or lost
+// (FAILED): the winning/losing session's handleStart goroutine
+// delivers ENHResStarted/ENHResFailed asynchronously, so adding a
+// synthesized ENHResReceived(winner_byte) to that session would race
+// the control frame. Other external sessions (in multi-monitor
+// deployments) still need the byte to keep their bus state synced
+// with physical wire reality.
+//
+// EBUSD-VERIFICATION-2026-05-10.md F-9/F-10 follow-up; Codex P2
+// round 3 on PR #620.
+func (m *Mux) deliverWinnerByteToOtherSessions(symbol byte, exceptSessionID uint64, losers ...*startRequest) {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
+sessionLoop:
+	for _, sess := range m.sessions {
+		for _, loser := range losers {
+			if loser.sessionID == sess.id {
+				continue sessionLoop
+			}
+		}
+		if sess.id == exceptSessionID {
+			continue
+		}
+		sess.deliverReceived(symbol)
+	}
+}
+
+// deliverSYNToSessions delivers a SYN to all external sessions.
+func (m *Mux) deliverSYNToSessions(now time.Time) {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
+
+	for _, sess := range m.sessions {
+		sess.deliverReceived(protocol.SymbolSyn)
+	}
+}
+
+// broadcastResetToSessions sends a RESETTED event to all external sessions.
+// Carries upstreamFeatures so external clients see consistent feature
+// signaling on reset boundaries (not 0x00).
+//
+// Sessions are collected under sessionsMu, but deliverReset is called
+// after releasing the lock. This is required because deliverReset blocks
+// until space is available in sendCh (non-droppable delivery), and
+// holding sessionsMu during a blocking send would prevent RemoveSession
+// from acquiring the lock to close the session's done channel — deadlock.
+func (m *Mux) broadcastResetToSessions() {
+	features := byte(m.upstreamFeatures.Load())
+
+	m.sessionsMu.Lock()
+	sessions := make([]*session, 0, len(m.sessions))
+	for _, sess := range m.sessions {
+		sessions = append(sessions, sess)
+	}
+	m.sessionsMu.Unlock()
+
+	// AM4/AM17: deliver resets concurrently with a 1-second deadline.
+	// deliverReset blocks until sendCh has space or s.done closes.
+	// The deadline prevents broadcastResetToSessions from stalling
+	// readLoop indefinitely if a session has a full sendCh.
+	// Goroutines that exceed the deadline are NOT leaked — they will
+	// self-terminate when the session eventually closes (s.done) via
+	// writeLoop backpressure or RemoveSession.
+	var wg sync.WaitGroup
+	for _, sess := range sessions {
+		wg.Add(1)
+		go func(s *session) {
+			defer wg.Done()
+			s.deliverReset(features)
+		}(sess)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		m.logger.Printf("adaptermux: broadcastResetToSessions timed out after 1s — %d session(s) still pending", len(sessions))
+	}
+}
+
+// isNetTimeout reports whether err is a net.Error timeout (read deadline
+// exceeded). These are transient idle conditions on a quiet bus, not
+// connection failures.
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// postGrantWindowExpiredCountSafe snapshots m.upstream under connMu
+// (the field's documented guard — see Mux struct comment at the
+// upstream field), type-asserts against the optional
+// PostGrantWindowExpiredReporter interface, and returns the current
+// expiry count alongside a "reporter implemented" flag. The
+// connMu-then-released-before-call sequence mirrors the existing
+// pattern at tryGrantAndStart / RequestStart sites: snapshot the
+// pointer under connMu, then call the lock-free atomic accessor on
+// the snapshot. Avoids holding connMu across the call (which would
+// risk lock-ordering issues with reconnect paths).
+//
+// Callers that already hold stateMu can call this safely — there is
+// no stateMu/connMu nesting in either direction; the helper releases
+// connMu before invoking the (lock-free) atomic accessor on the
+// captured snapshot.
+//
+// batch-22 round-3 Attack 2 instrumentation, 2026-05-17 (Codex
+// pre-push review fix). Forensic-only — no behavior change.
+func (m *Mux) postGrantWindowExpiredCountSafe() (uint64, bool) {
+	m.connMu.Lock()
+	tr := m.upstream
+	m.connMu.Unlock()
+	reporter, ok := tr.(transport.PostGrantWindowExpiredReporter)
+	if !ok {
+		return 0, false
+	}
+	return reporter.PostGrantWindowExpiredCount(), true
+}

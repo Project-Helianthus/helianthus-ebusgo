@@ -1,0 +1,42 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27ParseChildArgvAcceptsOnlyTheExactPlan/empty-build",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "mutation": "empty-build"
+    },
+    "clock": {},
+    "state": {
+      "argc": 13,
+      "args": [
+        "--internal-ebus-local-worker",
+        "build=",
+        "executable=59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+        "abi=1",
+        "worker=3",
+        "stream=5",
+        "registration=7",
+        "token=11",
+        "control=152",
+        "mapping=4096",
+        "gc=off",
+        "memlimit=64MiB",
+        "lease-ms=100"
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "localworkerhost: malformed worker argv: field build"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

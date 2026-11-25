@@ -1,0 +1,2584 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "adaptermux",
+  "source": "internal/adaptermux/raw_symbols.go",
+  "stimulus": "TestRawContinuity_GatewaySendSymbols",
+  "input": {
+    "bytes": "00..ff",
+    "qualifiers": {
+      "structural": "false and true for every data byte"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "data": "00",
+        "structural": false,
+        "symbols": "00"
+      },
+      {
+        "data": "01",
+        "structural": false,
+        "symbols": "01"
+      },
+      {
+        "data": "02",
+        "structural": false,
+        "symbols": "02"
+      },
+      {
+        "data": "03",
+        "structural": false,
+        "symbols": "03"
+      },
+      {
+        "data": "04",
+        "structural": false,
+        "symbols": "04"
+      },
+      {
+        "data": "05",
+        "structural": false,
+        "symbols": "05"
+      },
+      {
+        "data": "06",
+        "structural": false,
+        "symbols": "06"
+      },
+      {
+        "data": "07",
+        "structural": false,
+        "symbols": "07"
+      },
+      {
+        "data": "08",
+        "structural": false,
+        "symbols": "08"
+      },
+      {
+        "data": "09",
+        "structural": false,
+        "symbols": "09"
+      },
+      {
+        "data": "0a",
+        "structural": false,
+        "symbols": "0a"
+      },
+      {
+        "data": "0b",
+        "structural": false,
+        "symbols": "0b"
+      },
+      {
+        "data": "0c",
+        "structural": false,
+        "symbols": "0c"
+      },
+      {
+        "data": "0d",
+        "structural": false,
+        "symbols": "0d"
+      },
+      {
+        "data": "0e",
+        "structural": false,
+        "symbols": "0e"
+      },
+      {
+        "data": "0f",
+        "structural": false,
+        "symbols": "0f"
+      },
+      {
+        "data": "10",
+        "structural": false,
+        "symbols": "10"
+      },
+      {
+        "data": "11",
+        "structural": false,
+        "symbols": "11"
+      },
+      {
+        "data": "12",
+        "structural": false,
+        "symbols": "12"
+      },
+      {
+        "data": "13",
+        "structural": false,
+        "symbols": "13"
+      },
+      {
+        "data": "14",
+        "structural": false,
+        "symbols": "14"
+      },
+      {
+        "data": "15",
+        "structural": false,
+        "symbols": "15"
+      },
+      {
+        "data": "16",
+        "structural": false,
+        "symbols": "16"
+      },
+      {
+        "data": "17",
+        "structural": false,
+        "symbols": "17"
+      },
+      {
+        "data": "18",
+        "structural": false,
+        "symbols": "18"
+      },
+      {
+        "data": "19",
+        "structural": false,
+        "symbols": "19"
+      },
+      {
+        "data": "1a",
+        "structural": false,
+        "symbols": "1a"
+      },
+      {
+        "data": "1b",
+        "structural": false,
+        "symbols": "1b"
+      },
+      {
+        "data": "1c",
+        "structural": false,
+        "symbols": "1c"
+      },
+      {
+        "data": "1d",
+        "structural": false,
+        "symbols": "1d"
+      },
+      {
+        "data": "1e",
+        "structural": false,
+        "symbols": "1e"
+      },
+      {
+        "data": "1f",
+        "structural": false,
+        "symbols": "1f"
+      },
+      {
+        "data": "20",
+        "structural": false,
+        "symbols": "20"
+      },
+      {
+        "data": "21",
+        "structural": false,
+        "symbols": "21"
+      },
+      {
+        "data": "22",
+        "structural": false,
+        "symbols": "22"
+      },
+      {
+        "data": "23",
+        "structural": false,
+        "symbols": "23"
+      },
+      {
+        "data": "24",
+        "structural": false,
+        "symbols": "24"
+      },
+      {
+        "data": "25",
+        "structural": false,
+        "symbols": "25"
+      },
+      {
+        "data": "26",
+        "structural": false,
+        "symbols": "26"
+      },
+      {
+        "data": "27",
+        "structural": false,
+        "symbols": "27"
+      },
+      {
+        "data": "28",
+        "structural": false,
+        "symbols": "28"
+      },
+      {
+        "data": "29",
+        "structural": false,
+        "symbols": "29"
+      },
+      {
+        "data": "2a",
+        "structural": false,
+        "symbols": "2a"
+      },
+      {
+        "data": "2b",
+        "structural": false,
+        "symbols": "2b"
+      },
+      {
+        "data": "2c",
+        "structural": false,
+        "symbols": "2c"
+      },
+      {
+        "data": "2d",
+        "structural": false,
+        "symbols": "2d"
+      },
+      {
+        "data": "2e",
+        "structural": false,
+        "symbols": "2e"
+      },
+      {
+        "data": "2f",
+        "structural": false,
+        "symbols": "2f"
+      },
+      {
+        "data": "30",
+        "structural": false,
+        "symbols": "30"
+      },
+      {
+        "data": "31",
+        "structural": false,
+        "symbols": "31"
+      },
+      {
+        "data": "32",
+        "structural": false,
+        "symbols": "32"
+      },
+      {
+        "data": "33",
+        "structural": false,
+        "symbols": "33"
+      },
+      {
+        "data": "34",
+        "structural": false,
+        "symbols": "34"
+      },
+      {
+        "data": "35",
+        "structural": false,
+        "symbols": "35"
+      },
+      {
+        "data": "36",
+        "structural": false,
+        "symbols": "36"
+      },
+      {
+        "data": "37",
+        "structural": false,
+        "symbols": "37"
+      },
+      {
+        "data": "38",
+        "structural": false,
+        "symbols": "38"
+      },
+      {
+        "data": "39",
+        "structural": false,
+        "symbols": "39"
+      },
+      {
+        "data": "3a",
+        "structural": false,
+        "symbols": "3a"
+      },
+      {
+        "data": "3b",
+        "structural": false,
+        "symbols": "3b"
+      },
+      {
+        "data": "3c",
+        "structural": false,
+        "symbols": "3c"
+      },
+      {
+        "data": "3d",
+        "structural": false,
+        "symbols": "3d"
+      },
+      {
+        "data": "3e",
+        "structural": false,
+        "symbols": "3e"
+      },
+      {
+        "data": "3f",
+        "structural": false,
+        "symbols": "3f"
+      },
+      {
+        "data": "40",
+        "structural": false,
+        "symbols": "40"
+      },
+      {
+        "data": "41",
+        "structural": false,
+        "symbols": "41"
+      },
+      {
+        "data": "42",
+        "structural": false,
+        "symbols": "42"
+      },
+      {
+        "data": "43",
+        "structural": false,
+        "symbols": "43"
+      },
+      {
+        "data": "44",
+        "structural": false,
+        "symbols": "44"
+      },
+      {
+        "data": "45",
+        "structural": false,
+        "symbols": "45"
+      },
+      {
+        "data": "46",
+        "structural": false,
+        "symbols": "46"
+      },
+      {
+        "data": "47",
+        "structural": false,
+        "symbols": "47"
+      },
+      {
+        "data": "48",
+        "structural": false,
+        "symbols": "48"
+      },
+      {
+        "data": "49",
+        "structural": false,
+        "symbols": "49"
+      },
+      {
+        "data": "4a",
+        "structural": false,
+        "symbols": "4a"
+      },
+      {
+        "data": "4b",
+        "structural": false,
+        "symbols": "4b"
+      },
+      {
+        "data": "4c",
+        "structural": false,
+        "symbols": "4c"
+      },
+      {
+        "data": "4d",
+        "structural": false,
+        "symbols": "4d"
+      },
+      {
+        "data": "4e",
+        "structural": false,
+        "symbols": "4e"
+      },
+      {
+        "data": "4f",
+        "structural": false,
+        "symbols": "4f"
+      },
+      {
+        "data": "50",
+        "structural": false,
+        "symbols": "50"
+      },
+      {
+        "data": "51",
+        "structural": false,
+        "symbols": "51"
+      },
+      {
+        "data": "52",
+        "structural": false,
+        "symbols": "52"
+      },
+      {
+        "data": "53",
+        "structural": false,
+        "symbols": "53"
+      },
+      {
+        "data": "54",
+        "structural": false,
+        "symbols": "54"
+      },
+      {
+        "data": "55",
+        "structural": false,
+        "symbols": "55"
+      },
+      {
+        "data": "56",
+        "structural": false,
+        "symbols": "56"
+      },
+      {
+        "data": "57",
+        "structural": false,
+        "symbols": "57"
+      },
+      {
+        "data": "58",
+        "structural": false,
+        "symbols": "58"
+      },
+      {
+        "data": "59",
+        "structural": false,
+        "symbols": "59"
+      },
+      {
+        "data": "5a",
+        "structural": false,
+        "symbols": "5a"
+      },
+      {
+        "data": "5b",
+        "structural": false,
+        "symbols": "5b"
+      },
+      {
+        "data": "5c",
+        "structural": false,
+        "symbols": "5c"
+      },
+      {
+        "data": "5d",
+        "structural": false,
+        "symbols": "5d"
+      },
+      {
+        "data": "5e",
+        "structural": false,
+        "symbols": "5e"
+      },
+      {
+        "data": "5f",
+        "structural": false,
+        "symbols": "5f"
+      },
+      {
+        "data": "60",
+        "structural": false,
+        "symbols": "60"
+      },
+      {
+        "data": "61",
+        "structural": false,
+        "symbols": "61"
+      },
+      {
+        "data": "62",
+        "structural": false,
+        "symbols": "62"
+      },
+      {
+        "data": "63",
+        "structural": false,
+        "symbols": "63"
+      },
+      {
+        "data": "64",
+        "structural": false,
+        "symbols": "64"
+      },
+      {
+        "data": "65",
+        "structural": false,
+        "symbols": "65"
+      },
+      {
+        "data": "66",
+        "structural": false,
+        "symbols": "66"
+      },
+      {
+        "data": "67",
+        "structural": false,
+        "symbols": "67"
+      },
+      {
+        "data": "68",
+        "structural": false,
+        "symbols": "68"
+      },
+      {
+        "data": "69",
+        "structural": false,
+        "symbols": "69"
+      },
+      {
+        "data": "6a",
+        "structural": false,
+        "symbols": "6a"
+      },
+      {
+        "data": "6b",
+        "structural": false,
+        "symbols": "6b"
+      },
+      {
+        "data": "6c",
+        "structural": false,
+        "symbols": "6c"
+      },
+      {
+        "data": "6d",
+        "structural": false,
+        "symbols": "6d"
+      },
+      {
+        "data": "6e",
+        "structural": false,
+        "symbols": "6e"
+      },
+      {
+        "data": "6f",
+        "structural": false,
+        "symbols": "6f"
+      },
+      {
+        "data": "70",
+        "structural": false,
+        "symbols": "70"
+      },
+      {
+        "data": "71",
+        "structural": false,
+        "symbols": "71"
+      },
+      {
+        "data": "72",
+        "structural": false,
+        "symbols": "72"
+      },
+      {
+        "data": "73",
+        "structural": false,
+        "symbols": "73"
+      },
+      {
+        "data": "74",
+        "structural": false,
+        "symbols": "74"
+      },
+      {
+        "data": "75",
+        "structural": false,
+        "symbols": "75"
+      },
+      {
+        "data": "76",
+        "structural": false,
+        "symbols": "76"
+      },
+      {
+        "data": "77",
+        "structural": false,
+        "symbols": "77"
+      },
+      {
+        "data": "78",
+        "structural": false,
+        "symbols": "78"
+      },
+      {
+        "data": "79",
+        "structural": false,
+        "symbols": "79"
+      },
+      {
+        "data": "7a",
+        "structural": false,
+        "symbols": "7a"
+      },
+      {
+        "data": "7b",
+        "structural": false,
+        "symbols": "7b"
+      },
+      {
+        "data": "7c",
+        "structural": false,
+        "symbols": "7c"
+      },
+      {
+        "data": "7d",
+        "structural": false,
+        "symbols": "7d"
+      },
+      {
+        "data": "7e",
+        "structural": false,
+        "symbols": "7e"
+      },
+      {
+        "data": "7f",
+        "structural": false,
+        "symbols": "7f"
+      },
+      {
+        "data": "80",
+        "structural": false,
+        "symbols": "80"
+      },
+      {
+        "data": "81",
+        "structural": false,
+        "symbols": "81"
+      },
+      {
+        "data": "82",
+        "structural": false,
+        "symbols": "82"
+      },
+      {
+        "data": "83",
+        "structural": false,
+        "symbols": "83"
+      },
+      {
+        "data": "84",
+        "structural": false,
+        "symbols": "84"
+      },
+      {
+        "data": "85",
+        "structural": false,
+        "symbols": "85"
+      },
+      {
+        "data": "86",
+        "structural": false,
+        "symbols": "86"
+      },
+      {
+        "data": "87",
+        "structural": false,
+        "symbols": "87"
+      },
+      {
+        "data": "88",
+        "structural": false,
+        "symbols": "88"
+      },
+      {
+        "data": "89",
+        "structural": false,
+        "symbols": "89"
+      },
+      {
+        "data": "8a",
+        "structural": false,
+        "symbols": "8a"
+      },
+      {
+        "data": "8b",
+        "structural": false,
+        "symbols": "8b"
+      },
+      {
+        "data": "8c",
+        "structural": false,
+        "symbols": "8c"
+      },
+      {
+        "data": "8d",
+        "structural": false,
+        "symbols": "8d"
+      },
+      {
+        "data": "8e",
+        "structural": false,
+        "symbols": "8e"
+      },
+      {
+        "data": "8f",
+        "structural": false,
+        "symbols": "8f"
+      },
+      {
+        "data": "90",
+        "structural": false,
+        "symbols": "90"
+      },
+      {
+        "data": "91",
+        "structural": false,
+        "symbols": "91"
+      },
+      {
+        "data": "92",
+        "structural": false,
+        "symbols": "92"
+      },
+      {
+        "data": "93",
+        "structural": false,
+        "symbols": "93"
+      },
+      {
+        "data": "94",
+        "structural": false,
+        "symbols": "94"
+      },
+      {
+        "data": "95",
+        "structural": false,
+        "symbols": "95"
+      },
+      {
+        "data": "96",
+        "structural": false,
+        "symbols": "96"
+      },
+      {
+        "data": "97",
+        "structural": false,
+        "symbols": "97"
+      },
+      {
+        "data": "98",
+        "structural": false,
+        "symbols": "98"
+      },
+      {
+        "data": "99",
+        "structural": false,
+        "symbols": "99"
+      },
+      {
+        "data": "9a",
+        "structural": false,
+        "symbols": "9a"
+      },
+      {
+        "data": "9b",
+        "structural": false,
+        "symbols": "9b"
+      },
+      {
+        "data": "9c",
+        "structural": false,
+        "symbols": "9c"
+      },
+      {
+        "data": "9d",
+        "structural": false,
+        "symbols": "9d"
+      },
+      {
+        "data": "9e",
+        "structural": false,
+        "symbols": "9e"
+      },
+      {
+        "data": "9f",
+        "structural": false,
+        "symbols": "9f"
+      },
+      {
+        "data": "a0",
+        "structural": false,
+        "symbols": "a0"
+      },
+      {
+        "data": "a1",
+        "structural": false,
+        "symbols": "a1"
+      },
+      {
+        "data": "a2",
+        "structural": false,
+        "symbols": "a2"
+      },
+      {
+        "data": "a3",
+        "structural": false,
+        "symbols": "a3"
+      },
+      {
+        "data": "a4",
+        "structural": false,
+        "symbols": "a4"
+      },
+      {
+        "data": "a5",
+        "structural": false,
+        "symbols": "a5"
+      },
+      {
+        "data": "a6",
+        "structural": false,
+        "symbols": "a6"
+      },
+      {
+        "data": "a7",
+        "structural": false,
+        "symbols": "a7"
+      },
+      {
+        "data": "a8",
+        "structural": false,
+        "symbols": "a8"
+      },
+      {
+        "data": "a9",
+        "structural": false,
+        "symbols": "a900"
+      },
+      {
+        "data": "aa",
+        "structural": false,
+        "symbols": "a901"
+      },
+      {
+        "data": "ab",
+        "structural": false,
+        "symbols": "ab"
+      },
+      {
+        "data": "ac",
+        "structural": false,
+        "symbols": "ac"
+      },
+      {
+        "data": "ad",
+        "structural": false,
+        "symbols": "ad"
+      },
+      {
+        "data": "ae",
+        "structural": false,
+        "symbols": "ae"
+      },
+      {
+        "data": "af",
+        "structural": false,
+        "symbols": "af"
+      },
+      {
+        "data": "b0",
+        "structural": false,
+        "symbols": "b0"
+      },
+      {
+        "data": "b1",
+        "structural": false,
+        "symbols": "b1"
+      },
+      {
+        "data": "b2",
+        "structural": false,
+        "symbols": "b2"
+      },
+      {
+        "data": "b3",
+        "structural": false,
+        "symbols": "b3"
+      },
+      {
+        "data": "b4",
+        "structural": false,
+        "symbols": "b4"
+      },
+      {
+        "data": "b5",
+        "structural": false,
+        "symbols": "b5"
+      },
+      {
+        "data": "b6",
+        "structural": false,
+        "symbols": "b6"
+      },
+      {
+        "data": "b7",
+        "structural": false,
+        "symbols": "b7"
+      },
+      {
+        "data": "b8",
+        "structural": false,
+        "symbols": "b8"
+      },
+      {
+        "data": "b9",
+        "structural": false,
+        "symbols": "b9"
+      },
+      {
+        "data": "ba",
+        "structural": false,
+        "symbols": "ba"
+      },
+      {
+        "data": "bb",
+        "structural": false,
+        "symbols": "bb"
+      },
+      {
+        "data": "bc",
+        "structural": false,
+        "symbols": "bc"
+      },
+      {
+        "data": "bd",
+        "structural": false,
+        "symbols": "bd"
+      },
+      {
+        "data": "be",
+        "structural": false,
+        "symbols": "be"
+      },
+      {
+        "data": "bf",
+        "structural": false,
+        "symbols": "bf"
+      },
+      {
+        "data": "c0",
+        "structural": false,
+        "symbols": "c0"
+      },
+      {
+        "data": "c1",
+        "structural": false,
+        "symbols": "c1"
+      },
+      {
+        "data": "c2",
+        "structural": false,
+        "symbols": "c2"
+      },
+      {
+        "data": "c3",
+        "structural": false,
+        "symbols": "c3"
+      },
+      {
+        "data": "c4",
+        "structural": false,
+        "symbols": "c4"
+      },
+      {
+        "data": "c5",
+        "structural": false,
+        "symbols": "c5"
+      },
+      {
+        "data": "c6",
+        "structural": false,
+        "symbols": "c6"
+      },
+      {
+        "data": "c7",
+        "structural": false,
+        "symbols": "c7"
+      },
+      {
+        "data": "c8",
+        "structural": false,
+        "symbols": "c8"
+      },
+      {
+        "data": "c9",
+        "structural": false,
+        "symbols": "c9"
+      },
+      {
+        "data": "ca",
+        "structural": false,
+        "symbols": "ca"
+      },
+      {
+        "data": "cb",
+        "structural": false,
+        "symbols": "cb"
+      },
+      {
+        "data": "cc",
+        "structural": false,
+        "symbols": "cc"
+      },
+      {
+        "data": "cd",
+        "structural": false,
+        "symbols": "cd"
+      },
+      {
+        "data": "ce",
+        "structural": false,
+        "symbols": "ce"
+      },
+      {
+        "data": "cf",
+        "structural": false,
+        "symbols": "cf"
+      },
+      {
+        "data": "d0",
+        "structural": false,
+        "symbols": "d0"
+      },
+      {
+        "data": "d1",
+        "structural": false,
+        "symbols": "d1"
+      },
+      {
+        "data": "d2",
+        "structural": false,
+        "symbols": "d2"
+      },
+      {
+        "data": "d3",
+        "structural": false,
+        "symbols": "d3"
+      },
+      {
+        "data": "d4",
+        "structural": false,
+        "symbols": "d4"
+      },
+      {
+        "data": "d5",
+        "structural": false,
+        "symbols": "d5"
+      },
+      {
+        "data": "d6",
+        "structural": false,
+        "symbols": "d6"
+      },
+      {
+        "data": "d7",
+        "structural": false,
+        "symbols": "d7"
+      },
+      {
+        "data": "d8",
+        "structural": false,
+        "symbols": "d8"
+      },
+      {
+        "data": "d9",
+        "structural": false,
+        "symbols": "d9"
+      },
+      {
+        "data": "da",
+        "structural": false,
+        "symbols": "da"
+      },
+      {
+        "data": "db",
+        "structural": false,
+        "symbols": "db"
+      },
+      {
+        "data": "dc",
+        "structural": false,
+        "symbols": "dc"
+      },
+      {
+        "data": "dd",
+        "structural": false,
+        "symbols": "dd"
+      },
+      {
+        "data": "de",
+        "structural": false,
+        "symbols": "de"
+      },
+      {
+        "data": "df",
+        "structural": false,
+        "symbols": "df"
+      },
+      {
+        "data": "e0",
+        "structural": false,
+        "symbols": "e0"
+      },
+      {
+        "data": "e1",
+        "structural": false,
+        "symbols": "e1"
+      },
+      {
+        "data": "e2",
+        "structural": false,
+        "symbols": "e2"
+      },
+      {
+        "data": "e3",
+        "structural": false,
+        "symbols": "e3"
+      },
+      {
+        "data": "e4",
+        "structural": false,
+        "symbols": "e4"
+      },
+      {
+        "data": "e5",
+        "structural": false,
+        "symbols": "e5"
+      },
+      {
+        "data": "e6",
+        "structural": false,
+        "symbols": "e6"
+      },
+      {
+        "data": "e7",
+        "structural": false,
+        "symbols": "e7"
+      },
+      {
+        "data": "e8",
+        "structural": false,
+        "symbols": "e8"
+      },
+      {
+        "data": "e9",
+        "structural": false,
+        "symbols": "e9"
+      },
+      {
+        "data": "ea",
+        "structural": false,
+        "symbols": "ea"
+      },
+      {
+        "data": "eb",
+        "structural": false,
+        "symbols": "eb"
+      },
+      {
+        "data": "ec",
+        "structural": false,
+        "symbols": "ec"
+      },
+      {
+        "data": "ed",
+        "structural": false,
+        "symbols": "ed"
+      },
+      {
+        "data": "ee",
+        "structural": false,
+        "symbols": "ee"
+      },
+      {
+        "data": "ef",
+        "structural": false,
+        "symbols": "ef"
+      },
+      {
+        "data": "f0",
+        "structural": false,
+        "symbols": "f0"
+      },
+      {
+        "data": "f1",
+        "structural": false,
+        "symbols": "f1"
+      },
+      {
+        "data": "f2",
+        "structural": false,
+        "symbols": "f2"
+      },
+      {
+        "data": "f3",
+        "structural": false,
+        "symbols": "f3"
+      },
+      {
+        "data": "f4",
+        "structural": false,
+        "symbols": "f4"
+      },
+      {
+        "data": "f5",
+        "structural": false,
+        "symbols": "f5"
+      },
+      {
+        "data": "f6",
+        "structural": false,
+        "symbols": "f6"
+      },
+      {
+        "data": "f7",
+        "structural": false,
+        "symbols": "f7"
+      },
+      {
+        "data": "f8",
+        "structural": false,
+        "symbols": "f8"
+      },
+      {
+        "data": "f9",
+        "structural": false,
+        "symbols": "f9"
+      },
+      {
+        "data": "fa",
+        "structural": false,
+        "symbols": "fa"
+      },
+      {
+        "data": "fb",
+        "structural": false,
+        "symbols": "fb"
+      },
+      {
+        "data": "fc",
+        "structural": false,
+        "symbols": "fc"
+      },
+      {
+        "data": "fd",
+        "structural": false,
+        "symbols": "fd"
+      },
+      {
+        "data": "fe",
+        "structural": false,
+        "symbols": "fe"
+      },
+      {
+        "data": "ff",
+        "structural": false,
+        "symbols": "ff"
+      },
+      {
+        "data": "00",
+        "structural": true,
+        "symbols": "00"
+      },
+      {
+        "data": "01",
+        "structural": true,
+        "symbols": "01"
+      },
+      {
+        "data": "02",
+        "structural": true,
+        "symbols": "02"
+      },
+      {
+        "data": "03",
+        "structural": true,
+        "symbols": "03"
+      },
+      {
+        "data": "04",
+        "structural": true,
+        "symbols": "04"
+      },
+      {
+        "data": "05",
+        "structural": true,
+        "symbols": "05"
+      },
+      {
+        "data": "06",
+        "structural": true,
+        "symbols": "06"
+      },
+      {
+        "data": "07",
+        "structural": true,
+        "symbols": "07"
+      },
+      {
+        "data": "08",
+        "structural": true,
+        "symbols": "08"
+      },
+      {
+        "data": "09",
+        "structural": true,
+        "symbols": "09"
+      },
+      {
+        "data": "0a",
+        "structural": true,
+        "symbols": "0a"
+      },
+      {
+        "data": "0b",
+        "structural": true,
+        "symbols": "0b"
+      },
+      {
+        "data": "0c",
+        "structural": true,
+        "symbols": "0c"
+      },
+      {
+        "data": "0d",
+        "structural": true,
+        "symbols": "0d"
+      },
+      {
+        "data": "0e",
+        "structural": true,
+        "symbols": "0e"
+      },
+      {
+        "data": "0f",
+        "structural": true,
+        "symbols": "0f"
+      },
+      {
+        "data": "10",
+        "structural": true,
+        "symbols": "10"
+      },
+      {
+        "data": "11",
+        "structural": true,
+        "symbols": "11"
+      },
+      {
+        "data": "12",
+        "structural": true,
+        "symbols": "12"
+      },
+      {
+        "data": "13",
+        "structural": true,
+        "symbols": "13"
+      },
+      {
+        "data": "14",
+        "structural": true,
+        "symbols": "14"
+      },
+      {
+        "data": "15",
+        "structural": true,
+        "symbols": "15"
+      },
+      {
+        "data": "16",
+        "structural": true,
+        "symbols": "16"
+      },
+      {
+        "data": "17",
+        "structural": true,
+        "symbols": "17"
+      },
+      {
+        "data": "18",
+        "structural": true,
+        "symbols": "18"
+      },
+      {
+        "data": "19",
+        "structural": true,
+        "symbols": "19"
+      },
+      {
+        "data": "1a",
+        "structural": true,
+        "symbols": "1a"
+      },
+      {
+        "data": "1b",
+        "structural": true,
+        "symbols": "1b"
+      },
+      {
+        "data": "1c",
+        "structural": true,
+        "symbols": "1c"
+      },
+      {
+        "data": "1d",
+        "structural": true,
+        "symbols": "1d"
+      },
+      {
+        "data": "1e",
+        "structural": true,
+        "symbols": "1e"
+      },
+      {
+        "data": "1f",
+        "structural": true,
+        "symbols": "1f"
+      },
+      {
+        "data": "20",
+        "structural": true,
+        "symbols": "20"
+      },
+      {
+        "data": "21",
+        "structural": true,
+        "symbols": "21"
+      },
+      {
+        "data": "22",
+        "structural": true,
+        "symbols": "22"
+      },
+      {
+        "data": "23",
+        "structural": true,
+        "symbols": "23"
+      },
+      {
+        "data": "24",
+        "structural": true,
+        "symbols": "24"
+      },
+      {
+        "data": "25",
+        "structural": true,
+        "symbols": "25"
+      },
+      {
+        "data": "26",
+        "structural": true,
+        "symbols": "26"
+      },
+      {
+        "data": "27",
+        "structural": true,
+        "symbols": "27"
+      },
+      {
+        "data": "28",
+        "structural": true,
+        "symbols": "28"
+      },
+      {
+        "data": "29",
+        "structural": true,
+        "symbols": "29"
+      },
+      {
+        "data": "2a",
+        "structural": true,
+        "symbols": "2a"
+      },
+      {
+        "data": "2b",
+        "structural": true,
+        "symbols": "2b"
+      },
+      {
+        "data": "2c",
+        "structural": true,
+        "symbols": "2c"
+      },
+      {
+        "data": "2d",
+        "structural": true,
+        "symbols": "2d"
+      },
+      {
+        "data": "2e",
+        "structural": true,
+        "symbols": "2e"
+      },
+      {
+        "data": "2f",
+        "structural": true,
+        "symbols": "2f"
+      },
+      {
+        "data": "30",
+        "structural": true,
+        "symbols": "30"
+      },
+      {
+        "data": "31",
+        "structural": true,
+        "symbols": "31"
+      },
+      {
+        "data": "32",
+        "structural": true,
+        "symbols": "32"
+      },
+      {
+        "data": "33",
+        "structural": true,
+        "symbols": "33"
+      },
+      {
+        "data": "34",
+        "structural": true,
+        "symbols": "34"
+      },
+      {
+        "data": "35",
+        "structural": true,
+        "symbols": "35"
+      },
+      {
+        "data": "36",
+        "structural": true,
+        "symbols": "36"
+      },
+      {
+        "data": "37",
+        "structural": true,
+        "symbols": "37"
+      },
+      {
+        "data": "38",
+        "structural": true,
+        "symbols": "38"
+      },
+      {
+        "data": "39",
+        "structural": true,
+        "symbols": "39"
+      },
+      {
+        "data": "3a",
+        "structural": true,
+        "symbols": "3a"
+      },
+      {
+        "data": "3b",
+        "structural": true,
+        "symbols": "3b"
+      },
+      {
+        "data": "3c",
+        "structural": true,
+        "symbols": "3c"
+      },
+      {
+        "data": "3d",
+        "structural": true,
+        "symbols": "3d"
+      },
+      {
+        "data": "3e",
+        "structural": true,
+        "symbols": "3e"
+      },
+      {
+        "data": "3f",
+        "structural": true,
+        "symbols": "3f"
+      },
+      {
+        "data": "40",
+        "structural": true,
+        "symbols": "40"
+      },
+      {
+        "data": "41",
+        "structural": true,
+        "symbols": "41"
+      },
+      {
+        "data": "42",
+        "structural": true,
+        "symbols": "42"
+      },
+      {
+        "data": "43",
+        "structural": true,
+        "symbols": "43"
+      },
+      {
+        "data": "44",
+        "structural": true,
+        "symbols": "44"
+      },
+      {
+        "data": "45",
+        "structural": true,
+        "symbols": "45"
+      },
+      {
+        "data": "46",
+        "structural": true,
+        "symbols": "46"
+      },
+      {
+        "data": "47",
+        "structural": true,
+        "symbols": "47"
+      },
+      {
+        "data": "48",
+        "structural": true,
+        "symbols": "48"
+      },
+      {
+        "data": "49",
+        "structural": true,
+        "symbols": "49"
+      },
+      {
+        "data": "4a",
+        "structural": true,
+        "symbols": "4a"
+      },
+      {
+        "data": "4b",
+        "structural": true,
+        "symbols": "4b"
+      },
+      {
+        "data": "4c",
+        "structural": true,
+        "symbols": "4c"
+      },
+      {
+        "data": "4d",
+        "structural": true,
+        "symbols": "4d"
+      },
+      {
+        "data": "4e",
+        "structural": true,
+        "symbols": "4e"
+      },
+      {
+        "data": "4f",
+        "structural": true,
+        "symbols": "4f"
+      },
+      {
+        "data": "50",
+        "structural": true,
+        "symbols": "50"
+      },
+      {
+        "data": "51",
+        "structural": true,
+        "symbols": "51"
+      },
+      {
+        "data": "52",
+        "structural": true,
+        "symbols": "52"
+      },
+      {
+        "data": "53",
+        "structural": true,
+        "symbols": "53"
+      },
+      {
+        "data": "54",
+        "structural": true,
+        "symbols": "54"
+      },
+      {
+        "data": "55",
+        "structural": true,
+        "symbols": "55"
+      },
+      {
+        "data": "56",
+        "structural": true,
+        "symbols": "56"
+      },
+      {
+        "data": "57",
+        "structural": true,
+        "symbols": "57"
+      },
+      {
+        "data": "58",
+        "structural": true,
+        "symbols": "58"
+      },
+      {
+        "data": "59",
+        "structural": true,
+        "symbols": "59"
+      },
+      {
+        "data": "5a",
+        "structural": true,
+        "symbols": "5a"
+      },
+      {
+        "data": "5b",
+        "structural": true,
+        "symbols": "5b"
+      },
+      {
+        "data": "5c",
+        "structural": true,
+        "symbols": "5c"
+      },
+      {
+        "data": "5d",
+        "structural": true,
+        "symbols": "5d"
+      },
+      {
+        "data": "5e",
+        "structural": true,
+        "symbols": "5e"
+      },
+      {
+        "data": "5f",
+        "structural": true,
+        "symbols": "5f"
+      },
+      {
+        "data": "60",
+        "structural": true,
+        "symbols": "60"
+      },
+      {
+        "data": "61",
+        "structural": true,
+        "symbols": "61"
+      },
+      {
+        "data": "62",
+        "structural": true,
+        "symbols": "62"
+      },
+      {
+        "data": "63",
+        "structural": true,
+        "symbols": "63"
+      },
+      {
+        "data": "64",
+        "structural": true,
+        "symbols": "64"
+      },
+      {
+        "data": "65",
+        "structural": true,
+        "symbols": "65"
+      },
+      {
+        "data": "66",
+        "structural": true,
+        "symbols": "66"
+      },
+      {
+        "data": "67",
+        "structural": true,
+        "symbols": "67"
+      },
+      {
+        "data": "68",
+        "structural": true,
+        "symbols": "68"
+      },
+      {
+        "data": "69",
+        "structural": true,
+        "symbols": "69"
+      },
+      {
+        "data": "6a",
+        "structural": true,
+        "symbols": "6a"
+      },
+      {
+        "data": "6b",
+        "structural": true,
+        "symbols": "6b"
+      },
+      {
+        "data": "6c",
+        "structural": true,
+        "symbols": "6c"
+      },
+      {
+        "data": "6d",
+        "structural": true,
+        "symbols": "6d"
+      },
+      {
+        "data": "6e",
+        "structural": true,
+        "symbols": "6e"
+      },
+      {
+        "data": "6f",
+        "structural": true,
+        "symbols": "6f"
+      },
+      {
+        "data": "70",
+        "structural": true,
+        "symbols": "70"
+      },
+      {
+        "data": "71",
+        "structural": true,
+        "symbols": "71"
+      },
+      {
+        "data": "72",
+        "structural": true,
+        "symbols": "72"
+      },
+      {
+        "data": "73",
+        "structural": true,
+        "symbols": "73"
+      },
+      {
+        "data": "74",
+        "structural": true,
+        "symbols": "74"
+      },
+      {
+        "data": "75",
+        "structural": true,
+        "symbols": "75"
+      },
+      {
+        "data": "76",
+        "structural": true,
+        "symbols": "76"
+      },
+      {
+        "data": "77",
+        "structural": true,
+        "symbols": "77"
+      },
+      {
+        "data": "78",
+        "structural": true,
+        "symbols": "78"
+      },
+      {
+        "data": "79",
+        "structural": true,
+        "symbols": "79"
+      },
+      {
+        "data": "7a",
+        "structural": true,
+        "symbols": "7a"
+      },
+      {
+        "data": "7b",
+        "structural": true,
+        "symbols": "7b"
+      },
+      {
+        "data": "7c",
+        "structural": true,
+        "symbols": "7c"
+      },
+      {
+        "data": "7d",
+        "structural": true,
+        "symbols": "7d"
+      },
+      {
+        "data": "7e",
+        "structural": true,
+        "symbols": "7e"
+      },
+      {
+        "data": "7f",
+        "structural": true,
+        "symbols": "7f"
+      },
+      {
+        "data": "80",
+        "structural": true,
+        "symbols": "80"
+      },
+      {
+        "data": "81",
+        "structural": true,
+        "symbols": "81"
+      },
+      {
+        "data": "82",
+        "structural": true,
+        "symbols": "82"
+      },
+      {
+        "data": "83",
+        "structural": true,
+        "symbols": "83"
+      },
+      {
+        "data": "84",
+        "structural": true,
+        "symbols": "84"
+      },
+      {
+        "data": "85",
+        "structural": true,
+        "symbols": "85"
+      },
+      {
+        "data": "86",
+        "structural": true,
+        "symbols": "86"
+      },
+      {
+        "data": "87",
+        "structural": true,
+        "symbols": "87"
+      },
+      {
+        "data": "88",
+        "structural": true,
+        "symbols": "88"
+      },
+      {
+        "data": "89",
+        "structural": true,
+        "symbols": "89"
+      },
+      {
+        "data": "8a",
+        "structural": true,
+        "symbols": "8a"
+      },
+      {
+        "data": "8b",
+        "structural": true,
+        "symbols": "8b"
+      },
+      {
+        "data": "8c",
+        "structural": true,
+        "symbols": "8c"
+      },
+      {
+        "data": "8d",
+        "structural": true,
+        "symbols": "8d"
+      },
+      {
+        "data": "8e",
+        "structural": true,
+        "symbols": "8e"
+      },
+      {
+        "data": "8f",
+        "structural": true,
+        "symbols": "8f"
+      },
+      {
+        "data": "90",
+        "structural": true,
+        "symbols": "90"
+      },
+      {
+        "data": "91",
+        "structural": true,
+        "symbols": "91"
+      },
+      {
+        "data": "92",
+        "structural": true,
+        "symbols": "92"
+      },
+      {
+        "data": "93",
+        "structural": true,
+        "symbols": "93"
+      },
+      {
+        "data": "94",
+        "structural": true,
+        "symbols": "94"
+      },
+      {
+        "data": "95",
+        "structural": true,
+        "symbols": "95"
+      },
+      {
+        "data": "96",
+        "structural": true,
+        "symbols": "96"
+      },
+      {
+        "data": "97",
+        "structural": true,
+        "symbols": "97"
+      },
+      {
+        "data": "98",
+        "structural": true,
+        "symbols": "98"
+      },
+      {
+        "data": "99",
+        "structural": true,
+        "symbols": "99"
+      },
+      {
+        "data": "9a",
+        "structural": true,
+        "symbols": "9a"
+      },
+      {
+        "data": "9b",
+        "structural": true,
+        "symbols": "9b"
+      },
+      {
+        "data": "9c",
+        "structural": true,
+        "symbols": "9c"
+      },
+      {
+        "data": "9d",
+        "structural": true,
+        "symbols": "9d"
+      },
+      {
+        "data": "9e",
+        "structural": true,
+        "symbols": "9e"
+      },
+      {
+        "data": "9f",
+        "structural": true,
+        "symbols": "9f"
+      },
+      {
+        "data": "a0",
+        "structural": true,
+        "symbols": "a0"
+      },
+      {
+        "data": "a1",
+        "structural": true,
+        "symbols": "a1"
+      },
+      {
+        "data": "a2",
+        "structural": true,
+        "symbols": "a2"
+      },
+      {
+        "data": "a3",
+        "structural": true,
+        "symbols": "a3"
+      },
+      {
+        "data": "a4",
+        "structural": true,
+        "symbols": "a4"
+      },
+      {
+        "data": "a5",
+        "structural": true,
+        "symbols": "a5"
+      },
+      {
+        "data": "a6",
+        "structural": true,
+        "symbols": "a6"
+      },
+      {
+        "data": "a7",
+        "structural": true,
+        "symbols": "a7"
+      },
+      {
+        "data": "a8",
+        "structural": true,
+        "symbols": "a8"
+      },
+      {
+        "data": "a9",
+        "structural": true,
+        "symbols": "a900"
+      },
+      {
+        "data": "aa",
+        "structural": true,
+        "symbols": "aa"
+      },
+      {
+        "data": "ab",
+        "structural": true,
+        "symbols": "ab"
+      },
+      {
+        "data": "ac",
+        "structural": true,
+        "symbols": "ac"
+      },
+      {
+        "data": "ad",
+        "structural": true,
+        "symbols": "ad"
+      },
+      {
+        "data": "ae",
+        "structural": true,
+        "symbols": "ae"
+      },
+      {
+        "data": "af",
+        "structural": true,
+        "symbols": "af"
+      },
+      {
+        "data": "b0",
+        "structural": true,
+        "symbols": "b0"
+      },
+      {
+        "data": "b1",
+        "structural": true,
+        "symbols": "b1"
+      },
+      {
+        "data": "b2",
+        "structural": true,
+        "symbols": "b2"
+      },
+      {
+        "data": "b3",
+        "structural": true,
+        "symbols": "b3"
+      },
+      {
+        "data": "b4",
+        "structural": true,
+        "symbols": "b4"
+      },
+      {
+        "data": "b5",
+        "structural": true,
+        "symbols": "b5"
+      },
+      {
+        "data": "b6",
+        "structural": true,
+        "symbols": "b6"
+      },
+      {
+        "data": "b7",
+        "structural": true,
+        "symbols": "b7"
+      },
+      {
+        "data": "b8",
+        "structural": true,
+        "symbols": "b8"
+      },
+      {
+        "data": "b9",
+        "structural": true,
+        "symbols": "b9"
+      },
+      {
+        "data": "ba",
+        "structural": true,
+        "symbols": "ba"
+      },
+      {
+        "data": "bb",
+        "structural": true,
+        "symbols": "bb"
+      },
+      {
+        "data": "bc",
+        "structural": true,
+        "symbols": "bc"
+      },
+      {
+        "data": "bd",
+        "structural": true,
+        "symbols": "bd"
+      },
+      {
+        "data": "be",
+        "structural": true,
+        "symbols": "be"
+      },
+      {
+        "data": "bf",
+        "structural": true,
+        "symbols": "bf"
+      },
+      {
+        "data": "c0",
+        "structural": true,
+        "symbols": "c0"
+      },
+      {
+        "data": "c1",
+        "structural": true,
+        "symbols": "c1"
+      },
+      {
+        "data": "c2",
+        "structural": true,
+        "symbols": "c2"
+      },
+      {
+        "data": "c3",
+        "structural": true,
+        "symbols": "c3"
+      },
+      {
+        "data": "c4",
+        "structural": true,
+        "symbols": "c4"
+      },
+      {
+        "data": "c5",
+        "structural": true,
+        "symbols": "c5"
+      },
+      {
+        "data": "c6",
+        "structural": true,
+        "symbols": "c6"
+      },
+      {
+        "data": "c7",
+        "structural": true,
+        "symbols": "c7"
+      },
+      {
+        "data": "c8",
+        "structural": true,
+        "symbols": "c8"
+      },
+      {
+        "data": "c9",
+        "structural": true,
+        "symbols": "c9"
+      },
+      {
+        "data": "ca",
+        "structural": true,
+        "symbols": "ca"
+      },
+      {
+        "data": "cb",
+        "structural": true,
+        "symbols": "cb"
+      },
+      {
+        "data": "cc",
+        "structural": true,
+        "symbols": "cc"
+      },
+      {
+        "data": "cd",
+        "structural": true,
+        "symbols": "cd"
+      },
+      {
+        "data": "ce",
+        "structural": true,
+        "symbols": "ce"
+      },
+      {
+        "data": "cf",
+        "structural": true,
+        "symbols": "cf"
+      },
+      {
+        "data": "d0",
+        "structural": true,
+        "symbols": "d0"
+      },
+      {
+        "data": "d1",
+        "structural": true,
+        "symbols": "d1"
+      },
+      {
+        "data": "d2",
+        "structural": true,
+        "symbols": "d2"
+      },
+      {
+        "data": "d3",
+        "structural": true,
+        "symbols": "d3"
+      },
+      {
+        "data": "d4",
+        "structural": true,
+        "symbols": "d4"
+      },
+      {
+        "data": "d5",
+        "structural": true,
+        "symbols": "d5"
+      },
+      {
+        "data": "d6",
+        "structural": true,
+        "symbols": "d6"
+      },
+      {
+        "data": "d7",
+        "structural": true,
+        "symbols": "d7"
+      },
+      {
+        "data": "d8",
+        "structural": true,
+        "symbols": "d8"
+      },
+      {
+        "data": "d9",
+        "structural": true,
+        "symbols": "d9"
+      },
+      {
+        "data": "da",
+        "structural": true,
+        "symbols": "da"
+      },
+      {
+        "data": "db",
+        "structural": true,
+        "symbols": "db"
+      },
+      {
+        "data": "dc",
+        "structural": true,
+        "symbols": "dc"
+      },
+      {
+        "data": "dd",
+        "structural": true,
+        "symbols": "dd"
+      },
+      {
+        "data": "de",
+        "structural": true,
+        "symbols": "de"
+      },
+      {
+        "data": "df",
+        "structural": true,
+        "symbols": "df"
+      },
+      {
+        "data": "e0",
+        "structural": true,
+        "symbols": "e0"
+      },
+      {
+        "data": "e1",
+        "structural": true,
+        "symbols": "e1"
+      },
+      {
+        "data": "e2",
+        "structural": true,
+        "symbols": "e2"
+      },
+      {
+        "data": "e3",
+        "structural": true,
+        "symbols": "e3"
+      },
+      {
+        "data": "e4",
+        "structural": true,
+        "symbols": "e4"
+      },
+      {
+        "data": "e5",
+        "structural": true,
+        "symbols": "e5"
+      },
+      {
+        "data": "e6",
+        "structural": true,
+        "symbols": "e6"
+      },
+      {
+        "data": "e7",
+        "structural": true,
+        "symbols": "e7"
+      },
+      {
+        "data": "e8",
+        "structural": true,
+        "symbols": "e8"
+      },
+      {
+        "data": "e9",
+        "structural": true,
+        "symbols": "e9"
+      },
+      {
+        "data": "ea",
+        "structural": true,
+        "symbols": "ea"
+      },
+      {
+        "data": "eb",
+        "structural": true,
+        "symbols": "eb"
+      },
+      {
+        "data": "ec",
+        "structural": true,
+        "symbols": "ec"
+      },
+      {
+        "data": "ed",
+        "structural": true,
+        "symbols": "ed"
+      },
+      {
+        "data": "ee",
+        "structural": true,
+        "symbols": "ee"
+      },
+      {
+        "data": "ef",
+        "structural": true,
+        "symbols": "ef"
+      },
+      {
+        "data": "f0",
+        "structural": true,
+        "symbols": "f0"
+      },
+      {
+        "data": "f1",
+        "structural": true,
+        "symbols": "f1"
+      },
+      {
+        "data": "f2",
+        "structural": true,
+        "symbols": "f2"
+      },
+      {
+        "data": "f3",
+        "structural": true,
+        "symbols": "f3"
+      },
+      {
+        "data": "f4",
+        "structural": true,
+        "symbols": "f4"
+      },
+      {
+        "data": "f5",
+        "structural": true,
+        "symbols": "f5"
+      },
+      {
+        "data": "f6",
+        "structural": true,
+        "symbols": "f6"
+      },
+      {
+        "data": "f7",
+        "structural": true,
+        "symbols": "f7"
+      },
+      {
+        "data": "f8",
+        "structural": true,
+        "symbols": "f8"
+      },
+      {
+        "data": "f9",
+        "structural": true,
+        "symbols": "f9"
+      },
+      {
+        "data": "fa",
+        "structural": true,
+        "symbols": "fa"
+      },
+      {
+        "data": "fb",
+        "structural": true,
+        "symbols": "fb"
+      },
+      {
+        "data": "fc",
+        "structural": true,
+        "symbols": "fc"
+      },
+      {
+        "data": "fd",
+        "structural": true,
+        "symbols": "fd"
+      },
+      {
+        "data": "fe",
+        "structural": true,
+        "symbols": "fe"
+      },
+      {
+        "data": "ff",
+        "structural": true,
+        "symbols": "ff"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "rows": 512
+    }
+  }
+}

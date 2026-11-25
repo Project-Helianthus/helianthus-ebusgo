@@ -1,0 +1,344 @@
+package adaptermux
+
+import (
+	"errors"
+	"fmt"
+	"sync/atomic"
+	"time"
+
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
+)
+
+// activeTransport wraps the multiplexer to provide a RawTransport
+// interface for the gateway's active path (gateway.Bus).
+//
+// It implements transport.RawTransport and optionally
+// transport.StreamEventReader for RESETTED detection.
+type activeTransport struct {
+	mux *Mux
+
+	// nextWriteIsStructuralSyn is the F-NEW-28 (2026-05-21) one-shot
+	// flag toggled by SignalNextWriteIsStructuralSyn(). Consumed by
+	// the next Write call and reset to false afterwards. atomic.Bool
+	// for cheap concurrent-safe load/swap; in practice the signal
+	// and Write are issued sequentially from the same goroutine
+	// (bus.Send.sendRawWithEcho) so contention is minimal, but the
+	// atomic guards against accidental cross-goroutine misuse.
+	//
+	// The one-shot semantic — signal CONSUMED by next Write — keeps
+	// the contract simple: a signal that fires but isn't followed by
+	// a Write is harmless (the next Write that does happen will see
+	// stale `true` and propagate it, but that "next Write" by
+	// definition starts AFTER the prior call returned, so a missed
+	// signal would only mistag a structural write as structural —
+	// idempotent). Callers MUST issue Signal+Write in the order
+	// "Signal first, then Write", per the
+	// transport.StructuralWriteSignaler interface contract.
+	nextWriteIsStructuralSyn atomic.Bool
+}
+
+// Compile-time interface checks.
+var (
+	_ transport.RawTransport               = (*activeTransport)(nil)
+	_ transport.StreamEventReader          = (*activeTransport)(nil)
+	_ transport.InfoRequester              = (*activeTransport)(nil)
+	_ transport.EscapeAware                = (*activeTransport)(nil)
+	_ transport.EscapeFlaggedReader        = (*activeTransport)(nil)
+	_ transport.StructuralWriteSignaler    = (*activeTransport)(nil)
+	_ transport.CollisionRecoveryLifecycle = (*activeTransport)(nil)
+)
+
+// CollisionRecoveryToken exposes the identity of a gateway transaction that
+// ended with a confirmed arbitration loss while its resynchronization SYN
+// window is still open. Since issue #1401 the loss itself releases ownership
+// at detection; the token only scopes the owed SYN window, so it is zero
+// once the window closed, at the next grant, and at every lifecycle boundary.
+func (t *activeTransport) CollisionRecoveryToken() uint64 {
+	t.mux.stateMu.Lock()
+	defer t.mux.stateMu.Unlock()
+	if t.mux.collisionResyncOwed == 0 || !t.mux.activeTxn.firstByteSuspectArbLoss.Load() {
+		return 0
+	}
+	return t.mux.activeTxn.id
+}
+
+// CompleteCollisionRecovery closes the resynchronization SYN window of the
+// transaction identified by token. Retry and Abandon are both terminal for the
+// window: protocol.Bus needs no further SYNs from the lost transaction, so the
+// remaining ones are not queued on activeCh where they would only be discarded
+// at the next grant. Ownership was already released when the loss was
+// detected (issue #1401); a stale token never affects a later transaction.
+func (t *activeTransport) CompleteCollisionRecovery(token uint64, decision transport.CollisionRecoveryDecision) {
+	if decision != transport.CollisionRecoveryRetry && decision != transport.CollisionRecoveryAbandon {
+		return
+	}
+	t.mux.stateMu.Lock()
+	if token != 0 && token == t.mux.activeTxn.id && t.mux.activeTxn.firstByteSuspectArbLoss.Load() {
+		t.mux.collisionResyncOwed = 0
+	}
+	t.mux.stateMu.Unlock()
+}
+
+// NOTE: activeTransport intentionally does NOT implement
+// transport.Reconnectable. The upstream transport's Reconnect() acquires
+// readMu, and calling it from the active path (which blocks in ReadByte
+// on readLoop's output) would deadlock. The mux handles reconnection
+// internally via reconnect().
+
+// activeChanTimeout is the timeout for receiving from activeCh in both
+// ReadByte and ReadEvent. Must be MUCH longer than the mux readLoop
+// tick (cfg.ReadTimeout) to avoid false timeouts: echo delivery
+// through readLoop -> onReceived -> activeCh has multi-goroutine
+// jitter. With TimeoutRetries=0 in ebusgo, ANY ErrTimeout kills a
+// scan probe immediately.
+//
+// 1s is a safe balance: short enough to prevent deadlock (original
+// bug #3 where activeCh filled up), long enough that normal echo
+// delivery (~5-20ms) never triggers a false timeout.
+//
+// Issue #1401: it must stay well below the default MaxOwnershipDuration
+// (1.5s). A stalled transaction is then ended by its active read timeout,
+// which releases the grant at once, and the ownership cap stays the last
+// resort instead of the normal exit (the former 2s exceeded the new cap).
+const activeChanTimeout = 1 * time.Second
+
+// ReadByte blocks until a byte is received from the adapter or an
+// error occurs. This receives ALL bytes from the adapter (including
+// the gateway's own echoes), which is what gateway.Bus expects for
+// echo matching.
+//
+// activeCh is a single FIFO channel carrying both bytes and errors.
+// handleReset drains the channel and enqueues the reset event before
+// readLoop resumes, so the consumer sees events in exact enqueue
+// order — no priority select needed.
+func (t *activeTransport) ReadByte() (byte, error) {
+	b, _, err := t.readByteAndFlag()
+	return b, err
+}
+
+// ReadByteWithEscape (F-23 / Codex bot on PR-2) surfaces the
+// per-byte WasEscaped provenance from the upstream ENH transport
+// through the mux's active channel. protocol.Bus uses this on
+// EscapeFlaggedReader-implementing transports so waitForSyn /
+// sendRawWithEcho can distinguish real wire SYN (false) from
+// escape-decoded payload 0xAA (true). Without this method,
+// protocol.Bus would fall back to the lossy ReadByte path and
+// the post-F-23 SYN / echo guards in the protocol layer would
+// silently revert to pre-F-23 value-only semantics.
+func (t *activeTransport) ReadByteWithEscape() (byte, bool, error) {
+	return t.readByteAndFlag()
+}
+
+// readByteAndFlag is the shared implementation for ReadByte +
+// ReadByteWithEscape — drains one activeEvent and returns its byte +
+// wasEscaped + error. Single timer + ctx select.
+func (t *activeTransport) readByteAndFlag() (byte, bool, error) {
+	timer := time.NewTimer(activeChanTimeout)
+	defer timer.Stop()
+
+	select {
+	case ev := <-t.mux.activeCh:
+		if ev.kind == activeEventError {
+			if ev.err != nil {
+				return 0, false, ev.err
+			}
+			return 0, false, errors.New("adaptermux: unexpected nil error")
+		}
+		t.mux.activeTxn.bytesRead.Add(1)
+		return ev.b, ev.wasEscaped, nil
+	case <-timer.C:
+		t.mux.activeTxn.readTimeoutTot.Add(1)
+		t.mux.markActiveReadTimeout()
+		return 0, false, fmt.Errorf("adaptermux: %w", ebuserrors.ErrTimeout)
+	case <-t.mux.ctx.Done():
+		t.mux.markActiveContextCancel()
+		return 0, false, fmt.Errorf("adaptermux: %w", t.mux.ctx.Err())
+	}
+}
+
+// ReadEvent returns stream events including RESETTED boundaries.
+// Satisfies transport.StreamEventReader for passive tap integration.
+//
+// Same FIFO guarantee as ReadByte — see comment there.
+func (t *activeTransport) ReadEvent() (transport.StreamEvent, error) {
+	timer := time.NewTimer(activeChanTimeout)
+	defer timer.Stop()
+
+	select {
+	case ev := <-t.mux.activeCh:
+		if ev.kind == activeEventError {
+			if errors.Is(ev.err, ebuserrors.ErrAdapterReset) {
+				return transport.StreamEvent{
+					Kind: transport.StreamEventReset,
+				}, nil
+			}
+			if ev.err != nil {
+				return transport.StreamEvent{}, ev.err
+			}
+			return transport.StreamEvent{}, errors.New("adaptermux: unexpected nil error")
+		}
+		t.mux.activeTxn.bytesRead.Add(1)
+		// F-23 (Codex bot on PR-2): propagate the per-event
+		// wasEscaped flag so StreamEventReader consumers (passive
+		// tap in adapter-direct mode, etc.) see the same
+		// provenance ReadByteWithEscape exposes.
+		return transport.StreamEvent{
+			Kind:       transport.StreamEventByte,
+			Byte:       ev.b,
+			WasEscaped: ev.wasEscaped,
+		}, nil
+	case <-timer.C:
+		t.mux.activeTxn.readTimeoutTot.Add(1)
+		t.mux.markActiveReadTimeout()
+		return transport.StreamEvent{}, fmt.Errorf("adaptermux: %w", ebuserrors.ErrTimeout)
+	case <-t.mux.ctx.Done():
+		t.mux.markActiveContextCancel()
+		return transport.StreamEvent{}, fmt.Errorf("adaptermux: %w", t.mux.ctx.Err())
+	}
+}
+
+// Write sends bytes to the adapter through the multiplexer's sendLoop.
+// The gateway must hold bus ownership (via StartArbitration) before
+// calling Write.
+//
+// AM5: ownership of a healthy transaction is released by the wire phase
+// tracker (SYN boundary). A failed write releases it here at once (issue
+// #1401, markActiveWriteError); MaxOwnershipDuration is only the last-resort
+// guard. The caller (bus.Send pipeline) handles retry/abort on error.
+//
+// Each byte goes through doSend/sendLoop which records echo expectations
+// and tracks ownership per byte. bus.sendRawWithEcho calls Write with
+// 1 byte at a time, so there is no batching benefit from bypassing
+// sendLoop — and the sendLoop path provides proper ownership tracking.
+func (t *activeTransport) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	for i, b := range p {
+		// F-NEW-28 (2026-05-21): consume the one-shot structural
+		// signal flag. Swap-to-false so a single Signal applies to
+		// exactly one Write — if the caller passes a multi-byte slice
+		// after a Signal, ONLY the first byte is tagged structural
+		// (the contract per transport.StructuralWriteSignaler doc:
+		// "Signal IMMEDIATELY before Write, at most once per Write").
+		// bus.go's sendRawWithEcho always Writes single-byte slices,
+		// so the multi-byte caveat is purely defensive.
+		structural := t.nextWriteIsStructuralSyn.Swap(false)
+		result := make(chan error, 1)
+		select {
+		case t.mux.activeSendCh <- sendRequest{
+			sessionID:  gatewaySessionID,
+			data:       b,
+			structural: structural,
+			result:     result,
+		}:
+		case <-t.mux.ctx.Done():
+			return i, fmt.Errorf("adaptermux: %w", t.mux.ctx.Err())
+		}
+
+		select {
+		case err := <-result:
+			if err != nil {
+				t.mux.activeTxn.writeErrTotal.Add(1)
+				t.mux.markActiveWriteError()
+				return i, err
+			}
+			t.mux.activeTxn.bytesWritten.Add(1)
+		case <-t.mux.ctx.Done():
+			t.mux.markActiveContextCancel()
+			return i, fmt.Errorf("adaptermux: %w", t.mux.ctx.Err())
+		}
+	}
+	return len(p), nil
+}
+
+// Close shuts down the multiplexer.
+func (t *activeTransport) Close() error {
+	return t.mux.Close()
+}
+
+// StartArbitration requests bus ownership for the gateway.
+// Blocks until the request is granted at a SYN boundary or the
+// context is cancelled.
+//
+// Reconnect safety: during adapter reconnect, readLoop is blocked in
+// reconnect() and cannot process SYN boundaries. However, reconnect()
+// calls arb.failAllPending() BEFORE entering the reconnection backoff
+// loop (mux.go line ~344), which sends startResult{granted:false} on
+// the notify channel. This select therefore unblocks promptly on
+// disconnect — pending START requests do not hang for the duration of
+// the reconnection backoff.
+func (t *activeTransport) StartArbitration(initiator byte) error {
+	// Submit the gateway bid to the same next-SYN window as external bids.
+	ch := t.mux.requestStartForSession(gatewaySessionID, initiator)
+
+	select {
+	case result := <-ch:
+		if !result.granted {
+			if result.err != nil {
+				return result.err
+			}
+			return fmt.Errorf("adaptermux: arbitration lost to 0x%02X: %w", result.initiator, ebuserrors.ErrBusCollision)
+		}
+		return nil
+	case <-t.mux.ctx.Done():
+		t.mux.arb.cancelStart(gatewaySessionID)
+		return fmt.Errorf("adaptermux: %w", t.mux.ctx.Err())
+	}
+}
+
+// RequestInfo returns cached INFO data for the given ID.
+// Delegates to the mux-level cache (populated at connect time) instead
+// of querying the upstream transport, avoiding readMu contention with
+// the readLoop.
+func (t *activeTransport) RequestInfo(id transport.AdapterInfoID) ([]byte, error) {
+	return t.mux.CachedInfo(id)
+}
+
+// ArbitrationSendsSource reports whether the upstream adapter's START
+// arbitration already places the source byte on the wire.
+// Delegates to the unified mux method (true for ENH/ENS) for bus.sendTransaction.
+func (t *activeTransport) ArbitrationSendsSource() bool {
+	return t.mux.arbitrationSendsSource()
+}
+
+// BytesAreUnescaped reports that the active path is logical in both
+// directions, which is the single contract protocol.Bus derives from
+// transport.EscapeAware:
+//
+//   - receive: the upstream ENH/ENS transport decodes wire-level escape
+//     sequences ({0xA9, 0x01} → 0xAA, {0xA9, 0x00} → 0xA9) before the
+//     bytes reach activeCh, with WasEscaped provenance;
+//   - write: the mux encodes each logical payload 0xA9/0xAA into its raw
+//     SEND symbols and verifies every symbol (issue #1003). ENH/ENS SEND
+//     transmits one raw symbol per request; the adapter does not escape.
+//
+// The two directions are determined independently (activeReadsAreLogical,
+// activeWritesAreLogical in raw_symbols.go); write encoding is not derived
+// from the receive flag. When either direction is not logical the path
+// reports false, protocol.Bus escapes and unescapes itself, and the mux
+// passes its writes through unchanged.
+func (t *activeTransport) BytesAreUnescaped() bool {
+	return t.mux.activePathIsLogical()
+}
+
+// SignalNextWriteIsStructuralSyn implements
+// transport.StructuralWriteSignaler (F-NEW-28, 2026-05-21). Marks the
+// next Write call on this transport as a structural SymbolSyn
+// (end-of-message terminator) write. The flag is one-shot — consumed
+// by the next Write and reset to "payload" afterwards.
+//
+// Called by bus.go's sendRawWithEcho immediately before writing a
+// structural SymbolSyn (expectRawSyn=true). The flag flows through
+// activeSendCh's sendRequest.structural field into the gateway echo
+// tracker's expectedStructural slice, where the mux's
+// SYN-suppression predicate consults it to distinguish a pending
+// structural-terminator expected echo from a pending payload-0xAA
+// expected echo.
+//
+// See transport.StructuralWriteSignaler doc for the full contract.
+func (t *activeTransport) SignalNextWriteIsStructuralSyn() {
+	t.nextWriteIsStructuralSyn.Store(true)
+}

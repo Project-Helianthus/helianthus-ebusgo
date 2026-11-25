@@ -1,0 +1,31 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27ReportEncodingRoundTripsAndRefusesCorruption/descriptor-padding",
+  "input": {
+    "bytes": "4c5748520101000201000000000000000300000000000000050000000000000007000000000000000b000000000000000000000000000000501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e465059fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb017f000000000000980000000000000002000000000000000010000000000000",
+    "qualifiers": {
+      "decoder_operand": "bytes",
+      "decoder_operand_length": 152,
+      "offset": 121
+    },
+    "clock": {},
+    "state": {
+      "encoded_original_hex": "4c5748520101000201000000000000000300000000000000050000000000000007000000000000000b000000000000000000000000000000501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e465059fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb0100000000000000980000000000000002000000000000000010000000000000",
+      "xor": 127
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "localworkerhost: malformed or unexpected report",
+        "is_report": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

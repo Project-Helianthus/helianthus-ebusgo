@@ -1,0 +1,55 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestPassiveWatchKeyFromEventMatchesB524SchedulerKey",
+  "input": {
+    "bytes": "060003011c00020203011c00aa55",
+    "qualifiers": {},
+    "clock": {},
+    "state": {
+      "events": [
+        {
+          "has_request": true,
+          "name": "read",
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "10",
+            "target": "15"
+          }
+        },
+        {
+          "has_request": true,
+          "name": "write",
+          "request": {
+            "data": "020203011c00aa55",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "10",
+            "target": "15"
+          }
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "canonical": "b524:15:06:03:01:001c",
+        "name": "read",
+        "ok": true
+      },
+      {
+        "canonical": "b524:15:02:03:01:001c",
+        "name": "write",
+        "ok": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

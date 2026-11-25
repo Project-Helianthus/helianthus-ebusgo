@@ -1,0 +1,55 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27FailedLaunchConsumesItsGeneration",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "launcher_error": "aa27 launch refused"
+    },
+    "clock": {
+      "now": "1970-01-01T00:16:40Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "first_start_error": "aa27 launch refused",
+        "resources_after_failure": [
+          {
+            "closes": 1,
+            "role": 1,
+            "size": 152
+          },
+          {
+            "closes": 1,
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "second_start_error": "",
+        "slot_claimed_after_failure": false,
+        "status_after_second_start": {
+          "cancelled": 0,
+          "generation": {
+            "registration": 2,
+            "stream": 2,
+            "token": 2,
+            "worker": 2
+          },
+          "launches": 2,
+          "pending": 0,
+          "plans": 0,
+          "reason": "",
+          "state": "starting"
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

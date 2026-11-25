@@ -1,0 +1,288 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	ebuserrors "github.com/Project-Helianthus/helianthus-ebusgo/errors"
+	"github.com/Project-Helianthus/helianthus-ebusgo/transport"
+)
+
+// TransportNetworkSerial is the TransportConfig.Network value of a serial
+// adapter device; Address then carries the device path. It matches
+// adaptermux.NetworkSerial.
+const TransportNetworkSerial = "serial"
+
+func normalizeTransportConfig(config TransportConfig) (TransportConfig, error) {
+	config.Protocol = canonicalTransportProtocol(config.Protocol)
+	config.Network = strings.ToLower(strings.TrimSpace(config.Network))
+	config.Address = strings.TrimSpace(config.Address)
+
+	if !strings.Contains(config.Address, "://") && !isSerialEndpointForm(config.Address) {
+		if config.Protocol == "" {
+			config.Protocol = TransportENH
+		}
+		serial, isSerial, err := normalizeSerialDeviceConfig(config)
+		if err != nil {
+			return TransportConfig{}, fmt.Errorf("invalid gateway transport endpoint: %w: %w", ebuserrors.ErrInvalidPayload, err)
+		}
+		if isSerial {
+			return serial, nil
+		}
+		if isAdapterDirectTransportProtocol(config.Protocol) &&
+			(config.Network == "" || (config.Network == "unix" && strings.Contains(config.Address, ":"))) {
+			config.Network = "tcp"
+		}
+		return config, nil
+	}
+
+	protocol, network, address, err := parseTransportEndpoint(config.Address, config.Protocol)
+	if err != nil {
+		return TransportConfig{}, fmt.Errorf("invalid gateway transport endpoint: %w: %w", ebuserrors.ErrInvalidPayload, err)
+	}
+	config.Protocol = protocol
+	config.Network = network
+	config.Address = address
+	return config, nil
+}
+
+// normalizeSerialDeviceConfig resolves a bare device path, or an explicit serial
+// network, to the adapter-direct path. Only the embedded adapter mux owns a
+// serial device, and only the enhanced protocols run over one.
+func normalizeSerialDeviceConfig(config TransportConfig) (TransportConfig, bool, error) {
+	explicit := config.Network == TransportNetworkSerial
+	if !explicit && ((config.Network != "" && config.Network != "unix") || !isSerialDevicePath(config.Address)) {
+		return config, false, nil
+	}
+	protocol, ok := serialAdapterDirectProtocol(config.Protocol)
+	if !ok {
+		if explicit {
+			return config, false, fmt.Errorf("protocol %q cannot use a serial device", config.Protocol)
+		}
+		return config, false, nil
+	}
+	if !path.IsAbs(config.Address) {
+		return config, false, fmt.Errorf("serial device path %q is not absolute", config.Address)
+	}
+	config.Protocol = protocol
+	config.Network = TransportNetworkSerial
+	return config, true, nil
+}
+
+func serialAdapterDirectProtocol(protocol TransportProtocol) (TransportProtocol, bool) {
+	switch protocol {
+	case TransportENH, TransportAdapterDirect:
+		return TransportAdapterDirect, true
+	case TransportENS, transportAdapterDirectENS:
+		return transportAdapterDirectENS, true
+	default:
+		return "", false
+	}
+}
+
+// isSerialEndpointForm recognizes the path-only URI form, such as
+// ens:/dev/ttyUSB0. A host:port address cannot match: it has no slash.
+func isSerialEndpointForm(address string) bool {
+	scheme, rest, ok := strings.Cut(address, ":")
+	return ok && isSerialCapableScheme(strings.ToLower(scheme)) && isSerialDevicePath(rest)
+}
+
+func isSerialCapableScheme(scheme string) bool {
+	switch scheme {
+	case "enh", "ens", "adapter-direct", "adapter-direct-ens":
+		return true
+	default:
+		return false
+	}
+}
+
+// isSerialDevicePath distinguishes a serial device from a Unix socket: any path
+// under /dev/ qualifies even while its device is unplugged, any other path only
+// while it resolves to a character device.
+func isSerialDevicePath(devicePath string) bool {
+	if !path.IsAbs(devicePath) {
+		return false
+	}
+	devicePath = path.Clean(devicePath)
+	if strings.HasPrefix(devicePath, "/dev/") {
+		return true
+	}
+	info, err := os.Stat(devicePath)
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func isAdapterDirectTransportProtocol(protocol TransportProtocol) bool {
+	protocol = canonicalTransportProtocol(protocol)
+	return protocol == TransportAdapterDirect || protocol == transportAdapterDirectENS
+}
+
+func canonicalTransportProtocol(protocol TransportProtocol) TransportProtocol {
+	switch normalized := TransportProtocol(strings.ToLower(strings.TrimSpace(string(protocol)))); normalized {
+	case TransportProtocol("ebusd"):
+		return TransportEbusdTCP
+	default:
+		return normalized
+	}
+}
+
+func passiveObserveFirstDirectAdapterEndpoint(network, address string) bool {
+	if strings.ToLower(strings.TrimSpace(network)) != "tcp" {
+		return false
+	}
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if port != "9999" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return !ip.IsLoopback()
+	}
+	// Hostname-based tcp/:9999 endpoints are the same direct-adapter class as
+	// the proven raw adapter case unless they resolve to loopback localhost.
+	return true
+}
+
+func parseTransportEndpoint(endpoint string, fallbackProtocol TransportProtocol) (TransportProtocol, string, string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", "", "", fmt.Errorf("gateway transport endpoint parse failed %q: %w", endpoint, err)
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme == "" {
+		return "", "", "", fmt.Errorf("gateway transport endpoint missing scheme %q", endpoint)
+	}
+
+	protocol := fallbackProtocol
+	switch scheme {
+	case "enh":
+		protocol = TransportENH
+	case "ens":
+		// ebusd semantics: ENS is an ENH variant (serial speed selector).
+		// On serial, ens and enh differ by speed (see the serial device
+		// branch below); on TCP/UDP endpoints they are equivalent.
+		protocol = TransportENH
+	case "udp-plain":
+		protocol = TransportUDPPlain
+	case "tcp-plain":
+		protocol = TransportTCPPlain
+	case "ebusd", "ebusd-tcp":
+		protocol = TransportEbusdTCP
+	case "tcp":
+		if protocol == "" {
+			protocol = TransportTCPPlain
+		}
+	case "unix":
+	case "adapter-direct":
+		protocol = TransportAdapterDirect
+	case "adapter-direct-ens":
+		protocol = transportAdapterDirectENS
+	default:
+		return "", "", "", fmt.Errorf("gateway transport endpoint unsupported scheme %q", scheme)
+	}
+
+	network := ""
+	address := ""
+	switch {
+	case parsed.Host != "":
+		network = "tcp"
+		if scheme == "udp-plain" {
+			network = "udp"
+		}
+		address = strings.TrimSpace(parsed.Host)
+	case parsed.Path != "" && parsed.Path != "/":
+		network = "unix"
+		address = strings.TrimSpace(parsed.Path)
+		if isSerialCapableScheme(scheme) && isSerialDevicePath(address) {
+			if parsed.RawQuery != "" || parsed.Fragment != "" {
+				return "", "", "", fmt.Errorf("gateway transport endpoint %q has a query or fragment on a serial device path", endpoint)
+			}
+			network = TransportNetworkSerial
+			protocol = TransportAdapterDirect
+			if scheme == "ens" || scheme == "adapter-direct-ens" {
+				protocol = transportAdapterDirectENS
+			}
+		}
+	default:
+		return "", "", "", fmt.Errorf("gateway transport endpoint %q missing host or unix path", endpoint)
+	}
+
+	if scheme == "tcp" && network != "tcp" {
+		return "", "", "", fmt.Errorf("gateway transport endpoint %q missing tcp host", endpoint)
+	}
+	if scheme == "udp-plain" && network != "udp" {
+		return "", "", "", fmt.Errorf("gateway transport endpoint %q missing udp host", endpoint)
+	}
+	if scheme == "tcp-plain" && network != "tcp" {
+		return "", "", "", fmt.Errorf("gateway transport endpoint %q missing tcp host", endpoint)
+	}
+	if scheme == "unix" && network != "unix" {
+		return "", "", "", fmt.Errorf("gateway transport endpoint %q missing unix path", endpoint)
+	}
+	if network == "tcp" || network == "udp" {
+		if err := validateNetworkTransportHostPort(address); err != nil {
+			return "", "", "", fmt.Errorf("gateway transport endpoint %q invalid %s host:port: %w", endpoint, network, err)
+		}
+	}
+	if protocol == "" {
+		protocol = TransportENH
+	}
+
+	return protocol, network, address, nil
+}
+
+func validateNetworkTransportHostPort(address string) error {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(host) == "" {
+		return errors.New("host is empty")
+	}
+	port, err := strconv.ParseUint(strings.TrimSpace(portText), 10, 16)
+	if err != nil || port == 0 {
+		return fmt.Errorf("port %q is not in numeric range 1..65535", portText)
+	}
+	return nil
+}
+
+func transportFromConn(protocolName TransportProtocol, conn net.Conn, readTimeout, writeTimeout time.Duration) (transport.RawTransport, error) {
+	switch canonicalTransportProtocol(protocolName) {
+	case TransportENH, "":
+		return transport.NewENHTransport(conn, readTimeout, writeTimeout), nil
+	case TransportENS:
+		return transport.NewENSTransport(conn, readTimeout, writeTimeout), nil
+	case TransportUDPPlain:
+		udpConn, ok := conn.(*net.UDPConn)
+		if !ok {
+			return nil, fmt.Errorf("gateway transport %q requires udp connection: %w", protocolName, ebuserrors.ErrInvalidPayload)
+		}
+		return transport.NewUDPPlainTransport(udpConn, readTimeout, writeTimeout), nil
+	case TransportTCPPlain:
+		return transport.NewTCPPlainTransport(conn, readTimeout, writeTimeout), nil
+	case TransportEbusdTCP:
+		return transport.NewEbusdTCPTransport(conn, readTimeout, writeTimeout), nil
+	default:
+		return nil, fmt.Errorf("gateway transport unsupported protocol %q: %w", protocolName, ebuserrors.ErrInvalidPayload)
+	}
+}
+
+func dialContext(ctx context.Context, network, address string, timeout time.Duration) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: timeout}
+	return dialer.DialContext(ctx, network, address)
+}

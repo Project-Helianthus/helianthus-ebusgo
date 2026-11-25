@@ -1,0 +1,160 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "active_passive_deduplicator",
+  "source": "active_passive_deduplicator.go",
+  "stimulus": "TestActivePassiveDeduplicator_DegradedSkipsActiveFingerprintSuppression",
+  "input": {
+    "bytes": "011122",
+    "qualifiers": {
+      "bus_events": "attempt_complete then observer_fault"
+    },
+    "clock": {
+      "base": "1970-01-01T00:00:00Z",
+      "observer_fault_offset_ns": 100000000,
+      "passive_offset_ns": 200000000
+    },
+    "state": {
+      "initial_health": "healthy: constructed degraded, then forced healthy with an empty recovery record before the first event",
+      "local_address": "31",
+      "submissions": [
+        {
+          "channel": "active",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "attempt_complete",
+          "outcome": "success",
+          "request": {
+            "data": "01",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "31",
+            "target": "08"
+          },
+          "response": {
+            "data": "1122",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "08",
+            "target": "31"
+          },
+          "submitted_offset_ns": 0
+        },
+        {
+          "channel": "active",
+          "frame_type": "unknown",
+          "has_request": false,
+          "has_response": false,
+          "kind": "observer_fault",
+          "outcome": "observer_fault",
+          "request": {},
+          "response": {},
+          "submitted_offset_ns": 100000000
+        },
+        {
+          "channel": "passive",
+          "discontinuity_reason": "",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "transaction",
+          "observed_offset_ns": 200000000,
+          "request": {
+            "data": "01",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "31",
+            "target": "08"
+          },
+          "response": {
+            "data": "1122",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "08",
+            "target": "31"
+          }
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "discontinuity_reason": "",
+        "disposition": "observability_only",
+        "epoch": 1,
+        "event": {
+          "abandon_reason": "",
+          "ack_correlation": {
+            "byte": "00",
+            "complete_request": false,
+            "correlator": "",
+            "position": ""
+          },
+          "discontinuity_reason": "",
+          "error": "",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "transaction",
+          "observed_at": "1970-01-01T00:00:00.2Z",
+          "offending_symbol": "00",
+          "offending_was_escaped": false,
+          "request": {
+            "data": "01",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "31",
+            "target": "08"
+          },
+          "response": {
+            "data": "1122",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "08",
+            "target": "31"
+          },
+          "timing": {
+            "request_end": "",
+            "request_start": "",
+            "response_end": "",
+            "response_start": "",
+            "terminal": ""
+          }
+        },
+        "event_kind": "transaction",
+        "family_policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "unknown",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "fingerprint": {
+          "outcome_class": "success",
+          "request": "3108b50901016d",
+          "response": "0831b50902112230",
+          "response_class": "value_bearing",
+          "shared_watch_key": "",
+          "source": "31",
+          "target": "08",
+          "transaction_class": "initiator_target"
+        },
+        "local_participant_inbound": false,
+        "matched_active_duplicate": false,
+        "observability_only": true,
+        "suppress_shadow": false,
+        "suppress_watch_efficiency": false,
+        "third_party_eligible": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "active_fingerprints": 0
+    }
+  }
+}

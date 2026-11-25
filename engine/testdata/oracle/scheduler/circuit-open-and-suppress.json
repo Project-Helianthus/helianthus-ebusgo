@@ -1,0 +1,130 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "semantic_read_scheduler",
+  "source": "semantic_read_scheduler.go",
+  "stimulus": "TestSemanticReadScheduler_CircuitBreaker_OpensAndSuppresses",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "failure_budget": 2,
+      "fetch_returns": "no value and the error 'read failed' on every call",
+      "half_open_probe_limit": 1,
+      "key": "k"
+    },
+    "clock": {
+      "open_cooldown_ns": 15000000000,
+      "start": "1970-01-01T00:00:00Z"
+    },
+    "state": {
+      "gets": [
+        {
+          "clock_offset_ns": 0,
+          "key": "k",
+          "max_age_ns": 0,
+          "order": 1
+        },
+        {
+          "clock_offset_ns": 0,
+          "key": "k",
+          "max_age_ns": 0,
+          "order": 2
+        },
+        {
+          "clock_offset_ns": 0,
+          "key": "k",
+          "max_age_ns": 0,
+          "order": 3
+        },
+        {
+          "clock_offset_ns": 15000000000,
+          "key": "k",
+          "max_age_ns": 0,
+          "order": 4
+        },
+        {
+          "clock_offset_ns": 15000000000,
+          "key": "k",
+          "max_age_ns": 0,
+          "order": 5
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 1,
+        "step": "failure-1"
+      },
+      {
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 2,
+        "step": "failure-2"
+      },
+      {
+        "circuit_open": true,
+        "error": "semantic read circuit breaker open: key=k retry_after=15s",
+        "fetch_calls": 2,
+        "step": "open"
+      },
+      {
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 3,
+        "step": "half-open-probe"
+      },
+      {
+        "circuit_open": true,
+        "error": "semantic read circuit breaker open: key=k retry_after=15s",
+        "fetch_calls": 3,
+        "step": "suppressed"
+      }
+    ],
+    "cache": {},
+    "observations": [
+      {
+        "suppressions": [
+          {
+            "key": "k",
+            "retry_after_ns": 15000000000,
+            "state": "open",
+            "suppressed_total": 1
+          },
+          {
+            "key": "k",
+            "retry_after_ns": 15000000000,
+            "state": "open",
+            "suppressed_total": 2
+          }
+        ],
+        "transitions": [
+          {
+            "consecutive_failures": 2,
+            "from": "closed",
+            "key": "k",
+            "to": "open"
+          },
+          {
+            "consecutive_failures": 2,
+            "from": "open",
+            "key": "k",
+            "to": "half-open"
+          },
+          {
+            "consecutive_failures": 3,
+            "from": "half-open",
+            "key": "k",
+            "to": "open"
+          }
+        ]
+      }
+    ],
+    "counters": {
+      "fetch_calls": 3
+    }
+  }
+}

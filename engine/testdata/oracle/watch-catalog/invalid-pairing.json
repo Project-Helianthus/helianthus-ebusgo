@@ -1,0 +1,26 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchDescriptorRejectsInvalidSemanticPairing",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "profile": "config",
+      "semantic_class": "state"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "watch descriptor \"b524:15:06:01:00:0005\" invalid semantic_class=state freshness_profile=config"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchDescriptorRejectsSentinelTimerB555Selector",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "canonical": "b555:15:a5:02:00:ff:03:raw:1:ff:1:03",
+      "selector": {
+        "has_slot": true,
+        "has_weekday": true,
+        "hc": "00",
+        "opcode": "a5",
+        "slot": "03",
+        "target": "15",
+        "weekday": "ff",
+        "zone": "02"
+      }
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "watch descriptor \"b555:15:a5:02:00:ff:03:raw:1:ff:1:03\" timer selectors may not use 0xff sentinel"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

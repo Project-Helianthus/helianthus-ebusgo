@@ -1,0 +1,48 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestB555WatchKeyCanonicalDisambiguatesSentinelTimerSelectors",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "sentinel_selector": {
+        "has_slot": true,
+        "has_weekday": true,
+        "hc": "00",
+        "opcode": "a5",
+        "slot": "03",
+        "target": "15",
+        "weekday": "ff",
+        "zone": "02"
+      },
+      "valid_selector": {
+        "has_slot": false,
+        "has_weekday": false,
+        "hc": "00",
+        "opcode": "a5",
+        "slot": "00",
+        "target": "15",
+        "weekday": "00",
+        "zone": "02"
+      }
+    },
+    "clock": {},
+    "state": {
+      "valid": "b555:15:a5:02:00:ff:ff"
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "aliases_valid": false,
+        "catalog_hit": false,
+        "sentinel": "b555:15:a5:02:00:ff:03:raw:1:ff:1:03"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "semantic_read_scheduler",
+  "source": "semantic_read_scheduler.go",
+  "stimulus": "TestSemanticReadScheduler_CircuitBreaker_HalfOpenSuccessResetsBudget",
+  "input": {
+    "bytes": "7a",
+    "qualifiers": {
+      "failure_budget": 2,
+      "fetch_schedule": "fail fail ok fail fail",
+      "half_open_probe_limit": 1,
+      "key": "k"
+    },
+    "clock": {
+      "advance_before_recovery_ns": 15000000000,
+      "open_cooldown_ns": 15000000000,
+      "start": "1970-01-01T00:00:00Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "circuit_open": false,
+        "error": "fail-closed",
+        "fetch_calls": 1,
+        "step": "failure-1",
+        "value": ""
+      },
+      {
+        "circuit_open": false,
+        "error": "fail-closed",
+        "fetch_calls": 2,
+        "step": "failure-2",
+        "value": ""
+      },
+      {
+        "circuit_open": true,
+        "error": "semantic read circuit breaker open: key=k retry_after=15s",
+        "fetch_calls": 2,
+        "step": "open",
+        "value": ""
+      },
+      {
+        "circuit_open": false,
+        "error": "",
+        "fetch_calls": 3,
+        "step": "half-open-recovery",
+        "value": "7a"
+      },
+      {
+        "circuit_open": false,
+        "error": "fail-after-recover",
+        "fetch_calls": 4,
+        "step": "post-recovery-failure-1",
+        "value": ""
+      },
+      {
+        "circuit_open": false,
+        "error": "fail-after-recover",
+        "fetch_calls": 5,
+        "step": "post-recovery-failure-2",
+        "value": ""
+      },
+      {
+        "circuit_open": true,
+        "error": "semantic read circuit breaker open: key=k retry_after=15s",
+        "fetch_calls": 5,
+        "step": "post-recovery-open",
+        "value": ""
+      }
+    ],
+    "cache": {},
+    "observations": [
+      {
+        "consecutive_failures": 2,
+        "from": "closed",
+        "key": "k",
+        "to": "open"
+      },
+      {
+        "consecutive_failures": 2,
+        "from": "open",
+        "key": "k",
+        "to": "half-open"
+      },
+      {
+        "consecutive_failures": 0,
+        "from": "half-open",
+        "key": "k",
+        "to": "closed"
+      },
+      {
+        "consecutive_failures": 2,
+        "from": "closed",
+        "key": "k",
+        "to": "open"
+      }
+    ],
+    "counters": {
+      "fetch_calls": 5,
+      "transitions": 4
+    }
+  }
+}
