@@ -516,24 +516,46 @@ func TestResponderPathIsUnpacedAndBounded(t *testing.T) {
 
 	t.Run("fixed_clock_emits", func(t *testing.T) {
 		base := time.Unix(0, 0)
-		session, sym, wr, st := emitAckWithClock(t, func() time.Time { return base }, false)
+		session, sym, wr, st := emitAckWithClock(t, func() time.Time { return base })
 		compareTraffic(t, loadVec(t, "emit-ack.json"), session, sym, wr, st)
 	})
 	t.Run("deadline_emits_nothing", func(t *testing.T) {
 		base := time.Unix(0, 0)
-		var n int
-		session, sym, wr, st := emitAckWithClock(t, func() time.Time {
-			n++
-			if n >= 2 {
-				return base.Add(autoSYNResponseWindow)
-			}
-			return base
-		}, true)
+		clk := base
+		m, up, s := openUpstream(t)
+		m.responder.now = func() time.Time { return clk }
+		targetAndWait(t, s, 0x08)
+		feedRaw(m, []byte{0x10, 0x08})
+		commitSlot(t, m, s, []byte{0x00, 0x01, 0x11, 0x8A})
+		plan := completeResponsePlan(t, m, s)
+		// The request is complete. Time passes before the first symbol
+		// is submitted. The advance is between those events.
+		clk = base.Add(100 * time.Millisecond)
+		m.responder.dispatch(m, plan)
+		if m.ResponderDiagnostics().Late != 1 {
+			t.Fatalf("late counter %d", m.ResponderDiagnostics().Late)
+		}
+		raw := waitSuffix(t, s, []byte{0xDC, 0x85})
+		session := trimHexPrefix(t, raw, "d088")
+		sym, wr, st := up.snapshot()
 		compareTraffic(t, loadVec(t, "late.json"), session, sym, wr, st)
+	})
+	t.Run("reset_before_submit_writes_nothing", func(t *testing.T) {
+		m, up, s := openUpstream(t)
+		targetAndWait(t, s, 0x08)
+		feedRaw(m, []byte{0x10, 0x08})
+		commitSlot(t, m, s, []byte{0x00, 0x01, 0x11, 0x8A})
+		plan := completeResponsePlan(t, m, s)
+		m.responder.endStream(m)
+		m.responder.dispatch(m, plan)
+		sym, _, _ := up.snapshot()
+		if len(sym) != 0 {
+			t.Fatalf("reset plan wrote %x", sym)
+		}
 	})
 }
 
-func emitAckWithClock(t *testing.T, now func() time.Time, late bool) (session, symbols, writes, starts []byte) {
+func emitAckWithClock(t *testing.T, now func() time.Time) (session, symbols, writes, starts []byte) {
 	t.Helper()
 	m, up, s := openUpstream(t)
 	m.responder.now = now
@@ -541,20 +563,33 @@ func emitAckWithClock(t *testing.T, now func() time.Time, late bool) (session, s
 	feedRaw(m, []byte{0x10, 0x08})
 	commitSlot(t, m, s, []byte{0x00, 0x01, 0x11, 0x8A})
 	feedRaw(m, []byte{0x07, 0x04, 0x00, 0x17})
-	if late {
-		if m.ResponderDiagnostics().Late != 1 {
-			t.Fatalf("late counter %d", m.ResponderDiagnostics().Late)
-		}
-		raw := waitSuffix(t, s, []byte{0xDC, 0x85})
-		session = trimHexPrefix(t, raw, "d088")
-	} else {
-		waitSymbols(t, up, m, 4)
-		feedRaw(m, []byte{protocol.SymbolAck})
-		raw := waitSuffix(t, s, []byte{0xDC, 0x80})
-		session = trimHexPrefix(t, raw, "d088")
-	}
+	waitSymbols(t, up, m, 4)
+	feedRaw(m, []byte{protocol.SymbolAck})
+	raw := waitSuffix(t, s, []byte{0xDC, 0x80})
+	session = trimHexPrefix(t, raw, "d088")
 	symbols, writes, starts = up.snapshot()
 	return session, symbols, writes, starts
+}
+
+// completeResponsePlan accepts the request CRC without submitting the
+// first response symbol. The caller decides when that submission runs.
+func completeResponsePlan(t *testing.T, m *Mux, s *respSess) *sendPlan {
+	t.Helper()
+	feedRaw(m, []byte{0x07, 0x04, 0x00})
+	m.sessionsMu.Lock()
+	sess := m.sessions[s.id]
+	m.sessionsMu.Unlock()
+	if sess == nil {
+		t.Fatal("session missing")
+	}
+	sess.deliverReceived(0x17)
+	m.responder.mu.Lock()
+	plan := m.responder.feedLocked(m, 0x17, true, false)
+	m.responder.mu.Unlock()
+	if plan == nil {
+		t.Fatal("completed request produced no plan")
+	}
+	return plan
 }
 
 func TestResponderIsolationNoTarget(t *testing.T) {

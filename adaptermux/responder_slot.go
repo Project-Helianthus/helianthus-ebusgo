@@ -86,6 +86,7 @@ type responder struct {
 	crcSeen         bool
 	slot            *respSlot
 	window          bool
+	windowStart     time.Time
 	foreignAckWatch bool
 	foreignAddr     byte
 	refused         [256]bool

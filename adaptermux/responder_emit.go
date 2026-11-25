@@ -52,12 +52,16 @@ func (m *Mux) noteResponderWindowSend() {
 	r.mu.Unlock()
 }
 
-// lateLocked reads the injected clock twice. The second reading is the
-// decision: a time that is not strictly before the opened slot is late,
-// and nothing is written.
+// lateLocked reports whether the first response symbol would miss the
+// AUTO-SYN slot. windowStart is the injected clock when the request's
+// last symbol was accepted; this reading is the submission time. A
+// submission that is not strictly before the opened slot is late.
+// An unset start has no wire event to measure, so it is not late.
 func (r *responder) lateLocked() bool {
-	opened := r.now()
-	return !r.now().Before(opened.Add(autoSYNResponseWindow))
+	if r.windowStart.IsZero() {
+		return false
+	}
+	return !r.now().Before(r.windowStart.Add(autoSYNResponseWindow))
 }
 
 func (r *responder) makePlanLocked(m *Mux, logical []byte, nack, i2i bool) *sendPlan {
@@ -98,12 +102,36 @@ func (r *responder) dispatch(m *Mux, plan *sendPlan) {
 	if plan == nil || len(plan.symbols) == 0 {
 		return
 	}
+	if !r.allowFirstSymbol(m, plan) {
+		return
+	}
 	if !r.writeSymbol(m, plan.symbols[0]) {
 		r.failPlan(m, plan)
 		return
 	}
 	rest := append([]byte{}, plan.symbols[1:]...)
 	go r.pace(m, plan, plan.symbols[0], rest)
+}
+
+// allowFirstSymbol is the first-symbol submission check. The plan's
+// lease is the generation and sequence captured when the request
+// completed; a reset or a newer plan in between must not write.
+// Lateness uses the clock now, against the start recorded then.
+func (r *responder) allowFirstSymbol(m *Mux, plan *sendPlan) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if plan.gen != r.generation || plan.seq != r.liveSeq {
+		return false
+	}
+	if !r.lateLocked() {
+		if plan.nack {
+			r.counters.nack++
+		}
+		return true
+	}
+	r.counters.late++
+	r.endSlotLocked(m, endLate)
+	return false
 }
 
 func (r *responder) writeSymbol(m *Mux, b byte) bool {

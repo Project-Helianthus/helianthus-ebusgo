@@ -172,17 +172,15 @@ func (r *responder) finishRequestLocked(m *Mux) *sendPlan {
 	valid := len(buf) >= 6 && protocol.CRC(buf[:len(buf)-1]) == buf[len(buf)-1]
 	r.crcSeen = true
 	r.buf = nil
+	// Last symbol of the request. The AUTO-SYN slot starts at this
+	// injected-clock reading; dispatch compares the first-symbol
+	// submission against it.
+	r.windowStart = r.now()
 	if r.slot == nil {
 		r.phase = phSkip
 		return nil
 	}
 	if !valid {
-		if r.lateLocked() {
-			r.counters.late++
-			r.endSlotLocked(m, endLate)
-			return nil
-		}
-		r.counters.nack++
 		r.window = true
 		r.phase = phEcho
 		r.slot.inFlight = true
@@ -202,11 +200,6 @@ func (r *responder) finishRequestLocked(m *Mux) *sendPlan {
 	}
 	if !r.registrationLiveLocked(r.slot) {
 		r.endSlotLocked(m, endRevoked)
-		return nil
-	}
-	if r.lateLocked() {
-		r.counters.late++
-		r.endSlotLocked(m, endLate)
 		return nil
 	}
 	logical := append([]byte{}, r.slot.committed...)
@@ -241,6 +234,9 @@ func (r *responder) onReplyLocked(m *Mux, symbol byte) *sendPlan {
 		r.counters.retransmit++
 		r.window = true
 		r.phase = phEcho
+		// The NACK reopens the slot. The first repeated symbol is
+		// measured from this symbol, not from the original request.
+		r.windowStart = r.now()
 		return r.makePlanLocked(m, tail, false, false)
 	default:
 		r.endSlotLocked(m, endBoundary)
