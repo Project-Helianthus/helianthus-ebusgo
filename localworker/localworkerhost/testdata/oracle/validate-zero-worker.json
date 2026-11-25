@@ -1,0 +1,69 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27ValidateChildVariesEveryIdentityDescriptorAndPolicyField/zero-worker",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "mutation": "zero-worker"
+    },
+    "clock": {},
+    "state": {
+      "abi": 1,
+      "environment": {
+        "GOGC": "off",
+        "GOMEMLIMIT": "64MiB"
+      },
+      "generation": {
+        "registration": 7,
+        "stream": 5,
+        "token": 11,
+        "worker": 0
+      },
+      "layout": [
+        {
+          "role": 1,
+          "size": 152
+        },
+        {
+          "role": 2,
+          "size": 4096
+        }
+      ],
+      "lease_ms": 100,
+      "observed": [
+        {
+          "fd": 3,
+          "kind": 1,
+          "size": 0
+        },
+        {
+          "fd": 4,
+          "kind": 2,
+          "size": 4096
+        }
+      ],
+      "plan_build_hex": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+      "plan_executable_hex": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+      "runtime_gc": "off",
+      "runtime_memory": "64MiB",
+      "self": {
+        "abi": 1,
+        "build_hex": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+        "executable_hex": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb"
+      }
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "localworkerhost: generation mismatch"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

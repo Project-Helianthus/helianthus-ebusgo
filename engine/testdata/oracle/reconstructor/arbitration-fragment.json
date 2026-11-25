@@ -1,0 +1,66 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "passive_transaction_reconstructor",
+  "source": "passive_transaction_reconstructor.go",
+  "stimulus": "TestPassiveReconstructor_F19b_FourByteFragment_ClassifiesAsArbitrationFragment",
+  "input": {
+    "bytes": "aaf115b524aa",
+    "qualifiers": {
+      "escaped_symbol_indices": [],
+      "fed_symbols": "aaf115b524aa",
+      "feeder": "feedPassiveSymbolsRaw",
+      "tap_events_after_stream": []
+    },
+    "clock": {
+      "start": "1970-01-01T00:00:00Z",
+      "symbol_spacing_ns": 10000000
+    },
+    "state": {
+      "local_address_snapshotter": {
+        "installed": false
+      },
+      "passive_transaction_watchdog_ns": 1000000000
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [],
+    "cache": {},
+    "observations": [
+      {
+        "abandon_reason": "arbitration_fragment",
+        "ack_correlation": {
+          "byte": "00",
+          "complete_request": false,
+          "correlator": "",
+          "position": ""
+        },
+        "discontinuity_reason": "",
+        "error": "ebus: payload does not match expected schema",
+        "frame_type": "unknown",
+        "has_request": false,
+        "has_response": false,
+        "kind": "abandoned_transaction",
+        "observed_at": "1970-01-01T00:00:00.05Z",
+        "offending_symbol": "aa",
+        "offending_was_escaped": false,
+        "request": {},
+        "response": {},
+        "timing": {
+          "request_end": "1970-01-01T00:00:00.05Z",
+          "request_start": "1970-01-01T00:00:00.01Z",
+          "response_end": "",
+          "response_start": "",
+          "terminal": "1970-01-01T00:00:00.05Z"
+        }
+      }
+    ],
+    "counters": {
+      "abandons_by_reason": {
+        "arbitration_fragment": 1
+      },
+      "invalid_src_class_skipped_total": 0,
+      "prefix_resync_skipped_total": 0
+    }
+  }
+}

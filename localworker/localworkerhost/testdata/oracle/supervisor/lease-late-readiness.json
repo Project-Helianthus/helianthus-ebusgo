@@ -1,0 +1,73 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27LeasesAdvanceStrictlyAndExpireOnInjectedTime/late readiness",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "advance_ns": 5000000000,
+      "call": "Observe"
+    },
+    "clock": {
+      "lease_interval_ns": 100000000,
+      "lease_ttl_ns": 1000000000,
+      "ready_timeout_ns": 5000000000,
+      "start": "1970-01-01T00:16:40Z"
+    },
+    "state": {
+      "report": {
+        "abi": 1,
+        "build": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+        "descriptors": [
+          {
+            "role": 1,
+            "size": 152
+          },
+          {
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "executable": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+        "generation": {
+          "registration": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        },
+        "kind": 1,
+        "sequence": 0,
+        "state": 1,
+        "tx_active": false
+      }
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "is_ready_timeout": true,
+        "observe_error": "localworkerhost: readiness was not acknowledged in time"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "status": {
+        "cancelled": 0,
+        "generation": {
+          "registration": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        },
+        "launches": 1,
+        "pending": 0,
+        "plans": 0,
+        "reason": "localworkerhost: readiness was not acknowledged in time",
+        "state": "fenced"
+      }
+    }
+  }
+}

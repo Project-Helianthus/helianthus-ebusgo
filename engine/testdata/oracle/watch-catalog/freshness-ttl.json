@@ -1,0 +1,27 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchDescriptorEffectiveFreshnessTTLUsesProfileDefault",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "canonical": "b524:15:06:01:00:0005",
+      "profile": "state_fast"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "",
+        "ttl_ns": 30000000000
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

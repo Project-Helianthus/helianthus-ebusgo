@@ -1,0 +1,103 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "active_passive_deduplicator",
+  "source": "active_passive_deduplicator.go",
+  "stimulus": "TestActivePassiveDeduplicator_B524CorrelatedReadUsesRuntimeObserverFallback",
+  "input": {
+    "bytes": "060003011c004201031c0022",
+    "qualifiers": {
+      "canonical": "b524:15:06:03:01:001c",
+      "passive_source": "10"
+    },
+    "clock": {
+      "base": "1970-01-01T00:00:00Z",
+      "passive_offset_ns": 100000000,
+      "release_offset_ns": 1351000000
+    },
+    "state": {
+      "initial_health": "healthy: constructed degraded, then forced healthy with an empty recovery record before the first event",
+      "observation_state": "active",
+      "submissions": [
+        {
+          "channel": "active",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "attempt_complete",
+          "outcome": "success",
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response": {
+            "data": "4201031c0022",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "15",
+            "target": "31"
+          },
+          "submitted_offset_ns": 0
+        },
+        {
+          "channel": "passive",
+          "discontinuity_reason": "",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "transaction",
+          "observed_offset_ns": 100000000,
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "10",
+            "target": "15"
+          },
+          "response": {
+            "data": "4201031c0022",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "15",
+            "target": "10"
+          }
+        }
+      ],
+      "watch_observer": {
+        "canonical": "b524:15:06:03:01:001c",
+        "descriptor": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "state_default",
+          "key": "b524:15:06:03:01:001c",
+          "semantic_class": "state"
+        },
+        "has_descriptor": true,
+        "state": "active"
+      }
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "correlation_policy": "request_response",
+        "direct_apply_policy": "state_default",
+        "disposition": "unmatched_third_party",
+        "effective_external_write_policy": "",
+        "family": "B524",
+        "request_intent": "read",
+        "response_class": "value_bearing",
+        "third_party_eligible": true,
+        "uses_runtime_external_write_policy": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "pending_before_release": 1,
+      "released": 1
+    }
+  }
+}

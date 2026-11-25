@@ -1,0 +1,59 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_family_policy",
+  "source": "observe_first_family_policy.go",
+  "stimulus": "TestObserveFirstFamilyPolicy_B516UsesEnergyMergeOnly",
+  "input": {
+    "bytes": "0102",
+    "qualifiers": {
+      "request": {
+        "data": "0102",
+        "primary": "b5",
+        "secondary": "16",
+        "source": "15",
+        "target": "fe"
+      }
+    },
+    "clock": {},
+    "state": {
+      "calls": [
+        {
+          "flags": {
+            "constructor": "DefaultObserveFirstFeatureFlags"
+          },
+          "observation": {
+            "has_descriptor": false,
+            "state": "catalog_miss"
+          },
+          "order": 1,
+          "request": {
+            "data": "0102",
+            "primary": "b5",
+            "secondary": "16",
+            "source": "15",
+            "target": "fe"
+          },
+          "response_class": "value_bearing",
+          "scope": "passive"
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "correlation_policy": "broadcast_selector",
+        "direct_apply_policy": "energy_merge_only",
+        "effective_external_write_policy": "",
+        "family": "B516",
+        "request_intent": "broadcast",
+        "response_class": "value_bearing",
+        "uses_runtime_external_write_policy": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

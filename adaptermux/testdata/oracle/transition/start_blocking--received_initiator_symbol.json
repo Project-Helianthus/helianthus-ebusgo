@@ -1,0 +1,74 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "adaptermux",
+  "source": "internal/adaptermux/mux.go",
+  "stimulus": "TestMuxTransitionCharacterization/start_blocking/received_initiator_symbol",
+  "input": {
+    "bytes": "10",
+    "qualifiers": {
+      "fixture": "start_blocking",
+      "input": "received_initiator_symbol",
+      "upstream": "blocking"
+    },
+    "clock": {
+      "deadline": "fires only when the input is start_deadline",
+      "timers": "held"
+    },
+    "state": {
+      "absorb": 0,
+      "bids": "",
+      "blocking_call": true,
+      "gateway_txn": false,
+      "local_losers": "",
+      "owner": "",
+      "phase": "",
+      "recovery": "",
+      "regrant_fence": false,
+      "resync_owed": 0,
+      "retired_selection": false,
+      "start": "session 1 0x31",
+      "start_blocking": true,
+      "start_response": false
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "effect_classes": [
+          "muxModelEffectPassiveSymbol",
+          "muxModelEffectSessionReceived",
+          "muxModelEffectSessionReceived"
+        ],
+        "effects": [
+          "passive: symbol 0x10",
+          "session 1: RECEIVED 0x10",
+          "session 2: RECEIVED 0x10"
+        ],
+        "state": {
+          "absorb": 0,
+          "bids": "",
+          "blocking_call": true,
+          "gateway_txn": false,
+          "local_losers": "",
+          "owner": "",
+          "phase": "",
+          "recovery": "",
+          "regrant_fence": false,
+          "resync_owed": 0,
+          "retired_selection": false,
+          "start": "session 1 0x31",
+          "start_blocking": true,
+          "start_response": false
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [
+      "passive: symbol 0x10",
+      "session 1: RECEIVED 0x10",
+      "session 2: RECEIVED 0x10"
+    ],
+    "counters": {}
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestNewWatchCatalogRejectsDuplicateKeys",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "canonical": "b509:08:0200"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "duplicate watch descriptor for \"b509:08:0200\""
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

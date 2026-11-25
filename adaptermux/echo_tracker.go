@@ -1,0 +1,718 @@
+package adaptermux
+
+import "time"
+
+// echoTracker tracks bytes sent by a session and suppresses the
+// corresponding echoes from the adapter. Each session (gateway internal
+// or external ENH client) has its own tracker.
+//
+// Design: when a session sends a byte to the adapter via SEND, the byte
+// is recorded in the expectedEchoes queue. When the adapter echoes it
+// back as ENHResReceived, the tracker matches and suppresses it from
+// that session's observer stream. Other sessions see the byte.
+//
+// Unlike the proxy's byte-level ownerObserverSeen accumulation, this
+// tracker operates on logical bytes (post-ENH-decode). No escape
+// sequences (0xA9) are stored — the ENH protocol delivers logical bytes.
+// This eliminates the proxy's escape encoding bug by design.
+const (
+	// maxPendingEchoes caps the expectedEchoes queue to prevent unbounded
+	// growth if echo matching falls behind (AM16).
+	maxPendingEchoes = 256
+
+	// maxSeenEchoes caps the seenEchoes accumulator to prevent unbounded
+	// growth between SYN boundaries (AM41).
+	maxSeenEchoes = 256
+)
+
+type echoTracker struct {
+	// expectedEchoes is a FIFO queue of bytes that we expect the adapter
+	// to echo back. Populated by recordSent(), consumed by matchEcho().
+	expectedEchoes []byte
+
+	// expectedStructural is the F-NEW-28 (2026-05-21) provenance-aware
+	// sibling of expectedEchoes. For each entry it records whether the
+	// gateway issued the corresponding write as a STRUCTURAL SymbolSyn
+	// (end-of-message terminator, expected wire echo: raw 0xAA with
+	// WasEscaped=false) or as a PAYLOAD byte (expected wire echo: the
+	// byte value with WasEscaped=true for 0xAA payload, false for
+	// non-0xAA payload).
+	//
+	// Set by recordSent's `structural` parameter, which is propagated
+	// from `sendRequest.structuralSyn` (mux.go) which in turn is set by
+	// `activeTransport.Write` consulting the one-shot
+	// `nextWriteIsStructuralSyn` flag toggled by bus.go's
+	// SignalNextWriteIsStructuralSyn() call before structural terminator
+	// writes.
+	//
+	// Used by the SYN-suppression predicate at `mux.go:2487`:
+	//
+	//   nextByte, nextStructural, hasPendingEcho :=
+	//       gatewayEcho.peekNextExpectedWithFlags()
+	//   midWriteSyn := hasPendingEcho &&
+	//       !(nextByte == protocol.SymbolSyn && nextStructural)
+	//   // "We're mid-payload-write UNLESS the pending echo is a
+	//   //  structural terminator."
+	//
+	// Closing the round-9 leak: pre-fix `midWriteSyn` was just
+	// `hasPendingEcho && nextByte != SymbolSyn`, which falsely treated a
+	// payload-0xAA expected echo as a structural-SYN expected echo,
+	// failing to suppress wire AUTO-SYNs that landed in echo position.
+	// With this flag the predicate distinguishes the two cases and the
+	// suppression fires correctly for payload-0xAA writes.
+	//
+	// CONDITIONAL LOCKSTEP INVARIANT (mirror of expectedWriteTimes):
+	//   `len(expectedStructural) == 0` OR
+	//   `len(expectedStructural) == len(expectedEchoes)`
+	//
+	// Unlike expectedWriteTimes (gated on v8 mode), expectedStructural
+	// MUST stay in PERFECT length lockstep with expectedEchoes at all
+	// times — the SYN-suppression predicate uses it on every wire SYN
+	// regardless of v8 mode. The recordSent path always appends to
+	// BOTH slices; matchEcho / rollbackSent / overflow-reset all
+	// maintain the lockstep.
+	expectedStructural []bool
+
+	// preOverflowStructural is the lockstep snapshot of
+	// expectedStructural taken at overflow-reset time, mirroring
+	// preOverflowEchoes / preOverflowWriteTimes. rollbackSent restores
+	// the structural flags alongside the byte values so the post-rollback
+	// queue is bit-identical to the pre-write state. nil iff the most
+	// recent recordSent did not trigger an overflow reset.
+	preOverflowStructural []bool
+
+	// expectedWriteTimes is a FIFO queue of wall-clock times when each
+	// byte in expectedEchoes was recorded. Phase 3 Step B3.6d wires
+	// this to compute echo RTT for the v8 classifier's L_rtt EMA.
+	//
+	// CONDITIONAL LOCKSTEP INVARIANT:
+	//   `len(expectedWriteTimes) == 0` OR
+	//   `len(expectedWriteTimes) == len(expectedEchoes)`
+	//
+	// This relaxation is what restores the ModeOff zero-overhead
+	// contract (Codex round-1 MAJOR on PR #646). When the v8
+	// classifier is off, the gateway doSend site calls the legacy
+	// `recordSent(data)` which appends ONLY to expectedEchoes —
+	// expectedWriteTimes stays empty and no time.Time slot is
+	// allocated per byte. When v8 is on, the doSend site calls
+	// `recordSentWithTime(data, time.Now())` and both queues stay
+	// in PERFECT length lockstep through every operation (append,
+	// pop, rollback, reset, flushOnSYN, markRequestStart, overflow
+	// snapshot/restore).
+	//
+	// Because the v8 mode is immutable per Mux instance, a single
+	// tracker lifetime exercises only one path; the conditional
+	// invariant is monotonic — once expectedWriteTimes is populated
+	// it never drops to a partial-coverage state where some entries
+	// are missing timestamps. The mismatch / flushOnSYN /
+	// markRequestStart / reset paths clear BOTH queues uniformly
+	// via `[:0]`, which is idempotent on the empty case.
+	//
+	// matchEchoWithTime pops from expectedWriteTimes only when it is
+	// non-empty; the legacy recordSent path therefore reports
+	// hasWriteAt=false for every match, preventing accidental RTT
+	// emission from untimestamped writes.
+	expectedWriteTimes []time.Time
+
+	// seenEchoes accumulates matched echo bytes since the last SYN
+	// boundary. Used for observer frame assembly.
+	seenEchoes []byte
+
+	// atRequestStart tracks whether the next echo sequence begins a new
+	// request (includes initiator byte in observer frames).
+	atRequestStart bool
+
+	// Stats.
+	totalSuppressed uint64
+	totalWritten    uint64
+	totalMismatches uint64
+
+	// totalOverflowResets counts how many times recordSent reset the
+	// expectedEchoes queue because it would have exceeded
+	// maxPendingEchoes. Pre-P10.2 the queue silently dropped its oldest
+	// entry on overflow (FIFO); under sustained mid-write SYN noise
+	// (P10.2 keeps the queue across suppressed SYNs) that silent drop
+	// would desync subsequent matchEcho calls — every comparison would
+	// be against a wrong head, producing a cascading echo_mismatch
+	// storm hard to diagnose. Reset semantics make the failure noisy
+	// (next received byte won't match an empty queue → echoMatchNone)
+	// and operator-visible via this counter (P10.2.1).
+	totalOverflowResets uint64
+
+	// preOverflowEchoes captures the queue contents IMMEDIATELY BEFORE
+	// the most recent overflow-reset-triggering recordSent call.
+	// rollbackSent restores from this snapshot to guarantee the cap
+	// behavior is transactional with the adapter Write that follows
+	// recordSent (Codex PR #603 P2). nil if the most recent recordSent
+	// did NOT trigger an overflow reset.
+	//
+	// Invariant: at most one snapshot is retained; subsequent successful
+	// recordSent calls (no overflow) clear it. This matches the doSend
+	// call sequence (recordSent → Write → maybe rollbackSent) where the
+	// snapshot is only valid for the duration of a single doSend.
+	preOverflowEchoes []byte
+
+	// preOverflowWriteTimes is the timestamped sibling of
+	// preOverflowEchoes (Codex round-1 MEDIUM #1 on PR #646). When
+	// recordSentWithTime triggers an overflow reset, BOTH queues
+	// are snapshotted before the reset so rollbackSent restores the
+	// original write-times — not a placeholder array of zeros that
+	// silently disables L_rtt sampling for the 256 pre-overflow
+	// bytes. nil iff the most recent recordSent did not trigger an
+	// overflow reset OR was the legacy (no-time) path. Lifecycle
+	// matches preOverflowEchoes one-to-one: cleared on subsequent
+	// successful append, on matchEcho commit, on flushOnSYN, on
+	// markRequestStart, and on reset.
+	preOverflowWriteTimes []time.Time
+
+	// queueJustDrained (batch-26 round-7 — Attack 3 closure) marks the
+	// brief inter-write window between the gateway's matchEcho
+	// consumption of echo K and the sendLoop's recordSent of byte K+1.
+	// During that window expectedEchoes is empty (peekNextExpected
+	// returns hasPending=false), so the peek-based P10.2 gate cannot
+	// suppress a wire SYN even when one CANNOT be a legitimate
+	// terminator (the gateway is mid-frame between two body writes,
+	// not at end-of-message).
+	//
+	// Set true by matchEcho when a non-SYN match transitions the queue
+	// from len==1 to len==0 (the typical "echo of body byte K consumed,
+	// next write K+1 still pending" shape). Cleared:
+	//   - by recordSent: a new write means we are no longer between
+	//     writes; the queue is armed again.
+	//   - by markRequestStart: a fresh transaction boundary invalidates
+	//     prior inter-write state.
+	//   - by flushOnSYN: a wire SYN observed legitimately closing the
+	//     txn (terminator gate fired); the flag's lifetime ends with
+	//     the txn.
+	//   - by matchEcho when consuming a SymbolSyn (terminator echo); the
+	//     gateway just observed legitimate end-of-frame, no longer
+	//     between body writes.
+	//
+	// The flag is bounded by recordSent / markRequestStart / flushOnSYN
+	// — it CANNOT carry over to a new transaction. This bounding is the
+	// key distinction from the round-6 bytesDeliveredToActive approach
+	// (which was cleared only by recordGatewayGrant and thus leaked
+	// across txn boundaries → over-suppression of legitimate echoes →
+	// throughput collapse, batch-25 revert).
+	queueJustDrained bool
+}
+
+// newEchoTracker creates a fresh echo tracker.
+func newEchoTracker() *echoTracker {
+	return &echoTracker{
+		expectedEchoes: make([]byte, 0, 32),
+		seenEchoes:     make([]byte, 0, 32),
+	}
+}
+
+// recordSent records a byte that the session is sending to the adapter.
+// We expect the adapter to echo this byte back as ENHResReceived.
+//
+// Overflow handling (P10.2.1 — replaces the AM16 silent FIFO drop):
+// at the cap (maxPendingEchoes=256) the queue is RESET, NOT shifted.
+// FIFO drop preserved length but silently rotated the head, which
+// post-P10.2 (mid-write SYN now keeps the queue rather than flushing
+// it on SYN) would desynchronize subsequent matchEcho calls — every
+// comparison would be against the wrong head, producing a cascading
+// echo_mismatch storm hard to diagnose. Reset semantics make the
+// failure noisy (echoMatchNone on the next byte; bus.Send will see
+// the lost-echo timeout and retry the txn) and the
+// `totalOverflowResets` counter exposes the regression for
+// operators. Real eBUS frames are <30 bytes; reaching 256 implies a
+// pathological condition (TCP backpressure, paused readLoop, runaway
+// gateway write loop) where loud failure is preferable to drift.
+//
+// Codex PR #603 P2 follow-up: the reset is now TRANSACTIONAL with the
+// adapter Write that follows in doSend. preOverflowEchoes snapshots
+// the prior queue so rollbackSent (called when Write fails) can
+// restore the 256 prior expectations and revert the counter
+// increment. Without this, a Write-fails-at-cap path would lose all
+// prior echo expectations even though the adapter never accepted the
+// new byte — subsequent real echoes would all return echoMatchNone.
+func (t *echoTracker) recordSent(data byte) {
+	t.recordSentInternal(data, false, time.Time{}, false)
+}
+
+// recordSentStructural records a byte with the F-NEW-28 structural
+// provenance flag. Called by the sendLoop when bus.go signalled a
+// structural SymbolSyn (terminator) write via
+// `SignalNextWriteIsStructuralSyn`. Distinct from a payload write of
+// the same byte value because the gateway's SYN-suppression predicate
+// at `mux.go:2487` distinguishes the two cases.
+//
+// Legacy path (no v8 time tracking) for the rare external-session
+// terminator writes. v8-on sites go through recordSentWithTime which
+// also takes the structural flag.
+func (t *echoTracker) recordSentStructural(data byte, structural bool) {
+	t.recordSentInternal(data, structural, time.Time{}, false)
+}
+
+// recordSentWithTime — removed in F-NEW-28 (2026-05-21). The
+// time-tracking sendLoop callers were updated to
+// recordSentWithTimeStructural which threads the structural-provenance
+// flag through. Callers that don't need the structural flag pass
+// `structural=false`. Kept the comment for archaeology: time-tracking
+// variant of recordSent for v8 RTT sampling, Phase 3 Step B3.6d.
+
+// recordSentWithTimeStructural is the F-NEW-28 (2026-05-21) variant
+// that accepts both the v8 time-tracking writeAt AND the structural
+// provenance flag. Called by the sendLoop when bus.go signalled a
+// structural SymbolSyn write via SignalNextWriteIsStructuralSyn().
+// `structural=true` marks this byte as a structural terminator (raw
+// 0xAA expected echo); `structural=false` marks it as payload
+// (including payload-0xAA where the expected echo is logical 0xAA
+// with WasEscaped=true).
+func (t *echoTracker) recordSentWithTimeStructural(data byte, writeAt time.Time, structural bool) {
+	t.recordSentInternal(data, structural, writeAt, true)
+}
+
+// recordSentInternal is the single implementation that backs all
+// recordSent* variants. F-NEW-28 (2026-05-21): consolidates the four
+// combinations of {legacy/with-time} × {payload/structural} through
+// one path so the conditional-lockstep invariants for the three
+// queues (expectedEchoes, expectedStructural, expectedWriteTimes)
+// stay consistent. Caller-visible variants:
+//
+//   - recordSent(b)                                — payload, legacy
+//   - recordSentStructural(b, structural)          — payload-or-structural, legacy
+//   - recordSentWithTime(b, t)                     — payload, v8
+//   - recordSentWithTimeStructural(b, t, structural) — payload-or-structural, v8
+//
+// The withTime parameter gates expectedWriteTimes maintenance:
+// false → leave that slice untouched (legacy zero-overhead path),
+// true → keep it length-locked to expectedEchoes.
+// expectedStructural is ALWAYS length-locked (no gating) — the
+// SYN-suppression predicate uses it regardless of v8 mode.
+func (t *echoTracker) recordSentInternal(data byte, structural bool, writeAt time.Time, withTime bool) {
+	// batch-26 round-7: any write means we are definitely no longer
+	// between writes. Clear queueJustDrained BEFORE arming the queue
+	// so the sentinel reflects exactly the inter-write window.
+	t.queueJustDrained = false
+	if len(t.expectedEchoes) >= maxPendingEchoes {
+		t.preOverflowEchoes = make([]byte, len(t.expectedEchoes))
+		copy(t.preOverflowEchoes, t.expectedEchoes)
+		t.preOverflowStructural = make([]bool, len(t.expectedStructural))
+		copy(t.preOverflowStructural, t.expectedStructural)
+		if withTime {
+			t.preOverflowWriteTimes = make([]time.Time, len(t.expectedWriteTimes))
+			copy(t.preOverflowWriteTimes, t.expectedWriteTimes)
+		} else {
+			t.preOverflowWriteTimes = nil
+		}
+		t.expectedEchoes = t.expectedEchoes[:0]
+		t.expectedStructural = t.expectedStructural[:0]
+		t.expectedWriteTimes = t.expectedWriteTimes[:0]
+		t.totalOverflowResets++
+	} else {
+		// Successful append without overflow: clear any stale
+		// snapshot from a prior overflow that was never rolled back.
+		t.preOverflowEchoes = nil
+		t.preOverflowStructural = nil
+		t.preOverflowWriteTimes = nil
+	}
+	t.expectedEchoes = append(t.expectedEchoes, data)
+	t.expectedStructural = append(t.expectedStructural, structural)
+	if withTime {
+		t.expectedWriteTimes = append(t.expectedWriteTimes, writeAt)
+	}
+	t.totalWritten++
+}
+
+// rollbackSent removes the last recorded sent byte (e.g., on SEND error).
+//
+// Codex PR #603 P2 follow-up: when the prior recordSent triggered an
+// overflow reset, rollbackSent restores the pre-overflow queue and
+// reverts the counter increment. The adapter Write failed so byte 257
+// never reached the wire AND the 256 prior expectations are still
+// awaiting their echoes — restore them.
+func (t *echoTracker) rollbackSent() {
+	if t.preOverflowEchoes != nil {
+		// Overflow path: restore prior 256 + drop counter increment.
+		// The new byte was appended after the reset; it never reached
+		// the adapter, so we fully revert.
+		t.expectedEchoes = t.preOverflowEchoes
+		t.preOverflowEchoes = nil
+		if t.totalOverflowResets > 0 {
+			t.totalOverflowResets--
+		}
+		// F-NEW-28: restore the structural-flag snapshot in lockstep
+		// with the byte values. preOverflowStructural is always set
+		// alongside preOverflowEchoes by recordSentInternal, so a
+		// nil-check here is defensive.
+		if t.preOverflowStructural != nil {
+			t.expectedStructural = t.preOverflowStructural
+			t.preOverflowStructural = nil
+		} else {
+			t.expectedStructural = t.expectedStructural[:0]
+		}
+		// Codex round-1 MEDIUM #1 on PR #646: restore the ORIGINAL
+		// write-times from the snapshot so the rolled-back bytes
+		// remain eligible for L_rtt sampling. If the snapshot is
+		// nil (legacy recordSent path — no timestamps were ever
+		// captured), expectedWriteTimes stays empty, matching the
+		// conditional lockstep invariant.
+		if t.preOverflowWriteTimes != nil {
+			t.expectedWriteTimes = t.preOverflowWriteTimes
+			t.preOverflowWriteTimes = nil
+		} else {
+			t.expectedWriteTimes = t.expectedWriteTimes[:0]
+		}
+		return
+	}
+	if len(t.expectedEchoes) > 0 {
+		t.expectedEchoes = t.expectedEchoes[:len(t.expectedEchoes)-1]
+		// F-NEW-28: lockstep pop of the structural-flag slice.
+		// expectedStructural is always length-matched to
+		// expectedEchoes (no gating), so this pop is unconditional
+		// after the length check above.
+		if len(t.expectedStructural) > 0 {
+			t.expectedStructural = t.expectedStructural[:len(t.expectedStructural)-1]
+		}
+		// Conditional lockstep: pop the parallel timestamp slot
+		// only when the queues are length-matched. The empty-times
+		// case (legacy recordSent) leaves nothing to pop.
+		if len(t.expectedWriteTimes) > 0 {
+			t.expectedWriteTimes = t.expectedWriteTimes[:len(t.expectedWriteTimes)-1]
+		}
+	}
+}
+
+// echoMatchResult describes the outcome of matching a received byte.
+type echoMatchResult uint8
+
+const (
+	// echoMatchNone means the byte is not an echo of this session's
+	// sent data. Deliver to this session as observer traffic.
+	echoMatchNone echoMatchResult = iota
+
+	// echoMatchSuppressed means the byte is an echo of this session's
+	// sent data. Suppress from this session's observer stream.
+	echoMatchSuppressed
+
+	// echoMatchFlushed means a mismatch was detected. Previously matched
+	// echo bytes have been flushed (returned as observer frames) and the
+	// current byte should be delivered normally.
+	echoMatchFlushed
+)
+
+// matchEcho checks if a received byte matches the next expected echo.
+//
+// receivedWasEscaped is the F-23 provenance flag — true means the byte
+// was escape-decoded from wire `A9 01` (logical 0xAA-as-payload),
+// distinguishing it from a raw wire SYN (`AA` with wasEscaped=false).
+// Used only for queueJustDrained classification: an escape-decoded
+// 0xAA echo is a body byte (sentinel set), a raw 0xAA is a terminator
+// (sentinel cleared).
+//
+// Returns:
+//   - echoMatchSuppressed: byte is this session's echo, suppress it
+//   - echoMatchNone: no echo expected, byte is third-party traffic
+//   - echoMatchFlushed: mismatch detected, accumulated echoes flushed
+//
+// flushedBytes contains any accumulated echo bytes that should be
+// delivered as observer frames before the current byte.
+func (t *echoTracker) matchEcho(received byte, receivedWasEscaped bool) (result echoMatchResult, flushedBytes []byte) {
+	res, fb, _, _ := t.matchEchoWithTime(received, receivedWasEscaped)
+	return res, fb
+}
+
+// matchEchoWithTime is the v8-aware variant of matchEcho. In
+// addition to the (result, flushedBytes) return, it surfaces the
+// writeAt timestamp of the matched byte (the time.Time passed to
+// recordSentWithTime when the byte was queued). Phase 3 Step B3.6d.
+//
+// hasWriteAt is true iff the consumed byte was queued with a
+// non-zero writeAt (i.e. via recordSentWithTime, not the legacy
+// recordSent path). When false, writeAt is zero and the caller
+// MUST NOT compute RTT or call pacer.RecordEcho — the timing
+// information is unrecoverable for that byte.
+//
+// The caller (mux.go's match-echo site) uses this signal to feed
+// the v8 classifier's L_rtt EMA only on validly-timestamped
+// matches; legacy paths and overflow-rollback paths (which lose
+// timing) are correctly suppressed.
+func (t *echoTracker) matchEchoWithTime(received byte, receivedWasEscaped bool) (result echoMatchResult, flushedBytes []byte, writeAt time.Time, hasWriteAt bool) {
+	if len(t.expectedEchoes) == 0 {
+		return echoMatchNone, nil, time.Time{}, false
+	}
+
+	// Codex PR #603 P2 invariant: any matchEcho commits the prior
+	// recordSent (the adapter actually replied to it), so the
+	// preOverflowEchoes snapshot is no longer eligible for rollback.
+	t.preOverflowEchoes = nil
+	t.preOverflowWriteTimes = nil
+
+	if received == t.expectedEchoes[0] {
+		// Phase 3 Step B3.6d: pop the corresponding writeAt from the
+		// parallel queue and capture it for the caller. Stays in
+		// lockstep with expectedEchoes — invariant maintained by
+		// recordSentWithTime / rollbackSent / reset / flushOnSYN /
+		// markRequestStart all updating both queues together.
+		if len(t.expectedWriteTimes) > 0 {
+			writeAt = t.expectedWriteTimes[0]
+			t.expectedWriteTimes = t.expectedWriteTimes[1:]
+			hasWriteAt = !writeAt.IsZero()
+		}
+		// F-NEW-28: pop the structural-flag head in lockstep with the
+		// byte queue. Always length-locked (no v8 gating), so this
+		// pop is unconditional once the head match succeeds.
+		if len(t.expectedStructural) > 0 {
+			t.expectedStructural = t.expectedStructural[1:]
+		}
+		// Match: consume from expected, accumulate in seen.
+		preLen := len(t.expectedEchoes)
+		t.expectedEchoes = t.expectedEchoes[1:]
+		// AM41: drop oldest if seenEchoes is at capacity.
+		if len(t.seenEchoes) >= maxSeenEchoes {
+			t.seenEchoes = t.seenEchoes[1:]
+		}
+		t.seenEchoes = append(t.seenEchoes, received)
+		t.totalSuppressed++
+		// batch-26 round-7 — Attack 3 closure. When this match transitions
+		// the queue from non-empty to empty AND the consumed echo is NOT
+		// a terminator SYN, we have entered the inter-write window: the
+		// gateway has consumed echo K of a body byte and the sendLoop
+		// has not yet armed echo K+1. Any wire SYN in this window
+		// CANNOT be a legitimate terminator (the body is not done) and
+		// CANNOT be a mid-write race against a queue head (the queue is
+		// empty). queueJustDrained signals the mux to suppress such
+		// SYNs without needing a queue head to compare against.
+		//
+		// SymbolSyn match: a legitimate terminator echo just consumed.
+		// Clearing the flag (rather than setting it) preserves the
+		// terminator branch's ability to fire — this match is the
+		// "end of frame" signal, not "between body writes".
+		if preLen == 1 {
+			// symbolSyn = 0xAA per eBUS protocol (canonical
+			// protocol.SymbolSyn — duplicated as a literal here to keep
+			// echo_tracker import-free; the value is a wire-protocol
+			// constant and will not drift).
+			const symbolSyn byte = 0xAA
+			// batch-26 round-7 (Codex r4 P2): only a RAW wire SYN
+			// (received==0xAA AND wasEscaped=false) is a legitimate
+			// frame terminator. An escape-decoded 0xAA
+			// (received==0xAA AND wasEscaped=true) is a payload byte
+			// (or CRC) whose wire encoding was `A9 01` — semantically
+			// indistinguishable from any other body byte. Treat it as
+			// a body match → set the sentinel.
+			isRealWireSyn := received == symbolSyn && !receivedWasEscaped
+			if isRealWireSyn {
+				t.queueJustDrained = false
+			} else {
+				t.queueJustDrained = true
+			}
+		}
+		return echoMatchSuppressed, nil, writeAt, hasWriteAt
+	}
+
+	// Mismatch: flush any accumulated echoes as observer frames.
+	t.totalMismatches++
+	var flushed []byte
+	if len(t.seenEchoes) > 0 {
+		flushed = make([]byte, len(t.seenEchoes))
+		copy(flushed, t.seenEchoes)
+		t.seenEchoes = t.seenEchoes[:0]
+	}
+
+	// Clear expected echoes on mismatch — the echo sequence is broken.
+	t.expectedEchoes = t.expectedEchoes[:0]
+	t.expectedStructural = t.expectedStructural[:0]
+	t.expectedWriteTimes = t.expectedWriteTimes[:0]
+	t.atRequestStart = false
+
+	return echoMatchFlushed, flushed, time.Time{}, false
+}
+
+// flushOnSYN flushes accumulated echo bytes at a SYN boundary.
+// Returns any accumulated bytes that should be delivered as observer
+// frames (they are confirmed echoes of the owning session's traffic).
+//
+// After flush, the tracker is ready for the next request cycle.
+func (t *echoTracker) flushOnSYN() (flushedBytes []byte, wasAtStart bool) {
+	wasAtStart = t.atRequestStart
+
+	if len(t.seenEchoes) > 0 {
+		flushedBytes = make([]byte, len(t.seenEchoes))
+		copy(flushedBytes, t.seenEchoes)
+		t.seenEchoes = t.seenEchoes[:0]
+	}
+
+	// Clear expected echoes at SYN boundary.
+	t.expectedEchoes = t.expectedEchoes[:0]
+	t.expectedStructural = t.expectedStructural[:0]
+	t.expectedWriteTimes = t.expectedWriteTimes[:0]
+	// Codex PR #603 P2 invariant: a SYN boundary commits any
+	// in-flight overflow reset. preOverflowEchoes no longer eligible
+	// for rollback.
+	t.preOverflowEchoes = nil
+	t.preOverflowStructural = nil
+	t.preOverflowWriteTimes = nil
+	// batch-26 round-7: a wire SYN observed legitimately closing the
+	// txn ends the inter-write window — the gateway is between
+	// transactions now, not between body writes within one. Without
+	// this clear, the flag from the prior inter-write window would
+	// carry through to the next grant and over-suppress legitimate
+	// post-grant SYNs.
+	t.queueJustDrained = false
+
+	return flushedBytes, wasAtStart
+}
+
+// markRequestStart marks that the next echo sequence is the start
+// of a new request (used for observer frame assembly with initiator).
+func (t *echoTracker) markRequestStart() {
+	t.atRequestStart = true
+	t.seenEchoes = t.seenEchoes[:0]
+	t.expectedEchoes = t.expectedEchoes[:0]
+	t.expectedStructural = t.expectedStructural[:0]
+	t.expectedWriteTimes = t.expectedWriteTimes[:0]
+	t.totalSuppressed = 0
+	t.totalWritten = 0
+	// Codex PR #603 P2 invariant: a new request boundary invalidates
+	// any pending overflow snapshot.
+	t.preOverflowEchoes = nil
+	t.preOverflowStructural = nil
+	t.preOverflowWriteTimes = nil
+	// batch-26 round-7: a fresh transaction invalidates any inter-write
+	// flag from a prior txn. Same boundary discipline as
+	// preOverflowEchoes — never carry inter-write state across grant
+	// boundaries (the over-suppression failure mode of round-6).
+	t.queueJustDrained = false
+}
+
+// hasPendingEchoes reports whether there are expected echoes that
+// haven't been matched yet.
+func (t *echoTracker) hasPendingEchoes() bool {
+	return len(t.expectedEchoes) > 0
+}
+
+// peekNextExpected returns the byte at the head of the expected-echo
+// queue and a boolean indicating whether the queue is non-empty. Used by
+// the mux to discriminate legitimate terminator-SYN echoes (next expected
+// is a SYN that the gateway just wrote) from mid-frame SYN noise (next
+// expected is a non-SYN data byte) and from response-phase SYN noise
+// (queue empty — gateway is reading the target's response and has no
+// pending writes). Read-only; does NOT consume the queue head. P10.2.
+func (t *echoTracker) peekNextExpected() (byte, bool) {
+	if len(t.expectedEchoes) == 0 {
+		return 0, false
+	}
+	return t.expectedEchoes[0], true
+}
+
+// peekNextExpectedWithFlags returns the byte at the head of the
+// expected-echo queue, its F-NEW-28 structural-provenance flag, and a
+// boolean indicating whether the queue is non-empty.
+//
+// `structural=true` means the gateway issued the corresponding write
+// as a STRUCTURAL SymbolSyn (end-of-message terminator) — the legitimate
+// wire echo for this byte is a raw 0xAA with WasEscaped=false.
+//
+// `structural=false` means the write was a PAYLOAD byte (any value,
+// including byte=0xAA which is wire-encoded as the A9 01 escape pair
+// on ENH-class transports) — the legitimate wire echo is the byte
+// value with WasEscaped=true for 0xAA-payload, WasEscaped=false for
+// non-0xAA payload.
+//
+// Used by mux.go's SYN-suppression predicate to distinguish a
+// pending terminator-SYN expected echo from a pending payload-0xAA
+// expected echo. See echoTracker.expectedStructural field doc.
+//
+// Read-only; does NOT consume the queue head. Lockstep with
+// peekNextExpected — when the queue is non-empty, both slices have
+// length-locked entries at index 0.
+func (t *echoTracker) peekNextExpectedWithFlags() (b byte, structural bool, hasPending bool) {
+	if len(t.expectedEchoes) == 0 {
+		return 0, false, false
+	}
+	b = t.expectedEchoes[0]
+	if len(t.expectedStructural) > 0 {
+		structural = t.expectedStructural[0]
+	}
+	hasPending = true
+	return b, structural, hasPending
+}
+
+// reset clears all tracking state.
+func (t *echoTracker) reset() {
+	t.expectedEchoes = t.expectedEchoes[:0]
+	t.expectedStructural = t.expectedStructural[:0]
+	t.expectedWriteTimes = t.expectedWriteTimes[:0]
+	t.seenEchoes = t.seenEchoes[:0]
+	t.atRequestStart = false
+	t.totalSuppressed = 0
+	t.totalWritten = 0
+	t.preOverflowEchoes = nil
+	t.preOverflowStructural = nil
+	t.preOverflowWriteTimes = nil
+	t.queueJustDrained = false
+}
+
+// IsQueueJustDrained reports whether the gateway is currently in the
+// inter-write window — i.e., matchEcho consumed a non-SYN echo that
+// emptied the expectedEchoes queue, AND no subsequent recordSent /
+// flushOnSYN / markRequestStart has fired. batch-26 round-7 — the mux
+// SYN gate uses this signal to suppress wire SYNs that arrive after
+// matchEcho but before the next recordSent (Attack 3 — the leak the
+// peek-based P10.2 gate cannot see because the queue head it inspects
+// is gone).
+//
+// Exported via PascalCase even though the tracker is unexported within
+// the package so the SYN-handling site reads as a deliberate
+// inter-package contract; all other accessors on echoTracker are also
+// safe to read from the mux while holding stateMu.
+func (t *echoTracker) IsQueueJustDrained() bool {
+	return t.queueJustDrained
+}
+
+// ClearQueueJustDrained drops the inter-write sentinel without
+// touching expectedEchoes / seenEchoes / atRequestStart. The mux
+// idle-release path (IdleReleaseGrace expiry) calls this BEFORE
+// proceeding with the SYN as a legitimate idle terminator: the
+// grace timer exists precisely to break stuck transactions, so a
+// sticky queueJustDrained from a partial K/K+1 handoff must not be
+// allowed to extend ownership beyond IdleReleaseGrace.
+//
+// Codex round-7 review (defect 3, MEDIUM): without this clear, a
+// stall after consuming echo K but before recording K+1 would keep
+// queueJustDrained=true; the next wire SYN would be suppressed as
+// "between writes" and idle release would not fire until
+// MaxOwnershipDuration. Decouples the sentinel lifetime from
+// the IdleReleaseGrace contract.
+//
+// Exported (PascalCase) for the same reason as IsQueueJustDrained:
+// the mux caller treats this as an inter-file contract while still
+// holding stateMu.
+func (t *echoTracker) ClearQueueJustDrained() {
+	t.queueJustDrained = false
+}
+
+// stats returns echo tracking statistics.
+func (t *echoTracker) stats() (suppressed, mismatches uint64) {
+	return t.totalSuppressed, t.totalMismatches
+}
+
+// matchCount returns the cumulative number of echo matches consumed by
+// matchEcho for the current gateway txn. Reset on markRequestStart.
+// F-NEW-29 (2026-05-23): exposed for mux's first-byte arbitration
+// revalidation predicate.
+func (t *echoTracker) matchCount() uint64 {
+	return t.totalSuppressed
+}
+
+// writeCount returns the cumulative number of bytes the gateway has
+// issued via recordSent* since the last markRequestStart. Distinct from
+// len(expectedEchoes), which shrinks as matchEcho consumes entries.
+// F-NEW-29: exposed for mux's first-byte arbitration revalidation predicate.
+func (t *echoTracker) writeCount() uint64 {
+	return t.totalWritten
+}
+
+// overflowResets returns the number of times recordSent reset the
+// expectedEchoes queue because it was about to exceed
+// maxPendingEchoes. Non-zero means the gateway-write loop produced
+// more than 256 unacknowledged writes — a pathological condition
+// that matters as a tripwire for operator visibility (P10.2.1).
+func (t *echoTracker) overflowResets() uint64 {
+	return t.totalOverflowResets
+}

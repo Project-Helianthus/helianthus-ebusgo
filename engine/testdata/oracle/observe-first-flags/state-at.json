@@ -1,0 +1,26 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_flags",
+  "source": "observe_first_flags.go",
+  "stimulus": "TestObserveFirstFeatureFlagsStateAtCarriesMutationTimestamp",
+  "input": {
+    "bytes": "",
+    "qualifiers": {},
+    "clock": {
+      "at": "2026-03-12T12:34:56Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "state_at": "2026-03-12T12:34:56Z",
+        "state_has_timestamp": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

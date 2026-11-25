@@ -1,0 +1,98 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/classifier.go",
+  "stimulus": "TestFSM_MultipleTelegrams_StateLifecycle/enforce",
+  "input": {
+    "bytes": "10",
+    "qualifiers": {
+      "mode": "enforce",
+      "sequence": "telegram-lifecycle"
+    },
+    "clock": {
+      "at": "1970-01-01T00:00:00Z"
+    },
+    "state": {
+      "events": [
+        {
+          "escaped": false,
+          "event": "started",
+          "value": "71"
+        },
+        {
+          "escaped": false,
+          "event": "byte",
+          "value": "10"
+        },
+        {
+          "escaped": false,
+          "event": "reset",
+          "value": "00"
+        },
+        {
+          "escaped": false,
+          "event": "started",
+          "value": "10"
+        }
+      ],
+      "fsm": "idle"
+    }
+  },
+  "output": {
+    "symbols_written": [
+      "10"
+    ],
+    "decisions": [
+      {
+        "drop": false,
+        "escaped": false,
+        "event": "started",
+        "fsm_state": "PASSIVE_TRACKING",
+        "passive": true,
+        "value": "71"
+      },
+      {
+        "drop": false,
+        "escaped": false,
+        "event": "byte",
+        "fsm_state": "PASSIVE_TRACKING",
+        "passive": true,
+        "value": "10"
+      },
+      {
+        "drop": false,
+        "escaped": false,
+        "event": "reset",
+        "fsm_state": "IDLE",
+        "passive": false,
+        "value": "00"
+      },
+      {
+        "drop": false,
+        "escaped": false,
+        "event": "started",
+        "fsm_state": "PASSIVE_TRACKING",
+        "passive": true,
+        "value": "10"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "admin_dropped": 0,
+      "enforce_drops_applied_total": 0,
+      "escaped_payload_aa_total": 0,
+      "escaped_payload_esc_total": 0,
+      "fsm_drop_aa_injection_total": 0,
+      "fsm_enter_passive_total": 2,
+      "fsm_forward_total": 1,
+      "fsm_protocol_fault_total": 0,
+      "fsm_reset_total": 1,
+      "observed_admin_events_total": 0,
+      "observed_bytes_total": 4,
+      "plain_byte_total": 1,
+      "shadow_would_have_dropped": 0,
+      "wire_auto_syn_total": 0
+    }
+  }
+}

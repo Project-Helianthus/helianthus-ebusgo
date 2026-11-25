@@ -1,0 +1,102 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestB555WatchKeyCanonicalPreservesSelectorAxes",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "keys": [
+        {
+          "has_slot": false,
+          "has_weekday": false,
+          "hc": "00",
+          "opcode": "a4",
+          "slot": "00",
+          "target": "15",
+          "weekday": "00",
+          "zone": "02"
+        },
+        {
+          "has_slot": false,
+          "has_weekday": false,
+          "hc": "01",
+          "opcode": "a4",
+          "slot": "00",
+          "target": "15",
+          "weekday": "00",
+          "zone": "02"
+        },
+        {
+          "has_slot": true,
+          "has_weekday": true,
+          "hc": "00",
+          "opcode": "a5",
+          "slot": "03",
+          "target": "15",
+          "weekday": "06",
+          "zone": "02"
+        },
+        {
+          "has_slot": true,
+          "has_weekday": true,
+          "hc": "00",
+          "opcode": "a5",
+          "slot": "03",
+          "target": "15",
+          "weekday": "06",
+          "zone": "01"
+        },
+        {
+          "has_slot": true,
+          "has_weekday": true,
+          "hc": "01",
+          "opcode": "a5",
+          "slot": "03",
+          "target": "15",
+          "weekday": "06",
+          "zone": "02"
+        },
+        {
+          "has_slot": true,
+          "has_weekday": true,
+          "hc": "00",
+          "opcode": "a5",
+          "slot": "03",
+          "target": "15",
+          "weekday": "05",
+          "zone": "02"
+        },
+        {
+          "has_slot": true,
+          "has_weekday": true,
+          "hc": "00",
+          "opcode": "a5",
+          "slot": "02",
+          "target": "15",
+          "weekday": "06",
+          "zone": "02"
+        }
+      ]
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      "b555:15:a4:02:00:ff:ff",
+      "b555:15:a4:02:01:ff:ff",
+      "b555:15:a5:02:00:06:03",
+      "b555:15:a5:01:00:06:03",
+      "b555:15:a5:02:01:06:03",
+      "b555:15:a5:02:00:05:03",
+      "b555:15:a5:02:00:06:02"
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "unique": true
+    }
+  }
+}

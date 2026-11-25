@@ -1,0 +1,148 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "active_passive_deduplicator",
+  "source": "active_passive_deduplicator.go",
+  "stimulus": "TestActivePassiveDeduplicator_MatchesDelayedPassiveWithinRetention",
+  "input": {
+    "bytes": "011122",
+    "qualifiers": {
+      "local_address": "31",
+      "passive_first": false
+    },
+    "clock": {
+      "base": "1970-01-01T00:00:00Z",
+      "second_arrival_offset_ns": 1500000000
+    },
+    "state": {
+      "submissions": [
+        {
+          "channel": "active",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "attempt_complete",
+          "outcome": "success",
+          "request": {
+            "data": "01",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "31",
+            "target": "08"
+          },
+          "response": {
+            "data": "1122",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "08",
+            "target": "31"
+          },
+          "submitted_offset_ns": 0
+        },
+        {
+          "channel": "passive",
+          "discontinuity_reason": "",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "transaction",
+          "observed_offset_ns": 1500000000,
+          "request": {
+            "data": "01",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "31",
+            "target": "08"
+          },
+          "response": {
+            "data": "1122",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "08",
+            "target": "31"
+          }
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "discontinuity_reason": "",
+        "disposition": "matched_active_duplicate",
+        "epoch": 1,
+        "event": {
+          "abandon_reason": "",
+          "ack_correlation": {
+            "byte": "00",
+            "complete_request": false,
+            "correlator": "",
+            "position": ""
+          },
+          "discontinuity_reason": "",
+          "error": "",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "transaction",
+          "observed_at": "1970-01-01T00:00:01.5Z",
+          "offending_symbol": "00",
+          "offending_was_escaped": false,
+          "request": {
+            "data": "01",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "31",
+            "target": "08"
+          },
+          "response": {
+            "data": "1122",
+            "primary": "b5",
+            "secondary": "09",
+            "source": "08",
+            "target": "31"
+          },
+          "timing": {
+            "request_end": "",
+            "request_start": "",
+            "response_end": "",
+            "response_start": "",
+            "terminal": ""
+          }
+        },
+        "event_kind": "transaction",
+        "family_policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "unknown",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "fingerprint": {
+          "outcome_class": "success",
+          "request": "3108b50901016d",
+          "response": "0831b50902112230",
+          "response_class": "value_bearing",
+          "shared_watch_key": "",
+          "source": "31",
+          "target": "08",
+          "transaction_class": "initiator_target"
+        },
+        "local_participant_inbound": false,
+        "matched_active_duplicate": true,
+        "observability_only": false,
+        "suppress_shadow": true,
+        "suppress_watch_efficiency": true,
+        "third_party_eligible": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "active": 0,
+      "pending": 0
+    }
+  }
+}

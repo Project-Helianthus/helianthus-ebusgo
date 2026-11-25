@@ -1,0 +1,45 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_flags",
+  "source": "observe_first_flags.go",
+  "stimulus": "TestParseObserveFirstExternalWritePolicyAcceptsBoundedValues",
+  "input": {
+    "bytes": "",
+    "qualifiers": {},
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "",
+        "input": "invalidate_only",
+        "policy": "invalidate_only"
+      },
+      {
+        "error": "",
+        "input": "record_only",
+        "policy": "record_only"
+      },
+      {
+        "error": "",
+        "input": "record_and_invalidate",
+        "policy": "record_and_invalidate"
+      },
+      {
+        "error": "",
+        "input": "record-and-invalidate",
+        "policy": "record_and_invalidate"
+      },
+      {
+        "error": "invalid external-write-policy \"unsafe\"",
+        "input": "unsafe",
+        "policy": ""
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

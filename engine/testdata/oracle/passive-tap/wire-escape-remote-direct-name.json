@@ -1,0 +1,27 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "passive_bus_tap",
+  "source": "passive_bus_tap.go",
+  "stimulus": "TestPassiveTapDecodesWireEscapes_DifferentiatesRemoteDirectAdapterLogicalStreams/remote-direct-name",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "address_class": "remote-name",
+      "network": "tcp",
+      "protocol": "ens"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "decodes_wire_escapes": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

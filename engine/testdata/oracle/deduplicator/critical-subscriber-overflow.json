@@ -1,0 +1,126 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "active_passive_deduplicator",
+  "source": "active_passive_deduplicator.go",
+  "stimulus": "TestActivePassiveDeduplicator_CriticalSubscriberOverflowAdvancesEpoch",
+  "input": {
+    "bytes": "03",
+    "qualifiers": {
+      "frame_type": "initiator_initiator",
+      "frames": 2,
+      "subscriber_capacity": 1
+    },
+    "clock": {
+      "base": "1970-01-01T00:00:00Z",
+      "second_offset_ns": 10000000
+    },
+    "state": {
+      "initial_health": "healthy: constructed degraded, then forced healthy with an empty recovery record before the first event",
+      "local_address": "31",
+      "submissions": [
+        {
+          "channel": "passive",
+          "discontinuity_reason": "",
+          "frame_type": "initiator_initiator",
+          "has_request": true,
+          "has_response": false,
+          "kind": "master_frame",
+          "observed_offset_ns": 0,
+          "request": {
+            "data": "03",
+            "primary": "01",
+            "secondary": "02",
+            "source": "10",
+            "target": "31"
+          },
+          "response": {}
+        },
+        {
+          "channel": "passive",
+          "discontinuity_reason": "",
+          "frame_type": "initiator_initiator",
+          "has_request": true,
+          "has_response": false,
+          "kind": "master_frame",
+          "observed_offset_ns": 10000000,
+          "request": {
+            "data": "03",
+            "primary": "01",
+            "secondary": "02",
+            "source": "10",
+            "target": "31"
+          },
+          "response": {}
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "discontinuity_reason": "critical_subscriber_overflow",
+        "disposition": "discontinuity",
+        "epoch": 1,
+        "event": {
+          "abandon_reason": "",
+          "ack_correlation": {
+            "byte": "00",
+            "complete_request": false,
+            "correlator": "",
+            "position": ""
+          },
+          "discontinuity_reason": "critical_subscriber_overflow",
+          "error": "",
+          "frame_type": "unknown",
+          "has_request": false,
+          "has_response": false,
+          "kind": "discontinuity",
+          "observed_at": "1970-01-01T00:00:00.01Z",
+          "offending_symbol": "00",
+          "offending_was_escaped": false,
+          "request": {},
+          "response": {},
+          "timing": {
+            "request_end": "",
+            "request_start": "",
+            "response_end": "",
+            "response_start": "",
+            "terminal": ""
+          }
+        },
+        "event_kind": "discontinuity",
+        "family_policy": {
+          "correlation_policy": "",
+          "direct_apply_policy": "",
+          "effective_external_write_policy": "",
+          "family": "",
+          "request_intent": "",
+          "response_class": "",
+          "uses_runtime_external_write_policy": false
+        },
+        "fingerprint": {
+          "outcome_class": "",
+          "request": "",
+          "response": "",
+          "response_class": "",
+          "shared_watch_key": "",
+          "source": "00",
+          "target": "00",
+          "transaction_class": ""
+        },
+        "local_participant_inbound": false,
+        "matched_active_duplicate": false,
+        "observability_only": true,
+        "suppress_shadow": false,
+        "suppress_watch_efficiency": false,
+        "third_party_eligible": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "epoch_reset_total_delta": 1
+    }
+  }
+}

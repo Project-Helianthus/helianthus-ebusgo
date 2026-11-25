@@ -1,0 +1,60 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "semantic_read_scheduler",
+  "source": "semantic_read_scheduler.go",
+  "stimulus": "TestSemanticReadScheduler_CircuitBreaker_HalfOpenProbeLimitRespected",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "failure_budget": 1,
+      "half_open_probe_limit": 2,
+      "key": "k"
+    },
+    "clock": {
+      "advance_before_probes_ns": 10000000000,
+      "open_cooldown_ns": 10000000000,
+      "start": "1970-01-01T00:00:00Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 1,
+        "step": "initial-failure"
+      },
+      {
+        "circuit_open": true,
+        "error": "semantic read circuit breaker open: key=k retry_after=10s",
+        "fetch_calls": 1,
+        "step": "open"
+      },
+      {
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 2,
+        "step": "half-open-probe-1"
+      },
+      {
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 3,
+        "step": "half-open-probe-2"
+      },
+      {
+        "circuit_open": true,
+        "error": "semantic read circuit breaker open: key=k retry_after=10s",
+        "fetch_calls": 3,
+        "step": "post-probe"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "fetch_calls": 3
+    }
+  }
+}

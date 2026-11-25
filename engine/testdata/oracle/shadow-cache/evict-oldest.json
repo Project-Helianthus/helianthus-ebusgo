@@ -1,0 +1,112 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "shadow_cache",
+  "source": "shadow_cache.go",
+  "stimulus": "TestShadowCacheEvictsOldestEvictableEntryFirst",
+  "input": {
+    "bytes": "101112",
+    "qualifiers": {
+      "newer": "b509:08:0202",
+      "older": "b509:08:0201",
+      "pinned": "b509:08:0200"
+    },
+    "clock": {
+      "base": "1970-01-01T00:01:40Z"
+    },
+    "state": {
+      "activations": [
+        {
+          "keys": [
+            "b509:08:0200",
+            "b509:08:0201",
+            "b509:08:0202"
+          ],
+          "source": "tooling"
+        },
+        {
+          "keys": [
+            "b509:08:0200"
+          ],
+          "source": "poller"
+        }
+      ],
+      "capacity": 2,
+      "catalog_keys": [
+        "b509:08:0200",
+        "b509:08:0201",
+        "b509:08:0202"
+      ],
+      "pinned_capacity": 2,
+      "write_confirm_pinned_cap": 1,
+      "writes": [
+        {
+          "key": "b509:08:0200",
+          "observed_offset_ns": 0,
+          "order": 1,
+          "role": "pinned",
+          "source": "passive",
+          "value": "10"
+        },
+        {
+          "key": "b509:08:0201",
+          "observed_offset_ns": 1000000000,
+          "order": 2,
+          "role": "older",
+          "source": "passive",
+          "value": "11"
+        },
+        {
+          "key": "b509:08:0202",
+          "observed_offset_ns": 2000000000,
+          "order": 3,
+          "role": "newer",
+          "source": "passive",
+          "value": "12"
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [],
+    "cache": {
+      "newer": {
+        "confidence": "high_confidence",
+        "expires_at": "1970-01-01T00:02:12Z",
+        "generation": 1,
+        "invalidated_at": "",
+        "invalidation_generation": 0,
+        "invalidation_reason": "",
+        "invalidation_source": "",
+        "last_write_generation": 1,
+        "observed_at": "1970-01-01T00:01:42Z",
+        "pinned": false,
+        "present": true,
+        "source": "passive",
+        "state": "present",
+        "value": "12"
+      },
+      "older": {
+        "present": false
+      },
+      "pinned": {
+        "confidence": "high_confidence",
+        "expires_at": "1970-01-01T00:02:10Z",
+        "generation": 1,
+        "invalidated_at": "",
+        "invalidation_generation": 0,
+        "invalidation_reason": "",
+        "invalidation_source": "",
+        "last_write_generation": 1,
+        "observed_at": "1970-01-01T00:01:40Z",
+        "pinned": true,
+        "present": true,
+        "source": "passive",
+        "state": "present",
+        "value": "10"
+      }
+    },
+    "observations": [],
+    "counters": {}
+  }
+}

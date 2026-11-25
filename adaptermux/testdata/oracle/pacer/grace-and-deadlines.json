@@ -1,0 +1,71 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/pacer.go",
+  "stimulus": "TestPacer_EchoDeadlines_NormalMode/GraceBootstrap_NotTriggeredByShortIdle/BoundaryExactly30s/NoPriorHistoryIsNoOp",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "idle_ns": [
+        29000000000,
+        30000000000
+      ]
+    },
+    "clock": {
+      "t0_unix": 1000000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "after_29s_idle": {
+          "grace": false,
+          "hard_enabled": true,
+          "hard_ns": 370000000,
+          "soft_ns": 185000000
+        },
+        "at_30s_idle": {
+          "grace": true,
+          "hard_enabled": false,
+          "hard_ns": 0,
+          "soft_ns": 585000000
+        },
+        "fresh": {
+          "grace": false,
+          "hard_enabled": true,
+          "hard_ns": 400000000,
+          "soft_ns": 200000000
+        },
+        "grace_echoes": [
+          {
+            "grace": true,
+            "hard_enabled": false,
+            "hard_ns": 0,
+            "soft_ns": 574500000
+          },
+          {
+            "grace": true,
+            "hard_enabled": false,
+            "hard_ns": 0,
+            "soft_ns": 567150000
+          },
+          {
+            "grace": false,
+            "hard_enabled": true,
+            "hard_ns": 324010000,
+            "soft_ns": 162005000
+          }
+        ],
+        "no_history_grace": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "before_active_write_total": 2,
+      "grace_idle_threshold_ns": 30000000000
+    }
+  }
+}

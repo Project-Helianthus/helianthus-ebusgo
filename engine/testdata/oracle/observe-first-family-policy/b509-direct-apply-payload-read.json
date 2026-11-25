@@ -1,0 +1,59 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_family_policy",
+  "source": "observe_first_family_policy.go",
+  "stimulus": "TestObserveFirstFamilyPolicy_B509DirectApplyRequiresPayloadBearingRead",
+  "input": {
+    "bytes": "2902000e020055",
+    "qualifiers": {
+      "key": "b509:08:0200",
+      "target": "08"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "name": "header-only",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "header_only",
+          "uses_runtime_external_write_policy": false
+        }
+      },
+      {
+        "name": "value-bearing",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "state_default",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        }
+      },
+      {
+        "name": "write",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "record_and_invalidate",
+          "family": "B509",
+          "request_intent": "write",
+          "response_class": "header_only",
+          "uses_runtime_external_write_policy": true
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

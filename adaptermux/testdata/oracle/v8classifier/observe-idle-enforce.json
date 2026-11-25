@@ -1,0 +1,89 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/classifier.go",
+  "stimulus": "TestClassifier_Observe_EnforceMode_IdleStateBytesNotDropped",
+  "input": {
+    "bytes": "000102030405060708090a0b0c0d0e0f101112131415161718",
+    "qualifiers": {
+      "count": 25,
+      "kind": "byte",
+      "mode": "enforce"
+    },
+    "clock": {
+      "at": "1970-01-01T00:00:00Z"
+    },
+    "state": {
+      "fsm": "idle"
+    }
+  },
+  "output": {
+    "symbols_written": [
+      "00",
+      "01",
+      "02",
+      "03",
+      "04",
+      "05",
+      "06",
+      "07",
+      "08",
+      "09",
+      "0a",
+      "0b",
+      "0c",
+      "0d",
+      "0e",
+      "0f",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18"
+    ],
+    "decisions": [
+      {
+        "drop": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ]
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "enforce_drops_applied_total": 0,
+      "fsm_drop_aa_injection_total": 0,
+      "observed_admin_events_total": 0,
+      "observed_bytes_total": 25,
+      "shadow_would_have_dropped": 0
+    }
+  }
+}

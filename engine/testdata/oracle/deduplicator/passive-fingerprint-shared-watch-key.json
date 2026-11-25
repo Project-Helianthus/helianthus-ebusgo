@@ -1,0 +1,124 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "active_passive_deduplicator",
+  "source": "active_passive_deduplicator.go",
+  "stimulus": "TestActivePassiveDeduplicator_PassiveFingerprintCarriesSharedWatchKey",
+  "input": {
+    "bytes": "060003011c004201031c0022",
+    "qualifiers": {
+      "watch_observer": "none"
+    },
+    "clock": {
+      "base": "1970-01-01T00:00:00Z",
+      "release_offset_ns": 1351000000
+    },
+    "state": {
+      "initial_health": "healthy: constructed degraded, then forced healthy with an empty recovery record before the first event",
+      "submissions": [
+        {
+          "channel": "passive",
+          "discontinuity_reason": "",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "transaction",
+          "observed_offset_ns": 0,
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response": {
+            "data": "4201031c0022",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "15",
+            "target": "31"
+          }
+        }
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "discontinuity_reason": "",
+        "disposition": "observability_only",
+        "epoch": 1,
+        "event": {
+          "abandon_reason": "",
+          "ack_correlation": {
+            "byte": "00",
+            "complete_request": false,
+            "correlator": "",
+            "position": ""
+          },
+          "discontinuity_reason": "",
+          "error": "",
+          "frame_type": "initiator_target",
+          "has_request": true,
+          "has_response": true,
+          "kind": "transaction",
+          "observed_at": "1970-01-01T00:00:00Z",
+          "offending_symbol": "00",
+          "offending_was_escaped": false,
+          "request": {
+            "data": "060003011c00",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "31",
+            "target": "15"
+          },
+          "response": {
+            "data": "4201031c0022",
+            "primary": "b5",
+            "secondary": "24",
+            "source": "15",
+            "target": "31"
+          },
+          "timing": {
+            "request_end": "",
+            "request_start": "",
+            "response_end": "",
+            "response_start": "",
+            "terminal": ""
+          }
+        },
+        "event_kind": "transaction",
+        "family_policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B524",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "fingerprint": {
+          "outcome_class": "success",
+          "request": "3115b52406060003011c008a",
+          "response": "1531b524064201031c002291",
+          "response_class": "value_bearing",
+          "shared_watch_key": "b524:15:06:03:01:001c",
+          "source": "31",
+          "target": "15",
+          "transaction_class": "initiator_target"
+        },
+        "local_participant_inbound": false,
+        "matched_active_duplicate": false,
+        "observability_only": true,
+        "suppress_shadow": false,
+        "suppress_watch_efficiency": false,
+        "third_party_eligible": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "pending_before_release": 1
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "semantic_read_scheduler",
+  "source": "semantic_read_scheduler.go",
+  "stimulus": "TestSemanticReadScheduler_CircuitBreaker_DisabledWhenFailureBudgetZero",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "attempts": 3,
+      "failure_budget": 0,
+      "key": "k"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "attempt": 1,
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 1
+      },
+      {
+        "attempt": 2,
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 2
+      },
+      {
+        "attempt": 3,
+        "circuit_open": false,
+        "error": "read failed",
+        "fetch_calls": 3
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "fetch_calls": 3
+    }
+  }
+}

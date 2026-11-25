@@ -1,0 +1,29 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_family_policy",
+  "source": "observe_first_family_policy.go",
+  "stimulus": "TestObserveFirstFamilyPolicy_B555UsesConservativeRecordInvalidate",
+  "input": {
+    "bytes": "a301",
+    "qualifiers": {},
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "correlation_policy": "record_and_invalidate",
+        "direct_apply_policy": "never",
+        "effective_external_write_policy": "",
+        "family": "B555",
+        "request_intent": "read",
+        "response_class": "header_only",
+        "uses_runtime_external_write_policy": false
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

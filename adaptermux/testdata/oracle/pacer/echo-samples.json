@@ -1,0 +1,38 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/pacer.go",
+  "stimulus": "TestPacer_RecordEcho_FirstSampleUpdatesEMA/EMAConvergence/RejectsInvalidRtt",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "rtt_ns": [
+        -1000000,
+        0,
+        50000000
+      ],
+      "valid_samples": 100
+    },
+    "clock": {
+      "spacing_ns": 100000000,
+      "t0_unix": 1000000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "lrtt_after_100_ns": 50000000,
+        "lrtt_after_first_ns": 85000000,
+        "lrtt_initial_ns": 100000000,
+        "samples_after_invalid": 0
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "recorded_samples": 100
+    }
+  }
+}

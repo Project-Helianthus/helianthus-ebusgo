@@ -1,0 +1,183 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "observe_first_family_policy",
+  "source": "observe_first_family_policy.go",
+  "stimulus": "TestObserveFirstFamilyPolicy_B509DirectApplyRequiresMatchingActiveStateDescriptor",
+  "input": {
+    "bytes": "290200",
+    "qualifiers": {
+      "descriptors": [
+        {
+          "descriptor": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "state_default",
+            "key": "b509:08:0200",
+            "semantic_class": "state"
+          },
+          "has_descriptor": true,
+          "name": "state-default-admitted",
+          "observation_state": "active"
+        },
+        {
+          "descriptor": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "never",
+            "key": "b509:08:0200",
+            "semantic_class": "state"
+          },
+          "has_descriptor": true,
+          "name": "never-refused",
+          "observation_state": "active"
+        },
+        {
+          "descriptor": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "energy_merge_only",
+            "key": "b509:08:0200",
+            "semantic_class": "state"
+          },
+          "has_descriptor": true,
+          "name": "energy-merge-only-refused",
+          "observation_state": "active"
+        },
+        {
+          "descriptor": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "unknown",
+            "key": "b509:08:0200",
+            "semantic_class": "state"
+          },
+          "has_descriptor": true,
+          "name": "unknown-policy-refused",
+          "observation_state": "active"
+        },
+        {
+          "descriptor": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "config_opt_in",
+            "key": "b509:08:0200",
+            "semantic_class": "config"
+          },
+          "has_descriptor": true,
+          "name": "class-policy-mismatch-refused",
+          "observation_state": "active"
+        },
+        {
+          "descriptor": {
+            "correlation_policy": "request_response",
+            "direct_apply_policy": "state_default",
+            "key": "b509:08:0201",
+            "semantic_class": "state"
+          },
+          "has_descriptor": true,
+          "name": "key-mismatch-refused",
+          "observation_state": "active"
+        }
+      ],
+      "flags": "enabled state_direct config_direct record_only",
+      "request_key": "b509:08:0200",
+      "response_class": "value-bearing",
+      "scope": "passive"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "descriptor_direct_apply": "state_default",
+        "descriptor_key": "b509:08:0200",
+        "name": "state-default-admitted",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "state_default",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "semantic_class": "state"
+      },
+      {
+        "descriptor_direct_apply": "never",
+        "descriptor_key": "b509:08:0200",
+        "name": "never-refused",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "semantic_class": "state"
+      },
+      {
+        "descriptor_direct_apply": "energy_merge_only",
+        "descriptor_key": "b509:08:0200",
+        "name": "energy-merge-only-refused",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "semantic_class": "state"
+      },
+      {
+        "descriptor_direct_apply": "unknown",
+        "descriptor_key": "b509:08:0200",
+        "name": "unknown-policy-refused",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "semantic_class": "state"
+      },
+      {
+        "descriptor_direct_apply": "config_opt_in",
+        "descriptor_key": "b509:08:0200",
+        "name": "class-policy-mismatch-refused",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "semantic_class": "config"
+      },
+      {
+        "descriptor_direct_apply": "state_default",
+        "descriptor_key": "b509:08:0201",
+        "name": "key-mismatch-refused",
+        "policy": {
+          "correlation_policy": "request_response",
+          "direct_apply_policy": "never",
+          "effective_external_write_policy": "",
+          "family": "B509",
+          "request_intent": "read",
+          "response_class": "value_bearing",
+          "uses_runtime_external_write_policy": false
+        },
+        "semantic_class": "state"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

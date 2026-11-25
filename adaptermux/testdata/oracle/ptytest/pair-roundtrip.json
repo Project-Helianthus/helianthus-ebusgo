@@ -1,0 +1,69 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "ptytest",
+  "source": "internal/adaptermux/serial.go",
+  "stimulus": "TestSerialConn_ENSFramingPassesThrough and TestSerialConn_WritePassesThroughUnchanged",
+  "input": {
+    "bytes": "c480c481c482c483c484c485c486c487c488c489c48ac48bc48cc48dc48ec48fc490c491c492c493c494c495c496c497c498c499c49ac49bc49cc49dc49ec49fc4a0c4a1c4a2c4a3c4a4c4a5c4a6c4a7c4a8c4a9c4aac4abc4acc4adc4aec4afc4b0c4b1c4b2c4b3c4b4c4b5c4b6c4b7c4b8c4b9c4bac4bbc4bcc4bdc4bec4bfc580c581c582c583c584c585c586c587c588c589c58ac58bc58cc58dc58ec58fc590c591c592c593c594c595c596c597c598c599c59ac59bc59cc59dc59ec59fc5a0c5a1c5a2c5a3c5a4c5a5c5a6c5a7c5a8c5a9c5aac5abc5acc5adc5aec5afc5b0c5b1c5b2c5b3c5b4c5b5c5b6c5b7c5b8c5b9c5bac5bbc5bcc5bdc5bec5bfc680c681c682c683c684c685c686c687c688c689c68ac68bc68cc68dc68ec68fc690c691c692c693c694c695c696c697c698c699c69ac69bc69cc69dc69ec69fc6a0c6a1c6a2c6a3c6a4c6a5c6a6c6a7c6a8c6a9c6aac6abc6acc6adc6aec6afc6b0c6b1c6b2c6b3c6b4c6b5c6b6c6b7c6b8c6b9c6bac6bbc6bcc6bdc6bec6bfc780c781c782c783c784c785c786c787c788c789c78ac78bc78cc78dc78ec78fc790c791c792c793c794c795c796c797c798c799c79ac79bc79cc79dc79ec79fc7a0c7a1c7a2c7a3c7a4c7a5c7a6c7a7c7a8c7a9c7aac7abc7acc7adc7aec7afc7b0c7b1c7b2c7b3c7b4c7b5c7b6c7b7c7b8c7b9c7bac7bbc7bcc7bdc7bec7bf",
+    "qualifiers": {
+      "device": "synthetic-pty",
+      "ports": "poller, retry",
+      "protocol": "ens",
+      "receive": "every symbol 00..ff, each in one ENS RECEIVED frame written at the peer, read through the raw view",
+      "send": "payload 0a0d111303047f written through the ENS transport; peer reads the ENS SEND frames",
+      "send_wire": "c48ac48dc491c493c483c484c5bf"
+    },
+    "clock": {
+      "io_guard": "10s"
+    },
+    "state": {
+      "serial_setup": "openSerialConn (poller) and the retry port fixture of the pin; raw 8N1, no flow control"
+    }
+  },
+  "output": {
+    "symbols_written": [
+      "c48ac48dc491c493c483c484c5bf",
+      "c48ac48dc491c493c483c484c5bf"
+    ],
+    "decisions": [
+      {
+        "receive": [
+          {
+            "matches_stimulus": true,
+            "port": "poller",
+            "symbols": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+          },
+          {
+            "matches_stimulus": true,
+            "port": "retry",
+            "symbols": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+          }
+        ],
+        "send": [
+          {
+            "matches_stimulus": true,
+            "peer_read": "c48ac48dc491c493c483c484c5bf",
+            "port": "poller"
+          },
+          {
+            "matches_stimulus": true,
+            "peer_read": "c48ac48dc491c493c483c484c5bf",
+            "port": "retry"
+          }
+        ]
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "receive_symbols": {
+        "poller": 256,
+        "retry": 256
+      },
+      "send_frames": {
+        "poller": 7,
+        "retry": 7
+      }
+    }
+  }
+}

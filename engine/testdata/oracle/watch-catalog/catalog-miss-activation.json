@@ -1,0 +1,25 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchActivationSetRejectsCatalogMissActivation",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "canonical": "b524:15:06:03:00:0022"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "watch activation key \"b524:15:06:03:00:0022\" missing from catalog"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

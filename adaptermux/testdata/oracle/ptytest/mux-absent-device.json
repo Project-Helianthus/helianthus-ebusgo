@@ -1,0 +1,26 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "ptytest",
+  "source": "internal/adaptermux/serial.go",
+  "stimulus": "TestMuxSerial_StartReportsAnAbsentDevice",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "device": "absent",
+      "protocol": "ens"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "enoent": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

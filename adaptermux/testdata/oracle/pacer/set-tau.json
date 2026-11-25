@@ -1,0 +1,36 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "v8classifier",
+  "source": "internal/adaptermux/v8classifier/pacer.go",
+  "stimulus": "TestPacer_SetTau_RejectsInvalid",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "tau_ns": [
+        5000000,
+        0,
+        -1000000000
+      ]
+    },
+    "clock": {
+      "t0_unix": 1000000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "accepted": [
+          true,
+          false,
+          false
+        ],
+        "second_emit_ns": 5000000
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

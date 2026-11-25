@@ -1,0 +1,47 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27LeasesAdvanceStrictlyAndExpireOnInjectedTime/tx-active lease",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "sequence": 1,
+      "tx_active": true
+    },
+    "clock": {
+      "lease_interval_ns": 100000000,
+      "lease_ttl_ns": 1000000000,
+      "ready_timeout_ns": 5000000000,
+      "start": "1970-01-01T00:16:40Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "is_not_passive": true,
+        "lease_error": "localworkerhost: worker is not passive with TX inactive"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "status": {
+        "cancelled": 0,
+        "generation": {
+          "registration": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        },
+        "launches": 1,
+        "pending": 0,
+        "plans": 0,
+        "reason": "localworkerhost: worker is not passive with TX inactive",
+        "state": "fenced"
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "active_passive_deduplicator",
+  "source": "active_passive_deduplicator.go",
+  "stimulus": "TestActivePassiveDeduplicator_DefaultBudgetsStayFrozenToM1Envelope",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "config": "DefaultConfig"
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "active_fingerprint_retention_ns": 1750000000,
+      "active_publish_budget_ns": 1000000000,
+      "logical_request_envelope_ns": 750000000,
+      "pending_capacity": 256,
+      "pending_grace_timeout_ns": 1250000000
+    }
+  }
+}

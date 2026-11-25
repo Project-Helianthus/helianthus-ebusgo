@@ -1,0 +1,48 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "shadow_cache",
+  "source": "shadow_cache.go",
+  "stimulus": "TestShadowCachePrecedenceRejectsOlderActiveConfirmedWrite",
+  "input": {
+    "bytes": "20",
+    "qualifiers": {
+      "canonical": "b524:15:06:03:00:001c",
+      "rejected_value": "21"
+    },
+    "clock": {
+      "kept": "1970-01-01T00:02:00Z",
+      "rejected": "1970-01-01T00:01:59Z"
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "accepted": false,
+        "generation": 1,
+        "reason": "stale_timestamp"
+      }
+    ],
+    "cache": {
+      "entry": {
+        "confidence": "high_confidence",
+        "expires_at": "1970-01-01T00:02:30Z",
+        "generation": 1,
+        "invalidated_at": "",
+        "invalidation_generation": 0,
+        "invalidation_reason": "",
+        "invalidation_source": "",
+        "last_write_generation": 1,
+        "observed_at": "1970-01-01T00:02:00Z",
+        "pinned": true,
+        "present": true,
+        "source": "passive",
+        "state": "present",
+        "value": "20"
+      }
+    },
+    "observations": [],
+    "counters": {}
+  }
+}

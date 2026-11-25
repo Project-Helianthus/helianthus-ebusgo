@@ -1,0 +1,35 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchDescriptorRejectsNonCanonicalProgramB555SelectorBytes",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "canonical": "b555:15:a4:02:00:ff:ff:raw:0:06:0:03",
+      "selector": {
+        "has_slot": false,
+        "has_weekday": false,
+        "hc": "00",
+        "opcode": "a4",
+        "slot": "03",
+        "target": "15",
+        "weekday": "06",
+        "zone": "02"
+      }
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "watch descriptor \"b555:15:a4:02:00:ff:ff:raw:0:06:0:03\" program selectors must keep raw weekday/slot zero when unset"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

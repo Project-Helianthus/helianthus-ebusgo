@@ -1,0 +1,69 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27NewRejectsInvalidConfiguration/zero-build",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "mutation": "zero-build"
+    },
+    "clock": {
+      "now": "1970-01-01T00:16:40Z"
+    },
+    "state": {
+      "config": {
+        "base_env": [
+          "PATH=/usr/bin",
+          "GOGC=50",
+          "GOMEMLIMIT=2GiB",
+          "GODEBUG=madvdontneed=1",
+          "GOMAXPROCS=4",
+          "LANG=C"
+        ],
+        "descriptors": [
+          {
+            "role": 1,
+            "size": 152
+          },
+          {
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "executable": "/opt/gateway/bin/gateway",
+        "has_allocator": true,
+        "has_clock": true,
+        "has_launcher": true,
+        "kill_grace_ns": 2000000000,
+        "lease_interval_ns": 100000000,
+        "lease_ttl_ns": 1000000000,
+        "process_args": [
+          "/opt/gateway/bin/gateway",
+          "-matter-library-enabled=true"
+        ],
+        "ready_timeout_ns": 5000000000,
+        "runtime_gc": "off",
+        "runtime_memory": "64MiB",
+        "self": {
+          "abi": 1,
+          "build_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+          "executable_hex": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb"
+        },
+        "stop_grace_ns": 1000000000
+      }
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "localworkerhost: invalid supervisor configuration",
+        "is_config": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

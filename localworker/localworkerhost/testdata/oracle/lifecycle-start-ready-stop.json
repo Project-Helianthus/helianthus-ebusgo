@@ -1,0 +1,94 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27StartLaunchesExplicitArgvEnvironmentAndFixedDescriptors",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "executable": "/opt/gateway/bin/gateway"
+    },
+    "clock": {
+      "now": "1970-01-01T00:16:40Z"
+    },
+    "state": {
+      "lease_ms": 100
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "argv": [
+          "/opt/gateway/bin/gateway",
+          "--internal-ebus-local-worker",
+          "build=501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+          "executable=59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+          "abi=1",
+          "worker=1",
+          "stream=1",
+          "registration=1",
+          "token=1",
+          "control=152",
+          "mapping=4096",
+          "gc=off",
+          "memlimit=64MiB",
+          "lease-ms=100"
+        ],
+        "build_hex": "501c4dcb1189bfeb46969cabdf06db4b61e2d5bc3e1143b6289ad655ce4e4650",
+        "env": [
+          "PATH=/usr/bin",
+          "LANG=C",
+          "GOGC=off",
+          "GOMEMLIMIT=64MiB"
+        ],
+        "executable_hex": "59fbfa9b24a9d9589c48402c2d91d43992b9741b5e0c1694054512d831b06abb",
+        "files": [
+          {
+            "role": 1,
+            "size": 152
+          },
+          {
+            "role": 2,
+            "size": 4096
+          }
+        ],
+        "generation": {
+          "registration": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        },
+        "identity_matches": true,
+        "lease_ms": 100,
+        "parse_error": "",
+        "path": "/opt/gateway/bin/gateway",
+        "runtime_gc": "off",
+        "runtime_memory": "64MiB",
+        "spec_generation": {
+          "registration": 1,
+          "stream": 1,
+          "token": 1,
+          "worker": 1
+        }
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {
+      "closed": [
+        {
+          "closes": 1,
+          "role": 1,
+          "size": 152
+        },
+        {
+          "closes": 1,
+          "role": 2,
+          "size": 4096
+        }
+      ],
+      "state_after_stop": "stopped"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27StopEscalatesAndAnUnreapedChildBlocksEveryStart/kill after cancelled context",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "context": "cancelled",
+      "exit_on_kill": true,
+      "exit_on_stop": false
+    },
+    "clock": {
+      "kill_grace_ns": 2000000000,
+      "stop_grace_ns": 1000000000
+    },
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "kills": 1,
+        "status": {
+          "cancelled": 0,
+          "generation": {
+            "registration": 1,
+            "stream": 1,
+            "token": 1,
+            "worker": 1
+          },
+          "launches": 1,
+          "pending": 0,
+          "plans": 0,
+          "reason": "localworkerhost: worker stopped by the supervisor",
+          "state": "stopped"
+        },
+        "stop_error": ""
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

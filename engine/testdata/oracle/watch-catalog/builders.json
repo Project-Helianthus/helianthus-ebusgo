@@ -1,0 +1,61 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestWatchKeyBuildersRemainStable",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "calls": [
+        {
+          "builder": "b516",
+          "function": "NewB516WatchKey",
+          "period": "01",
+          "source": "02",
+          "target": "15",
+          "usage": "03"
+        },
+        {
+          "builder": "b555-program",
+          "function": "NewB555ProgramWatchKey",
+          "hc": "00",
+          "opcode": "a4",
+          "target": "15",
+          "zone": "02"
+        },
+        {
+          "builder": "b555",
+          "function": "NewB555WatchKey",
+          "hc": "00",
+          "opcode": "a5",
+          "slot": "03",
+          "target": "15",
+          "weekday": "06",
+          "zone": "02"
+        }
+      ]
+    },
+    "clock": {},
+    "state": {}
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "builder": "b516",
+        "canonical": "b516:15:01:02:03"
+      },
+      {
+        "builder": "b555-program",
+        "canonical": "b555:15:a4:02:00:ff:ff"
+      },
+      {
+        "builder": "b555",
+        "canonical": "b555:15:a5:02:00:06:03"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

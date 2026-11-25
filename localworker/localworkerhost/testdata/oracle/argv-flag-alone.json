@@ -1,0 +1,30 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "localworkerhost",
+  "source": "internal/localworkerhost/supervisor.go",
+  "stimulus": "TestAA27ParseChildArgvAcceptsOnlyTheExactPlan/flag-alone",
+  "input": {
+    "bytes": "",
+    "qualifiers": {
+      "mutation": "flag-alone"
+    },
+    "clock": {},
+    "state": {
+      "argc": 1,
+      "args": [
+        "--internal-ebus-local-worker"
+      ]
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "error": "localworkerhost: malformed worker argv"
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}

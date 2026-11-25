@@ -1,0 +1,28 @@
+{
+  "format": "helianthus-oracle-bt01-case/1",
+  "component": "watch_catalog",
+  "source": "watch_catalog.go",
+  "stimulus": "TestNewWatchCatalogClonesSupportedPointerWatchKeys",
+  "input": {
+    "bytes": "",
+    "qualifiers": {},
+    "clock": {},
+    "state": {
+      "mutated_register": "0022",
+      "original": "b524:15:06:01:00:0005"
+    }
+  },
+  "output": {
+    "symbols_written": [],
+    "decisions": [
+      {
+        "found": true,
+        "stored": "b524:15:06:01:00:0005",
+        "unchanged": true
+      }
+    ],
+    "cache": {},
+    "observations": [],
+    "counters": {}
+  }
+}
